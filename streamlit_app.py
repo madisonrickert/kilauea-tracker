@@ -594,34 +594,72 @@ with col3:
 # Eruption lifecycle status banner
 # ─────────────────────────────────────────────────────────────────────────────
 
+# When the banner is "active" or "starting" we tuck a small live webcam
+# thumbnail next to the alert text — V1cam looks straight at the west wall
+# of Halemaʻumaʻu, where the recent fountain events have been venting.
+_BANNER_WEBCAM_URL = (
+    "https://volcanoes.usgs.gov/observatories/hvo/cams/V1cam/images/M.jpg"
+)
+_BANNER_WEBCAM_CAPTION = "USGS V1cam · Halemaʻumaʻu west wall · live"
+
+
+def _render_alert_with_webcam(render_alert) -> None:
+    """Render the alert in a left column and the V1cam thumbnail on the right.
+
+    `render_alert` is a no-arg callable that emits the alert (`st.error` or
+    `st.warning`). The webcam image is loaded fresh from USGS on each
+    rerun, so the thumbnail in the banner stays as live as the rest of the
+    USGS source plots panel below.
+    """
+    col_text, col_img = st.columns([4, 1])
+    with col_text:
+        render_alert()
+    with col_img:
+        try:
+            st.image(_BANNER_WEBCAM_URL, caption=_BANNER_WEBCAM_CAPTION)
+        except Exception:
+            # If the webcam fails to load, the alert still renders cleanly.
+            pass
+
+
 if eruption_state == "active":
     slope = eruption_state_info.get("recent_slope_microrad_per_hour")
     drop = eruption_state_info.get("drop_from_24h_max")
-    st.error(
-        f"### 🔴 Eruption active right now\n\n"
-        f"Tilt is dropping at **{slope:+.2f} µrad/hour** "
-        f"(**{drop:.1f} µrad** below the 24-hour max). The deflation "
-        f"signature of a fountain event is unmistakable in the live data — "
-        f"check the [USGS webcams]"
-        f"(https://www.usgs.gov/volcanoes/kilauea/summit-webcams) for the "
-        f"visual."
-    )
+
+    def _active_alert() -> None:
+        st.error(
+            f"### 🔴 Eruption active right now\n\n"
+            f"Tilt is dropping at **{slope:+.2f} µrad/hour** "
+            f"(**{drop:.1f} µrad** below the 24-hour max). The deflation "
+            f"signature of a fountain event is unmistakable in the live data — "
+            f"the live webcam alongside should be lighting up. More feeds at "
+            f"the [USGS webcams page]"
+            f"(https://www.usgs.gov/volcanoes/kilauea/summit-webcams)."
+        )
+
+    _render_alert_with_webcam(_active_alert)
 elif eruption_state == "starting":
     short_slope = eruption_state_info.get("short_slope_microrad_per_hour")
     long_slope = eruption_state_info.get("long_slope_microrad_per_hour")
     drop = eruption_state_info.get("drop_from_24h_max") or 0.0
-    st.warning(
-        f"### 🟠 Possible deflation onset — watching\n\n"
-        f"Tilt slope has steepened to **{short_slope:+.2f} µrad/hour** over "
-        f"the last 30 minutes, up from **{long_slope:+.2f} µrad/hour** over "
-        f"the last 6 hours (drop from 24h max: **{drop:.2f} µrad**). This "
-        f"is consistent with the very early stages of a fountain event, "
-        f"but the signal is small enough that it could also be a brief "
-        f"pressure release that doesn't develop into a full eruption. "
-        f"The status will escalate to *Eruption active* if the deflation "
-        f"continues. Worth checking the "
-        f"[USGS webcams](https://www.usgs.gov/volcanoes/kilauea/summit-webcams)."
-    )
+
+    def _starting_alert() -> None:
+        st.warning(
+            f"### 🟠 Possible deflation onset — watching\n\n"
+            f"Tilt slope has steepened to **{short_slope:+.2f} µrad/hour** over "
+            f"the last 30 minutes, up from **{long_slope:+.2f} µrad/hour** over "
+            f"the last 6 hours (drop from 24h max: **{drop:.2f} µrad**). This "
+            f"is consistent with the very early stages of a fountain event, "
+            f"but the signal is small enough that it could also be a brief "
+            f"pressure release that doesn't develop into a full eruption. "
+            f"The status will escalate to *Eruption active* if the deflation "
+            f"continues. The live webcam alongside is the best place to "
+            f"corroborate visually — more feeds at the "
+            f"[USGS webcams page]"
+            f"(https://www.usgs.gov/volcanoes/kilauea/summit-webcams)."
+        )
+
+    _render_alert_with_webcam(_starting_alert)
 elif eruption_state == "imminent":
     band = prediction.confidence_band
     if band is not None:
