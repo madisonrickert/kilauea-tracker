@@ -32,10 +32,12 @@ render the chart.
   new samples into a local history CSV with conflict detection.
 - **Digital tiltmeter ingest** — pre-processed CSV from USGS's research-release
   digital tiltmeter export (Jan–Jun 2025, 1-minute samples). Resampled to
-  30-minute means and split by instrument relevelings; the ingest pipeline
-  aligns each releveling-bounded segment independently against the cache.
-  Gives us ~30× denser coverage of the early 2025 period than any image trace
-  could provide.
+  30-minute means and split by instrument relevelings. Gives us ~30× denser
+  coverage of the early 2025 period than any image trace could provide, and
+  the reconciliation layer uses it as the global y-frame anchor for every
+  other source. Source: [USGS ScienceBase release][digital-data].
+
+[digital-data]: https://www.sciencebase.gov/catalog/item/67ead922d34ed02007f83585
 - **Cross-source alignment** — each new trace is shifted by the median bucket-
   level delta against the existing cache before merging, so the systematic
   ~5–7 µrad y-offsets between captures don't introduce step jumps in the

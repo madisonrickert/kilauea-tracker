@@ -5,6 +5,10 @@ LILY borehole tiltmeter for Jan–Jun 2025. They are *much* more accurate
 than anything we trace out of the USGS plot images, but they are NOT live —
 USGS publishes them as a one-time research release.
 
+Data source (please cite if you republish):
+    USGS ScienceBase, item 67ead922d34ed02007f83585
+    https://www.sciencebase.gov/catalog/item/67ead922d34ed02007f83585
+
 This script:
   1. Reads the 6 segment CSVs (file boundaries are at instrument relevelings).
   2. Projects raw (X, Y) onto compass azimuth 300° to match the convention

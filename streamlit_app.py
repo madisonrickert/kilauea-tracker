@@ -679,10 +679,11 @@ with st.expander("🛰 USGS source plots"):
         "- **`digital`** &nbsp;·&nbsp; raw 1-minute samples of (X, Y) "
         "tilt from the UWD LILY borehole tiltmeter, projected onto "
         "azimuth 300° and resampled to 30-min means. Covers **Jan–Jun "
-        "2025** in 6 segments split at instrument relevelings. Provided "
-        "by USGS HVO as a one-time research release; processed locally "
-        "by `scripts/import_digital_data.py`. Used as the global "
-        "y-frame anchor for all other sources."
+        "2025** in 6 segments split at instrument relevelings. Used as "
+        "the global y-frame anchor for all other sources. Processed "
+        "locally by `scripts/import_digital_data.py`. Source: "
+        "[USGS ScienceBase research release]"
+        "(https://www.sciencebase.gov/catalog/item/67ead922d34ed02007f83585)."
     )
     st.caption(
         "ℹ️ A `legacy` hand-traced PlotDigitizer CSV from the v1 "
