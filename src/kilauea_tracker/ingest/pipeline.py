@@ -29,7 +29,6 @@ from typing import Optional
 
 import cv2
 import numpy as np
-import pandas as pd
 
 from ..cache import AppendReport, append_history
 from ..config import (

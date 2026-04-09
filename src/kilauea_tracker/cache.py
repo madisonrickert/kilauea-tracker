@@ -116,6 +116,18 @@ def append_history(
                 }
             )
 
+    # Compute the bucket-level diff BEFORE deduplication so the report
+    # numbers reflect what the user actually cares about: how many new
+    # 15-minute buckets appeared, vs. how many existing buckets got
+    # overwritten by a fresh re-trace. The previous formulation
+    # (`len(deduped) - len(existing)`) overcounted in the presence of
+    # intra-batch dedupes — multiple new rows landing in the same bucket
+    # were each counted as if they had survived.
+    existing_buckets = set(combined.loc[combined["_source"] == "existing", "_bucket"])
+    new_buckets = set(combined.loc[combined["_source"] == "new", "_bucket"])
+    report.rows_added = len(new_buckets - existing_buckets)
+    report.rows_updated = len(new_buckets & existing_buckets)
+
     # Sort by Date so `keep="last"` keeps the most recently-arriving row per
     # bucket. We push existing rows first by leveraging the concat order plus
     # a stable sort.
@@ -123,10 +135,6 @@ def append_history(
     deduped = combined.drop_duplicates(subset="_bucket", keep="last")
     deduped = deduped.drop(columns=["_bucket", "_source"])
     deduped = deduped.sort_values(DATE_COL).reset_index(drop=True)
-
-    report.rows_added = max(0, len(deduped) - len(existing))
-    # Updated = bucket overlaps where the kept row came from "new"
-    report.rows_updated = len(new_rows) - report.rows_added
 
     path.parent.mkdir(parents=True, exist_ok=True)
     deduped.to_csv(path, index=False)

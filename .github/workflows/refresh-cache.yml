@@ -14,11 +14,11 @@ name: Refresh tilt cache
 
 on:
   schedule:
-    # At minute 7 every 4 hours (UTC). 6 runs per day. The minute offset
-    # avoids the top-of-hour spike when GitHub Actions cron contention is
-    # highest. GitHub does not guarantee exact timing — actual runs can be
-    # delayed by 5-15 minutes during high-load periods.
-    - cron: "7 */4 * * *"
+    # Daily at 12:07 UTC = 02:07 HST (2 AM Hawaii). The minute offset avoids
+    # the top-of-hour cron contention spike on the Actions runners. GitHub
+    # does not guarantee exact timing — actual runs can be delayed by 5-15
+    # minutes during high-load periods.
+    - cron: "7 12 * * *"
   # Manual trigger for testing or on-demand refresh.
   workflow_dispatch:
 
@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           # Fetch the full history so `git pull --rebase` before push has
           # something to rebase against if main moved while we ran.
@@ -52,7 +52,7 @@ jobs:
           sudo apt-get install -y tesseract-ocr libgl1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v8
         with:
           python-version: "3.11"
           enable-cache: true

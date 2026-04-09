@@ -1,5 +1,12 @@
 # 🌋 Kīlauea Fountain Event Tracker
 
+[![Refresh tilt cache](https://github.com/madisonrickert/kilauea-tracker/actions/workflows/refresh-cache.yml/badge.svg)](https://github.com/madisonrickert/kilauea-tracker/actions/workflows/refresh-cache.yml)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://kilauea-tracker.streamlit.app/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
+
+**Live app:** <https://kilauea-tracker.streamlit.app/>
+
 Predicts the next eruption pulse at Kīlauea by tracing tilt data straight from
 USGS plot images and fitting an exponential saturation curve against the recent
 peak trendline. Built as an interactive Streamlit app — non-technical viewers
@@ -30,7 +37,11 @@ render the chart.
   confidence band — no hardcoded axis limits.
 - **Conditional fetching** with `If-Modified-Since` headers, so refresh
   doesn't hammer USGS.
-- **41 tests** covering the model, peaks, cache, plotting, calibration,
+- **Self-watering cache** — a daily GitHub Actions cron runs the ingest
+  pipeline and commits the freshened `data/tilt_history.csv` back to `main`,
+  triggering a Streamlit Cloud redeploy. First-time viewers always see
+  recent data even if no one's clicked Refresh in a while.
+- **42 tests** covering the model, peaks, cache, plotting, calibration,
   and trace modules.
 
 ## Run locally
@@ -141,7 +152,7 @@ plot images. v2.0 traces the curves directly out of the PNGs.
 uv run pytest
 ```
 
-Coverage: 41 tests across model, peaks, cache, plotting, calibration,
+Coverage: 42 tests across model, peaks, cache, plotting, calibration,
 trace, and ingest pipeline modules.
 
 ## License

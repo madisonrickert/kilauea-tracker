@@ -136,7 +136,6 @@ def test_synthetic_dense_series_finds_planted_peaks():
     base = pd.Timestamp("2026-01-01")
     n = 24 * 12 * 60  # 60 days at 12 samples/hour (5-minute spacing)
     times = pd.date_range(base, periods=n, freq="5min")
-    t = np.arange(n)
     # baseline at 2 µrad with 3 prominent humps spaced 20 days apart
     y = 2.0 + np.zeros(n)
     for hump_day in [10, 30, 50]:

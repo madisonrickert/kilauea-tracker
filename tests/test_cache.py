@@ -10,7 +10,6 @@ Cover the cases that matter:
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -22,7 +21,6 @@ from kilauea_tracker.cache import (
     append_history,
     load_history,
 )
-from kilauea_tracker.config import LEGACY_CSV
 from kilauea_tracker.model import DATE_COL, TILT_COL
 
 
@@ -175,6 +173,48 @@ def test_append_to_nonexistent_creates_history(tmp_path: Path, monkeypatch):
     assert report.rows_added == 2
     df = load_history(history_csv)
     assert len(df) == 2
+
+
+def test_append_report_correct_with_intra_batch_dedupe(tmp_history: Path):
+    """Regression for an overcount bug in the rows_added/rows_updated maths.
+
+    Setup: existing has 1 row in bucket A. New batch has 3 rows in bucket A
+    (intra-batch dedupe — only the last survives) plus 2 rows in fresh
+    buckets B and C. After dedupe the cache has 3 rows total: the new B, the
+    new C, and the new A row that displaced the existing A.
+
+    Expected report: rows_added=2 (B and C are new buckets), rows_updated=1
+    (A was an existing bucket whose row got overwritten). Pre-fix arithmetic
+    (`len(new_rows) - rows_added`) gave rows_updated = 5 - 2 = 3, which
+    overcounted by 2 because it conflated intra-batch dedupes with updates.
+    """
+    # All three timestamps below are within ±7.5 minutes of 00:00, so they
+    # all round to the same 15-minute bucket as the existing row.
+    _seed(tmp_history, ["2026-01-01 00:00:00"], [9.0])
+    new = pd.DataFrame(
+        {
+            DATE_COL: pd.to_datetime(
+                [
+                    "2026-01-01 00:01:00",  # bucket A — intra-batch (loses)
+                    "2026-01-01 00:03:00",  # bucket A — intra-batch (loses)
+                    "2026-01-01 00:07:00",  # bucket A — survives, displaces existing
+                    "2026-02-01 00:00:00",  # bucket B — new
+                    "2026-03-01 00:00:00",  # bucket C — new
+                ]
+            ),
+            TILT_COL: [10.0, 10.1, 10.2, 11.0, 12.0],
+        }
+    )
+    report = append_history(new, tmp_history)
+    assert report.rows_added == 2, f"expected 2 added, got {report.rows_added}"
+    assert report.rows_updated == 1, f"expected 1 updated, got {report.rows_updated}"
+
+    df = load_history(tmp_history)
+    assert len(df) == 3
+    # Bucket A's surviving row is the latest one (10.2), not 10.0 or 10.1
+    a_row = df[df[DATE_COL] < pd.Timestamp("2026-02-01")]
+    assert len(a_row) == 1
+    assert a_row[TILT_COL].iloc[0] == 10.2
 
 
 def test_history_stays_sorted_after_append(tmp_history: Path):
