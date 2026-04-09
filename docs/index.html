@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+
+  <!--
+    GitHub Pages landing page for the Kīlauea Fountain Event Tracker.
+
+    Why this file exists: Streamlit Cloud doesn't let us inject custom
+    Open Graph / Twitter Card <meta> tags into the served HTML head, and
+    social-media crawlers (LinkedIn, Facebook, Twitter, Slack) don't run
+    JavaScript — so they would otherwise see Streamlit Cloud's generic
+    default preview when our app URL is shared.
+
+    The workaround: host THIS file as a static page on GitHub Pages
+    (Settings → Pages → source = main branch / docs folder), then share
+    the GitHub Pages URL on social media. Crawlers scrape this file,
+    pick up the OG tags, and render the rich preview with our screenshot.
+    Human visitors get instantly redirected to the live Streamlit app
+    via the meta-refresh below and never see this page.
+
+    Public URL after enabling Pages:
+        https://madisonrickert.github.io/kilauea-tracker/
+    Direct app URL (also works):
+        https://kilauea-tracker.streamlit.app/
+  -->
+
+  <title>Kīlauea Fountain Event Tracker</title>
+
+  <!-- Open Graph (Facebook, LinkedIn, Slack, Discord, …) -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://kilauea-tracker.streamlit.app/">
+  <meta property="og:title" content="Kīlauea Fountain Event Tracker">
+  <meta property="og:description" content="Live tilt-based predictions for Kīlauea's next eruption pulse. Traces USGS tilt plots, runs an exponential-saturation model on the current episode, and detects active deflation in real time. Built in Python with Streamlit.">
+  <meta property="og:image" content="https://madisonrickert.github.io/kilauea-tracker/screenshot.png">
+  <meta property="og:image:width" content="3200">
+  <meta property="og:image:height" content="2600">
+  <meta property="og:image:alt" content="Screenshot of the Kīlauea Fountain Event Tracker dashboard showing the live tilt chart, model and interval-based predictions, and an eruption status banner.">
+  <meta property="og:site_name" content="Kīlauea Fountain Event Tracker">
+
+  <!-- Twitter / X -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Kīlauea Fountain Event Tracker">
+  <meta name="twitter:description" content="Live tilt-based predictions for Kīlauea's next eruption pulse, with real-time deflation detection.">
+  <meta name="twitter:image" content="https://madisonrickert.github.io/kilauea-tracker/screenshot.png">
+  <meta name="twitter:image:alt" content="Screenshot of the Kīlauea Fountain Event Tracker dashboard.">
+
+  <!-- Generic -->
+  <meta name="description" content="Live tilt-based predictions for Kīlauea's next eruption pulse. Traces USGS tilt plots, runs an exponential-saturation model on the current episode, and detects active deflation in real time.">
+  <meta name="author" content="Madison Rickert">
+  <link rel="canonical" href="https://kilauea-tracker.streamlit.app/">
+
+  <!-- Redirect humans straight to the live app. Crawlers stop here and read
+       the meta tags above; humans never see this page. -->
+  <meta http-equiv="refresh" content="0; url=https://kilauea-tracker.streamlit.app/">
+
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: #0e1117;
+      color: #fafafa;
+      max-width: 640px;
+      margin: 4rem auto;
+      padding: 0 1.5rem;
+      line-height: 1.5;
+    }
+    a { color: #ff6b35; }
+    h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+    p { color: #c0c0c0; }
+    img { max-width: 100%; border-radius: 8px; margin-top: 1.5rem; }
+  </style>
+</head>
+<body>
+  <h1>🌋 Kīlauea Fountain Event Tracker</h1>
+  <p>
+    Redirecting to the live dashboard at
+    <a href="https://kilauea-tracker.streamlit.app/">kilauea-tracker.streamlit.app</a>…
+  </p>
+  <p>
+    If your browser doesn't redirect automatically, click the link above.
+  </p>
+  <img src="screenshot.png" alt="Screenshot of the Kīlauea Fountain Event Tracker dashboard">
+</body>
+</html>
