@@ -287,8 +287,24 @@ _ACTIVE_DEFLATION_SLOPE_MICRORAD_PER_HOUR = -0.5
 _ACTIVE_DEFLATION_MIN_DROP_MICRORAD = 2.0
 # How far back to look for the recent peak when checking the drop.
 _ACTIVE_DEFLATION_LOOKBACK_HOURS = 24
-# How many of the trailing samples feed the slope fit.
+# How many of the trailing samples feed the active-state slope fit.
 _RECENT_SLOPE_WINDOW_HOURS = 3.0
+
+# "Starting" state thresholds — fires when something MIGHT be happening but
+# we can't yet confirm a fountain event. The state is intentionally hedged:
+# the banner will say "possible deflation onset" rather than declaring an
+# eruption. Real episode 44 telemetry: at the moment USGS officially
+# announced the eruption (T+0), the 0.5h slope was -0.21 µrad/h while the
+# 6h slope was -0.015 µrad/h — i.e. the slope had just steepened ~13×.
+# That ratio is the smoking gun for an early deflation; the absolute slope
+# is still well under the active threshold.
+_STARTING_SHORT_WINDOW_HOURS = 0.5
+_STARTING_LONG_WINDOW_HOURS = 6.0
+_STARTING_SHORT_SLOPE_MAX = -0.15  # short-window slope must be steeper than this
+# Short-window slope must be at least this much MORE NEGATIVE than the
+# long-window slope. Catches "the slope just steepened" without firing
+# whenever both windows happen to be quietly negative.
+_STARTING_SLOPE_ACCELERATION_MICRORAD_PER_HOUR = 0.10
 
 
 def _recent_slope_microrad_per_hour(df: pd.DataFrame, hours: float) -> float | None:
@@ -335,19 +351,31 @@ def _eruption_state(
     """Classify the current point in the eruption lifecycle.
 
     Returns `(state, info)` where state is one of:
-        "active"   — sharp negative slope right now → eruption happening
+        "active"   — sharp sustained negative slope → eruption confirmed
+        "starting" — short-window slope has steepened relative to a longer
+                     window, suggesting deflation may be beginning. The
+                     classification is intentionally hedged because tilt
+                     can also dip briefly without a fountain following.
         "imminent" — current time is inside the predicted confidence band
         "overdue"  — current time is past the high end of the band
         "calm"     — none of the above; building toward the next eruption
 
-    `info` carries the diagnostics that fed the classification (slope,
+    `info` carries the diagnostics that fed the classification (slopes,
     drop, predicted dates) so the banner can quote them.
     """
     info: dict = {}
 
     slope = _recent_slope_microrad_per_hour(tilt_df, _RECENT_SLOPE_WINDOW_HOURS)
+    short_slope = _recent_slope_microrad_per_hour(
+        tilt_df, _STARTING_SHORT_WINDOW_HOURS
+    )
+    long_slope = _recent_slope_microrad_per_hour(
+        tilt_df, _STARTING_LONG_WINDOW_HOURS
+    )
     drop = _drop_from_recent_max(tilt_df, _ACTIVE_DEFLATION_LOOKBACK_HOURS)
     info["recent_slope_microrad_per_hour"] = slope
+    info["short_slope_microrad_per_hour"] = short_slope
+    info["long_slope_microrad_per_hour"] = long_slope
     info["drop_from_24h_max"] = drop
 
     if (
@@ -357,6 +385,19 @@ def _eruption_state(
         and drop > _ACTIVE_DEFLATION_MIN_DROP_MICRORAD
     ):
         return "active", info
+
+    # Possible early deflation onset: short-window slope is meaningfully
+    # negative AND meaningfully steeper than the longer-window slope. Both
+    # conditions are needed — the short slope alone is too noisy, and the
+    # acceleration alone fires when both windows are quietly positive.
+    if (
+        short_slope is not None
+        and long_slope is not None
+        and short_slope < _STARTING_SHORT_SLOPE_MAX
+        and (long_slope - short_slope)
+        > _STARTING_SLOPE_ACCELERATION_MICRORAD_PER_HOUR
+    ):
+        return "starting", info
 
     # Anything below depends on having a prediction at all
     band = prediction.confidence_band if prediction is not None else None
@@ -551,6 +592,22 @@ if eruption_state == "active":
         f"check the [USGS webcams]"
         f"(https://www.usgs.gov/volcanoes/kilauea/summit-webcams) for the "
         f"visual."
+    )
+elif eruption_state == "starting":
+    short_slope = eruption_state_info.get("short_slope_microrad_per_hour")
+    long_slope = eruption_state_info.get("long_slope_microrad_per_hour")
+    drop = eruption_state_info.get("drop_from_24h_max") or 0.0
+    st.warning(
+        f"### 🟠 Possible deflation onset — watching\n\n"
+        f"Tilt slope has steepened to **{short_slope:+.2f} µrad/hour** over "
+        f"the last 30 minutes, up from **{long_slope:+.2f} µrad/hour** over "
+        f"the last 6 hours (drop from 24h max: **{drop:.2f} µrad**). This "
+        f"is consistent with the very early stages of a fountain event, "
+        f"but the signal is small enough that it could also be a brief "
+        f"pressure release that doesn't develop into a full eruption. "
+        f"The status will escalate to *Eruption active* if the deflation "
+        f"continues. Worth checking the "
+        f"[USGS webcams](https://www.usgs.gov/volcanoes/kilauea/summit-webcams)."
     )
 elif eruption_state == "imminent":
     band = prediction.confidence_band
