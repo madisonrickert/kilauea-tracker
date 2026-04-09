@@ -23,6 +23,7 @@ import math
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -270,6 +271,128 @@ prediction = predict(tilt_df, recent_peaks)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Eruption lifecycle state — drives the status banner above the chart
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# Slope thresholds for the "active deflation" detection.
+# A typical fountain event drops 10-30 µrad over 6-14 hours = -1 to -3 µrad/h.
+# Background noise is well under 0.1 µrad/h. -0.5 µrad/h is a comfortable
+# midpoint that won't fire on quiet inflation but catches every real
+# deflation event we have in the history.
+_ACTIVE_DEFLATION_SLOPE_MICRORAD_PER_HOUR = -0.5
+# How much below the recent peak the current value must sit before we
+# consider the eruption "active." Filters out tiny zero-crossings during
+# background noise that happen to be paired with a momentary negative slope.
+_ACTIVE_DEFLATION_MIN_DROP_MICRORAD = 2.0
+# How far back to look for the recent peak when checking the drop.
+_ACTIVE_DEFLATION_LOOKBACK_HOURS = 24
+# How many of the trailing samples feed the slope fit.
+_RECENT_SLOPE_WINDOW_HOURS = 3.0
+
+
+def _recent_slope_microrad_per_hour(df: pd.DataFrame, hours: float) -> float | None:
+    """Linear-fit slope of the last `hours` of tilt data, in µrad/hour.
+
+    Returns None if there aren't enough samples to fit a line.
+    """
+    if len(df) < 3:
+        return None
+    end = df[DATE_COL].max()
+    start = end - pd.Timedelta(hours=hours)
+    window = df[df[DATE_COL] >= start]
+    if len(window) < 3:
+        return None
+    # Convert dates to float-hours for the fit; subtracting the start avoids
+    # the int64-overflow trap that bit us earlier on the to_days helper.
+    x = (window[DATE_COL] - window[DATE_COL].min()).dt.total_seconds().to_numpy() / 3600.0
+    y = window[TILT_COL].to_numpy()
+    if len(np.unique(x)) < 2:
+        return None
+    slope, _ = np.polyfit(x, y, 1)
+    return float(slope)
+
+
+def _drop_from_recent_max(df: pd.DataFrame, lookback_hours: float) -> float | None:
+    """How far below the recent max the current value sits, in µrad.
+
+    Positive return value = current is BELOW the recent max (we're dropping).
+    """
+    if len(df) == 0:
+        return None
+    end = df[DATE_COL].max()
+    start = end - pd.Timedelta(hours=lookback_hours)
+    window = df[df[DATE_COL] >= start]
+    if len(window) == 0:
+        return None
+    return float(window[TILT_COL].max() - window[TILT_COL].iloc[-1])
+
+
+def _eruption_state(
+    tilt_df: pd.DataFrame,
+    prediction,
+) -> tuple[str, dict]:
+    """Classify the current point in the eruption lifecycle.
+
+    Returns `(state, info)` where state is one of:
+        "active"   — sharp negative slope right now → eruption happening
+        "imminent" — current time is inside the predicted confidence band
+        "overdue"  — current time is past the high end of the band
+        "calm"     — none of the above; building toward the next eruption
+
+    `info` carries the diagnostics that fed the classification (slope,
+    drop, predicted dates) so the banner can quote them.
+    """
+    info: dict = {}
+
+    slope = _recent_slope_microrad_per_hour(tilt_df, _RECENT_SLOPE_WINDOW_HOURS)
+    drop = _drop_from_recent_max(tilt_df, _ACTIVE_DEFLATION_LOOKBACK_HOURS)
+    info["recent_slope_microrad_per_hour"] = slope
+    info["drop_from_24h_max"] = drop
+
+    if (
+        slope is not None
+        and drop is not None
+        and slope < _ACTIVE_DEFLATION_SLOPE_MICRORAD_PER_HOUR
+        and drop > _ACTIVE_DEFLATION_MIN_DROP_MICRORAD
+    ):
+        return "active", info
+
+    # Anything below depends on having a prediction at all
+    band = prediction.confidence_band if prediction is not None else None
+    next_event = prediction.next_event_date if prediction is not None else None
+    if band is None and next_event is None:
+        return "calm", info
+
+    now = pd.Timestamp.now(tz="UTC").tz_localize(None)
+    info["now_utc"] = now
+
+    if band is not None:
+        lo, hi = band
+        if now < lo:
+            return "calm", info
+        if lo <= now <= hi:
+            return "imminent", info
+        # now > hi
+        return "overdue", info
+
+    # No confidence band but we have a point estimate — fall back to
+    # comparing the point estimate alone with a small buffer.
+    if next_event is not None:
+        buffer = pd.Timedelta(days=2)
+        if now < next_event - buffer:
+            return "calm", info
+        if next_event - buffer <= now <= next_event + buffer:
+            return "imminent", info
+        return "overdue", info
+
+    return "calm", info
+
+
+eruption_state, eruption_state_info = _eruption_state(tilt_df, prediction)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Header + status banner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -414,6 +537,52 @@ with col3:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Eruption lifecycle status banner
+# ─────────────────────────────────────────────────────────────────────────────
+
+if eruption_state == "active":
+    slope = eruption_state_info.get("recent_slope_microrad_per_hour")
+    drop = eruption_state_info.get("drop_from_24h_max")
+    st.error(
+        f"### 🔴 Eruption active right now\n\n"
+        f"Tilt is dropping at **{slope:+.2f} µrad/hour** "
+        f"(**{drop:.1f} µrad** below the 24-hour max). The deflation "
+        f"signature of a fountain event is unmistakable in the live data — "
+        f"check the [USGS webcams]"
+        f"(https://www.usgs.gov/volcanoes/kilauea/summit-webcams) for the "
+        f"visual."
+    )
+elif eruption_state == "imminent":
+    band = prediction.confidence_band
+    if band is not None:
+        lo, hi = band
+        days_open = (eruption_state_info["now_utc"] - lo).total_seconds() / 86400
+        days_remaining = (hi - eruption_state_info["now_utc"]).total_seconds() / 86400
+        st.warning(
+            f"### 🟠 Eruption window open — possibly imminent\n\n"
+            f"We're inside the predicted 80% confidence band, which opened "
+            f"**{days_open:.1f} days ago** and runs for another "
+            f"**{days_remaining:.1f} days**. The next fountain event is "
+            f"expected around **{_fmt_date(prediction.next_event_date)}**."
+        )
+elif eruption_state == "overdue":
+    band = prediction.confidence_band
+    if band is not None:
+        _lo, hi = band
+        days_overdue = (eruption_state_info["now_utc"] - hi).total_seconds() / 86400
+        st.warning(
+            f"### 🟡 Eruption overdue\n\n"
+            f"Today is **{days_overdue:.1f} days past** the high end of the "
+            f"predicted confidence band. Either the next fountain event is "
+            f"running late or the model needs more recent peaks to recompute. "
+            f"Predicted point estimate was "
+            f"**{_fmt_date(prediction.next_event_date)}**."
+        )
+# `calm` shows no banner — the metric tiles above already convey the
+# upcoming-event countdown without adding visual noise.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main chart
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -425,6 +594,80 @@ fig = build_figure(
     title="",
 )
 st.plotly_chart(fig, width="stretch")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# USGS Kīlauea summit webcams
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Eight live webcams from USGS HVO. Each one's "M.jpg" endpoint returns
+# the latest still capture. URLs were extracted from
+# https://www.usgs.gov/volcanoes/kilauea/summit-webcams and HEAD-checked
+# 2026-04-09. The user-friendly USGS page above also has the same
+# images plus camera location maps and refresh information.
+USGS_WEBCAMS: list[tuple[str, str, str]] = [
+    (
+        "K2cam",
+        "Caldera view from Uēkahuna bluff observation tower",
+        "https://volcanoes.usgs.gov/observatories/hvo/cams/K2cam/images/M.jpg",
+    ),
+    (
+        "V1cam",
+        "West Halemaʻumaʻu crater from northwest rim",
+        "https://volcanoes.usgs.gov/observatories/hvo/cams/V1cam/images/M.jpg",
+    ),
+    (
+        "V2cam",
+        "East Halemaʻumaʻu crater from northeast rim",
+        "https://volcanoes.usgs.gov/cams/V2cam/images/M.jpg",
+    ),
+    (
+        "V3cam",
+        "South Halemaʻumaʻu crater from south rim",
+        "https://volcanoes.usgs.gov/cams/V3cam/images/M.jpg",
+    ),
+    (
+        "B1cam",
+        "Caldera down-dropped block from east rim",
+        "https://volcanoes.usgs.gov/observatories/hvo/cams/B1cam/images/M.jpg",
+    ),
+    (
+        "KWcam",
+        "Halemaʻumaʻu panorama from west rim",
+        "https://volcanoes.usgs.gov/observatories/hvo/cams/KWcam/images/M.jpg",
+    ),
+    (
+        "F1cam",
+        "Thermal imagery from west rim",
+        "https://volcanoes.usgs.gov/observatories/hvo/cams/F1cam/images/M.jpg",
+    ),
+    (
+        "KPcam",
+        "Summit view from Mauna Loa Strip Road",
+        "https://volcanoes.usgs.gov/cams/KPcam/images/M.jpg",
+    ),
+]
+
+with st.expander("📷 USGS Kīlauea summit webcams"):
+    st.caption(
+        "Live still captures from the eight USGS HVO webcams that look at "
+        "Kīlauea's summit caldera and Halemaʻumaʻu crater. Click any "
+        "thumbnail to open the full-resolution image. Visit the "
+        "[USGS webcams page]"
+        "(https://www.usgs.gov/volcanoes/kilauea/summit-webcams) for the "
+        "live time-lapse feeds and map of camera locations."
+    )
+    # 2-column grid of webcams.
+    for i in range(0, len(USGS_WEBCAMS), 2):
+        pair = USGS_WEBCAMS[i : i + 2]
+        cols = st.columns(2)
+        for col, (name, desc, url) in zip(cols, pair):
+            with col:
+                try:
+                    st.image(url, width="stretch")
+                except Exception as e:
+                    st.caption(f"⚠️ could not load {name}: {e}")
+                st.markdown(f"**[{name}]({url})** &nbsp;·&nbsp; {desc}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
