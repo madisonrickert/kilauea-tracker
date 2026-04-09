@@ -47,9 +47,6 @@ from ..config import (
     DIGITAL_SOURCE_NAME,
     HISTORY_CSV,
     LAST_GOOD_CALIBRATION,
-    LEGACY_BOOTSTRAP_CUTOFF,
-    LEGACY_CSV,
-    LEGACY_SOURCE_NAME,
     TILT_SOURCE_NAME,
     USGS_TILT_URLS,
     TiltSource,
@@ -201,20 +198,13 @@ def ingest_all(
                     f"could not load {csv_path.name} for reconciliation: {e}"
                 )
 
-    # 3. Read the static reference files (legacy + digital). These are NOT
-    #    per-source CSVs in data/sources/ — they're checked-in canonical
-    #    files that we feed to the reconciler as-is.
-    if LEGACY_CSV.exists():
-        try:
-            legacy = _read_canonical_csv(LEGACY_CSV)
-            if LEGACY_BOOTSTRAP_CUTOFF is not None:
-                legacy = legacy[legacy[DATE_COL] >= LEGACY_BOOTSTRAP_CUTOFF]
-                legacy = legacy.reset_index(drop=True)
-            if len(legacy) > 0:
-                sources_for_reconcile[LEGACY_SOURCE_NAME] = legacy
-        except Exception as e:
-            print(f"WARNING: could not load legacy CSV: {e}")
-
+    # 3. Read the digital reference file. This is NOT a per-source CSV in
+    #    data/sources/ — it's the checked-in canonical file produced by
+    #    scripts/import_digital_data.py. The legacy hand-traced CSV used to
+    #    feed the reconciler too, but it was removed in 2026-04 because its
+    #    samples didn't reliably match dec2024_to_now's auto-traced frame
+    #    and were creating systemic ~6 µrad offsets. dec2024_to_now covers
+    #    the same Jul-Nov 2025 range with one consistent y-frame.
     if DIGITAL_CSV.exists():
         try:
             digital = _read_canonical_csv(DIGITAL_CSV)

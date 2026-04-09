@@ -277,20 +277,36 @@ _LENIENT_TS_RE = re.compile(
     r"^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})$"
 )
 
+# USGS plot titles say "Pacific/Honolulu Time (...)" — the embedded
+# timestamps are HST, not UTC. We localize to HST then convert to UTC so
+# every traced sample lands at the correct absolute moment in time. The
+# rest of the codebase treats naive timestamps as UTC, so we strip the
+# tz info on the way out.
+_USGS_PLOT_TIMEZONE = "Pacific/Honolulu"
+
 
 def _parse_lenient_timestamp(s: str) -> pd.Timestamp:
-    """Parse `YYYY-MM-DD HH:MM:SS`, tolerating field overflows like seconds=60.
+    """Parse `YYYY-MM-DD HH:MM:SS` from a USGS plot title and convert
+    HST→UTC, returning a naive UTC timestamp.
+
+    Tolerates field overflows like seconds=60 because USGS's plotting code
+    rounds without rolling over (e.g. ``23:60:09``). Handled by parsing the
+    fields manually and adding via ``pd.Timedelta``.
 
     Examples:
-      "2026-04-09 23:60:09" → 2026-04-10 00:00:09
-      "2026-04-09 23:59:60" → 2026-04-09 23:59:60 → 2026-04-10 00:00:00
+      "2026-04-09 11:00:23" (HST) → 2026-04-09 21:00:23 (UTC, returned naive)
+      "2026-04-09 23:60:09" (HST) → 2026-04-10 09:00:09 (UTC, returned naive)
     """
     m = _LENIENT_TS_RE.match(s.strip())
     if not m:
         raise ValueError(f"unparseable timestamp format: {s!r}")
     y, mo, d, h, mi, sec = (int(x) for x in m.groups())
     base = pd.Timestamp(year=y, month=mo, day=d)
-    return base + pd.Timedelta(hours=h, minutes=mi, seconds=sec)
+    naive_local = base + pd.Timedelta(hours=h, minutes=mi, seconds=sec)
+    # Localize to HST, convert to UTC, drop the tz so callers can keep
+    # treating naive timestamps as UTC throughout the pipeline.
+    aware_hst = naive_local.tz_localize(_USGS_PLOT_TIMEZONE)
+    return aware_hst.tz_convert("UTC").tz_localize(None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

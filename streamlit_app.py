@@ -190,8 +190,11 @@ with st.sidebar:
     st.caption("**Data source**")
     st.caption(
         "Electronic tilt at the **UWD** station (Uēkahuna, summit), "
-        "**azimuth 300°**. Published by USGS Hawaiian Volcano Observatory at "
-        "[volcanoes.usgs.gov](https://volcanoes.usgs.gov/vsc/captures/kilauea/)."
+        "**azimuth 300°**. Published by USGS Hawaiian Volcano Observatory — "
+        "see the "
+        "[Kīlauea monitoring data page]"
+        "(https://www.usgs.gov/volcanoes/kilauea/science/monitoring-data-kilauea) "
+        "for the user-friendly view."
     )
 
     st.divider()
@@ -345,12 +348,23 @@ with col2:
     # Compute the age of the latest sample, treating its naive timestamp as
     # UTC. This is the freshness number the user actually cares about: how
     # old is the most recent data point USGS has published, regardless of
-    # when we last polled.
+    # when we last polled. We compute the delta directly via pandas to
+    # preserve nanosecond precision (going through datetime.to_pydatetime()
+    # would emit a "Discarding nonzero nanoseconds" warning).
     if last_data is not None and pd.notna(last_data):
         last_data_aware = (
             last_data.tz_localize("UTC") if last_data.tzinfo is None else last_data
         )
-        sample_age = _ago(last_data_aware.to_pydatetime())
+        delta = pd.Timestamp.now(tz="UTC") - last_data_aware
+        seconds = int(delta.total_seconds())
+        if seconds < 60:
+            sample_age = f"{seconds}s ago"
+        elif seconds < 3600:
+            sample_age = f"{seconds // 60}m ago"
+        elif seconds < 86400:
+            sample_age = f"{seconds // 3600}h ago"
+        else:
+            sample_age = f"{seconds // 86400}d ago"
     else:
         sample_age = "—"
     st.metric(
@@ -374,16 +388,25 @@ with col3:
             indicator = "🟡"
         else:
             indicator = "🔴"
+        # Show the absolute timestamp instead of "X ago" — Streamlit only
+        # reruns this expression on widget interaction, so an "ago" value
+        # would be frozen at the moment of the most recent rerun (always
+        # ~0s after a refresh button click). The absolute timestamp is
+        # honest: it shows when we last polled, and the user can compare
+        # against the freshness delta on the "Latest tilt sample" tile to
+        # see whether the poll actually pulled new data.
+        poll_ts = pd.Timestamp(st.session_state.last_ingest_at)
         st.metric(
             "Last poll attempt",
-            f"{indicator} {_ago(st.session_state.last_ingest_at)}",
+            f"{indicator} {_fmt_date(poll_ts)}",
             delta=f"{successful}/{total} sources",
             delta_color="off",
             help=(
-                "When this app last polled USGS for fresh data. A recent "
+                "Wall-clock time of the most recent USGS poll. A recent "
                 "poll doesn't guarantee newer data — if USGS hasn't "
                 "published anything new since the last poll, the 'Latest "
-                "tilt sample' above stays the same."
+                "tilt sample' above stays the same. Click the refresh "
+                "button in the sidebar to poll again."
             ),
         )
     else:
@@ -642,6 +665,33 @@ with st.expander("🛰 USGS source plots"):
             elif not r.fetched:
                 st.caption("ℹ️ Not changed since last poll (304)")
         st.markdown("---")
+
+    # ── Non-PNG reference data sources ────────────────────────────────────
+    st.markdown("**Other reference data**")
+    st.caption(
+        "Beyond the live PNG plots above, the reconciliation layer also "
+        "consumes a one-shot **digital tiltmeter** dataset from a USGS "
+        "research release. It's not live but it's the most accurate source "
+        "we have for the period it covers, so the alignment math anchors "
+        "every other source against it."
+    )
+    st.markdown(
+        "- **`digital`** &nbsp;·&nbsp; raw 1-minute samples of (X, Y) "
+        "tilt from the UWD LILY borehole tiltmeter, projected onto "
+        "azimuth 300° and resampled to 30-min means. Covers **Jan–Jun "
+        "2025** in 6 segments split at instrument relevelings. Provided "
+        "by USGS HVO as a one-time research release; processed locally "
+        "by `scripts/import_digital_data.py`. Used as the global "
+        "y-frame anchor for all other sources."
+    )
+    st.caption(
+        "ℹ️ A `legacy` hand-traced PlotDigitizer CSV from the v1 "
+        "prototype was previously merged in here too, but it was removed "
+        "in 2026-04 because its samples didn't reliably match "
+        "`dec2024_to_now`'s auto-traced frame and were creating systemic "
+        "~6 µrad offsets in the Jul-Aug 2025 region. `dec2024_to_now` "
+        "covers the same range with one consistent y-frame."
+    )
 
 
 with st.expander("ℹ️ How does this work?"):

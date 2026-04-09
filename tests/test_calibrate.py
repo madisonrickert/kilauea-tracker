@@ -162,19 +162,31 @@ def test_lenient_timestamp_parser_handles_seconds_60():
     """USGS occasionally publishes titles with seconds=60. Real bug seen on
     2026-04-09: title contained '2026-04-09 23:60:09', which `pd.Timestamp`
     rejects strictly. The lenient parser should roll over to the next minute.
+
+    Also: USGS plot titles are labeled HST so the parser converts to UTC.
+    23:60:09 HST → 24:00:09 HST → 00:00:09 next day HST → 10:00:09 next day UTC.
     """
     from kilauea_tracker.ingest.calibrate import _parse_lenient_timestamp
 
     assert _parse_lenient_timestamp("2026-04-09 23:60:09") == pd.Timestamp(
-        "2026-04-10 00:00:09"
+        "2026-04-10 10:00:09"
     )
 
 
-def test_lenient_timestamp_parser_handles_normal_input():
+def test_lenient_timestamp_parser_converts_hst_to_utc():
+    """USGS plots embed Pacific/Honolulu Time (HST = UTC-10). The parser
+    converts to UTC so the rest of the pipeline (which treats naive
+    timestamps as UTC) lands at the correct absolute moment.
+    """
     from kilauea_tracker.ingest.calibrate import _parse_lenient_timestamp
 
+    # 12:34:56 HST = 22:34:56 UTC same day
     assert _parse_lenient_timestamp("2026-04-09 12:34:56") == pd.Timestamp(
-        "2026-04-09 12:34:56"
+        "2026-04-09 22:34:56"
+    )
+    # 11:00:23 HST (typical 2-day right-edge) = 21:00:23 UTC same day
+    assert _parse_lenient_timestamp("2026-04-09 11:00:23") == pd.Timestamp(
+        "2026-04-09 21:00:23"
     )
 
 

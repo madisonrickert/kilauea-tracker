@@ -295,23 +295,17 @@ def test_piecewise_realign_runs_for_dec2024_to_now_and_records_residuals():
     SourceAlignment record.
 
     Caveat: this test only verifies the MECHANICS — that the piecewise
-    pass runs, finds overlaps, and stores residuals. The residuals against
-    sources that themselves were aligned via dec2024_to_now's chain
-    (notably `legacy`, which has no direct overlap with `digital` and so
-    must align via dec2024_to_now in the alignment loop) come out as ~0
-    by construction: legacy was already shifted into dec2024_to_now's
-    local frame, so the residual between them is zero. The chicken-and-egg
-    is real and is mitigated by the per-source proximity gate override
-    (PROXIMITY_GATE_OVERRIDES_MINUTES["dec2024_to_now"] = 12h), not by
-    the piecewise pass alone. See the proximity_gate tests below.
+    pass runs, finds overlaps, and stores residuals. The residual VALUE
+    against digital comes out as ~0 by construction (digital dominated
+    the first-pass median offset), but for sources that ALSO align
+    indirectly via dec2024_to_now the residual lands at 0 too because
+    they were already shifted into dec2024_to_now's frame in the
+    alignment loop (chicken-and-egg). The mechanics are still useful as
+    a regression check; the per-source proximity gate override
+    (PROXIMITY_GATE_OVERRIDES_MINUTES["dec2024_to_now"] = 12h) is what
+    actually mitigates the chicken-and-egg in production.
     """
     digital = _series("2025-01-01", n=180, base=0.0, freq="1D")
-    legacy = pd.DataFrame(
-        {
-            DATE_COL: pd.date_range("2025-07-02", periods=120, freq="1D"),
-            TILT_COL: [0.0] * 120,
-        }
-    )
     d2n_dates = list(pd.date_range("2025-01-01", periods=60, freq="3D")) + list(
         pd.date_range("2025-07-02", periods=60, freq="2D")
     )
@@ -320,7 +314,6 @@ def test_piecewise_realign_runs_for_dec2024_to_now_and_records_residuals():
 
     sources = {
         "digital": digital,
-        "legacy": legacy,
         "dec2024_to_now": d2n,
     }
     _, report = reconcile_sources(sources, proximity_minutes=0)
@@ -330,11 +323,8 @@ def test_piecewise_realign_runs_for_dec2024_to_now_and_records_residuals():
     assert d2n_record.offset_microrad is not None
     assert abs(d2n_record.offset_microrad - 6.928) < 0.5
 
-    # The piecewise pass ran and recorded residuals for both higher-
-    # priority sources. The residual VALUES are not asserted here because
-    # they depend on the alignment chain (see test docstring caveat).
+    # The piecewise pass ran and recorded a residual against digital.
     assert "digital" in d2n_record.piecewise_residuals
-    assert "legacy" in d2n_record.piecewise_residuals
 
 
 def test_piecewise_realign_skips_sources_not_in_PIECEWISE_REALIGN_SOURCES():

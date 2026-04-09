@@ -11,13 +11,10 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-import pandas as pd
-
 # Project paths
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 HISTORY_CSV = DATA_DIR / "tilt_history.csv"
-LEGACY_CSV = PROJECT_ROOT / "legacy" / "Tiltmeter Data - Sheet1.csv"
 LAST_GOOD_CALIBRATION = DATA_DIR / "last_good_calibration.json"
 # Pre-processed digital tiltmeter data — produced once by
 # `scripts/import_digital_data.py` from USGS's research-release CSVs.
@@ -65,9 +62,9 @@ ALL_SOURCES: tuple[TiltSource, ...] = (
 )
 
 # Source identifiers for the reconciliation layer. These are strings (not
-# TiltSource enum members) because two of the sources — `digital` and `legacy`
-# — aren't USGS PNG captures and so don't fit the TiltSource enum. The strings
-# are also the file stems for the per-source CSVs in SOURCES_DIR/.
+# TiltSource enum members) because the digital source isn't a USGS PNG capture
+# and so doesn't fit the TiltSource enum. The strings are also the file stems
+# for the per-source CSVs in SOURCES_DIR/.
 #
 # Priority order (highest first): digital is the gold reference because it's
 # raw USGS instrument data (100% confidence) but only covers Jan-Jun 2025.
@@ -75,9 +72,17 @@ ALL_SOURCES: tuple[TiltSource, ...] = (
 # highest sample density and the smallest legend overlap risk; THREE_MONTH
 # is at the bottom because (a) it's the lowest-resolution image and (b)
 # the 3-month plot is the only one whose curve actually passes through the
-# legend region. Legacy data is hand-traced (medium confidence). DEC2024_TO_NOW
-# is the longest-coverage image source so it slots above THREE_MONTH but
-# below the dense recent sources.
+# legend region. DEC2024_TO_NOW is the longest-coverage image source so it
+# slots above THREE_MONTH but below the dense recent sources.
+#
+# `legacy` (the v1 hand-traced PlotDigitizer CSV from `legacy/Tiltmeter Data
+# - Sheet1.csv`) was previously slotted between `month` and `dec2024_to_now`,
+# but the user observed in 2026-04 that it was creating systemic ~6 µrad
+# offsets in the 6/29-8/21 range — its hand-traced samples don't reliably
+# match dec2024_to_now's auto-traced frame and the chicken-and-egg of
+# aligning legacy through dec2024_to_now made the offsets noisy. We removed
+# legacy entirely; dec2024_to_now covers the same Jul-Nov 2025 range with
+# higher density and a single consistent y-frame.
 #
 # This order is consulted by the *merge* step in reconcile.py: when two
 # sources both contain data for the same 15-min bucket, the one earlier in
@@ -87,7 +92,6 @@ SOURCE_PRIORITY: tuple[str, ...] = (
     "two_day",
     "week",
     "month",
-    "legacy",
     "dec2024_to_now",
     "three_month",
 )
@@ -102,8 +106,6 @@ SOURCE_PRIORITY: tuple[str, ...] = (
 # - `dec2024_to_now` second because it's the only source that overlaps BOTH
 #   digital (Jan-Jun 2025) AND the recent dense sources (Apr 2026 today). It
 #   bridges the temporal gap between digital and the rolling-window PNGs.
-# - `legacy` third because its post-cutoff range (Jul-Nov 2025) overlaps with
-#   dec2024_to_now and lets later sources reach back via two hops.
 # - The four rolling-window PNG sources last, in any order — they all overlap
 #   with dec2024_to_now and so each has the entire chain of prior alignments
 #   to anchor against.
@@ -113,7 +115,6 @@ SOURCE_PRIORITY: tuple[str, ...] = (
 ALIGNMENT_ORDER: tuple[str, ...] = (
     "digital",
     "dec2024_to_now",
-    "legacy",
     "three_month",
     "month",
     "week",
@@ -131,18 +132,9 @@ TILT_SOURCE_NAME: dict[TiltSource, str] = {
     TiltSource.DEC2024_TO_NOW: "dec2024_to_now",
 }
 
-# Identifiers for the two non-PNG sources, kept as constants so callers don't
-# have to remember the spelling.
+# Identifier for the digital reference source, kept as a constant so callers
+# don't have to remember the spelling.
 DIGITAL_SOURCE_NAME = "digital"
-LEGACY_SOURCE_NAME = "legacy"
-
-# When loading legacy data into its per-source CSV, drop rows older than this
-# date. The legacy file's pre-July-2025 coverage is sparse and irregular
-# (~2-day median spacing, hand-digitized) and overlaps with the much denser
-# DEC2024_TO_NOW source. We keep the post-cutoff portion because that's where
-# legacy provides unique coverage (Jul-Nov 2025) that no other source has.
-# The legacy CSV on disk is left intact as a historical record.
-LEGACY_BOOTSTRAP_CUTOFF = pd.Timestamp("2025-07-01")
 
 
 def source_csv_path(source_name: str) -> Path:
