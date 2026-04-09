@@ -181,3 +181,39 @@ def _save_cached_last_modified(source: TiltSource, value: Optional[str]) -> None
         existing = {}
     existing[source.value] = value
     LAST_MODIFIED_FILE.write_text(json.dumps(existing, indent=2))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI entrypoint — `python -m kilauea_tracker.ingest.pipeline`
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _cli_main() -> int:
+    """Run the full ingest and print a one-line summary per source.
+
+    Used by the GitHub Actions cache-refresh workflow. Returns 0 if at least
+    one source ingested successfully (workflow continues, may commit data),
+    or 1 if every source failed (workflow fails loudly).
+    """
+    reports = ingest_all()
+    failures = sum(1 for r in reports if r.error is not None)
+    print(f"Ingested {len(reports)} sources ({len(reports) - failures} ok, {failures} failed):")
+    for r in reports:
+        flag = "OK  " if r.error is None else "FAIL"
+        line = (
+            f"  [{flag}] {r.source.name:12s} "
+            f"fetched={int(r.fetched)}  "
+            f"traced={r.rows_traced:5d}  "
+            f"added={r.rows_added_to_cache:5d}  "
+            f"updated={r.rows_updated_in_cache:5d}"
+        )
+        if r.error:
+            line += f"  error={r.error}"
+        print(line)
+    if failures == len(reports):
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli_main())

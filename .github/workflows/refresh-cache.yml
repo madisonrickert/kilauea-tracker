@@ -1,0 +1,88 @@
+name: Refresh tilt cache
+
+# Runs the ingest pipeline on a cron, commits any updated rows to
+# data/tilt_history.csv, and pushes back to main. The push triggers
+# Streamlit Community Cloud to redeploy the app with the freshened cache.
+#
+# Why this exists:
+#   Streamlit Community Cloud rebuilds the container from `main` on every
+#   deploy, which means the in-container cache is reset to whatever's
+#   committed in the repo. Without this workflow, the cache only updates
+#   when a viewer happens to click "Refresh data" — and even then the change
+#   only lives until the next redeploy. With this workflow, every redeploy
+#   starts with cache that's at most 4 hours stale.
+
+on:
+  schedule:
+    # At minute 7 every 4 hours (UTC). 6 runs per day. The minute offset
+    # avoids the top-of-hour spike when GitHub Actions cron contention is
+    # highest. GitHub does not guarantee exact timing — actual runs can be
+    # delayed by 5-15 minutes during high-load periods.
+    - cron: "7 */4 * * *"
+  # Manual trigger for testing or on-demand refresh.
+  workflow_dispatch:
+
+# This workflow needs write access to push the updated cache back to main.
+# Default GITHUB_TOKEN permissions are read-only — opt in here.
+permissions:
+  contents: write
+
+# Cancel an in-progress run if a new one starts. We never want two refresh
+# jobs racing each other to commit.
+concurrency:
+  group: refresh-cache
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          # Fetch the full history so `git pull --rebase` before push has
+          # something to rebase against if main moved while we ran.
+          fetch-depth: 0
+
+      - name: Install Tesseract OCR
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr libgl1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Install Python dependencies
+        run: uv sync
+
+      - name: Run ingest pipeline
+        run: uv run python -m kilauea_tracker.ingest.pipeline
+
+      - name: Commit and push refreshed cache
+        run: |
+          set -e
+          if git diff --quiet data/; then
+            echo "No cache changes — nothing to commit."
+            exit 0
+          fi
+
+          echo "Cache changed:"
+          git diff --stat data/
+
+          git add data/tilt_history.csv data/last_modified.json
+
+          # Per-command identity override — same pattern as the manual
+          # commits in the repo, keeps the runner's git config untouched.
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "chore: refresh tilt history cache (auto)"
+
+          # Defensive pull-rebase in case main moved between checkout and
+          # commit (rare for a 4-hour cron, but cheap insurance).
+          git pull --rebase origin main
+          git push origin HEAD:main
