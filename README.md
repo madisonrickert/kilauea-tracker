@@ -7,10 +7,15 @@
 
 **Live app:** <https://kilauea-tracker.streamlit.app/>
 
+![Screenshot of the Kīlauea Fountain Event Tracker](./docs/screenshot.png)
+
 Predicts the next eruption pulse at Kīlauea by tracing tilt data straight from
 USGS plot images and fitting an exponential saturation curve against the recent
 peak trendline. Built as an interactive Streamlit app — non-technical viewers
 just open a URL and see the current prediction.
+
+Tiltmeter source: USGS Hawaiian Volcano Observatory **UWD** station (Uēkahuna,
+summit), **azimuth 300°**.
 
 This is **v2.0**, a full rewrite of the original Colab notebook prototype
 (`legacy/eruption_projection.py`). v1.0 required manual digitization of USGS

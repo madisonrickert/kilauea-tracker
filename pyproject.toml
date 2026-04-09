@@ -26,6 +26,12 @@ dev = [
     "pytest-cov",
     "ruff",
 ]
+# Optional extra used by `scripts/take_screenshot.py` to regenerate
+# `docs/screenshot.png`. Not part of the runtime app or the test suite —
+# install only when you need to refresh the README screenshot:
+#   uv sync --extra screenshot
+#   uv run playwright install chromium
+screenshot = ["playwright>=1.50"]
 
 [build-system]
 requires = ["hatchling"]

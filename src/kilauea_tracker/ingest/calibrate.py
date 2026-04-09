@@ -255,8 +255,8 @@ def ocr_title_timestamps(
         )
 
     try:
-        start = pd.Timestamp(match.group("start"))
-        end = pd.Timestamp(match.group("end"))
+        start = _parse_lenient_timestamp(match.group("start"))
+        end = _parse_lenient_timestamp(match.group("end"))
     except (ValueError, TypeError) as e:
         raise CalibrationError(f"unparseable timestamp in title: {e}") from e
 
@@ -266,6 +266,31 @@ def ocr_title_timestamps(
         )
 
     return start, end
+
+
+# Lenient timestamp parser for the title regex output. USGS occasionally
+# publishes titles with field overflows like `23:60:09` (which `pd.Timestamp`
+# strictly rejects with "second must be in 0..59") because their plotting
+# code rounds without rolling over. We handle the overflow by parsing the
+# fields manually and adding via `pd.Timedelta`, which carries naturally.
+_LENIENT_TS_RE = re.compile(
+    r"^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})$"
+)
+
+
+def _parse_lenient_timestamp(s: str) -> pd.Timestamp:
+    """Parse `YYYY-MM-DD HH:MM:SS`, tolerating field overflows like seconds=60.
+
+    Examples:
+      "2026-04-09 23:60:09" → 2026-04-10 00:00:09
+      "2026-04-09 23:59:60" → 2026-04-09 23:59:60 → 2026-04-10 00:00:00
+    """
+    m = _LENIENT_TS_RE.match(s.strip())
+    if not m:
+        raise ValueError(f"unparseable timestamp format: {s!r}")
+    y, mo, d, h, mi, sec = (int(x) for x in m.groups())
+    base = pd.Timestamp(year=y, month=mo, day=d)
+    return base + pd.Timedelta(hours=h, minutes=mi, seconds=sec)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

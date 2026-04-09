@@ -138,9 +138,10 @@ with st.sidebar:
     st.divider()
     st.caption("**Data source**")
     st.caption(
-        "USGS Hawaiian Volcano Observatory — tilt PNGs at "
+        "Electronic tilt at the **UWD** station (Uēkahuna, summit), **azimuth 300°**. "
+        "Published as auto-updating PNGs by USGS HVO at "
         "[volcanoes.usgs.gov](https://volcanoes.usgs.gov/vsc/captures/kilauea/). "
-        "v2.0 traces these images directly using OpenCV + Tesseract OCR; no "
+        "v2.0 traces those images directly via OpenCV + Tesseract OCR — no "
         "manual digitization required."
     )
 
@@ -212,6 +213,10 @@ prediction = predict(tilt_df, recent_peaks)
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.title("🌋 Kīlauea Fountain Event Tracker")
+st.markdown(
+    "**Tiltmeter:** UWD station (Uēkahuna, summit) · azimuth 300° · "
+    "data from [USGS Hawaiian Volcano Observatory](https://www.usgs.gov/volcanoes/kilauea/science/monitoring-data-kilauea)"
+)
 st.caption(
     "Predicts the next eruption pulse at Kīlauea by fitting an exponential "
     "saturation curve to the current tilt episode and intersecting it with the "
@@ -394,11 +399,24 @@ with st.expander("ℹ️ How does this work?"):
         which local maxima count as "real" episodic peaks. The trendline window
         controls how many of those peaks feed the linear fit.
 
-        **Data source.** Electronic tilt at Uēkahuna (UWD), azimuth 300°,
-        published as auto-updating PNGs by USGS HVO. v2.0's ingest pipeline
-        traces those images directly via OpenCV + Tesseract OCR — no manual
-        digitization required. The "Refresh" button re-fetches all four time
-        windows (2-day, week, month, 3-month) and merges new samples into the
-        local history cache.
+        **Data source.** Electronic tilt at the **UWD** station (Uēkahuna,
+        on the summit caldera rim), **azimuth 300°**, published as
+        auto-updating PNGs by USGS Hawaiian Volcano Observatory. v2.0's
+        ingest pipeline traces those images directly via OpenCV + Tesseract
+        OCR — no manual digitization required. The "Refresh" button
+        re-fetches all five time windows (2-day, week, month, 3-month, and
+        the long-history Dec 2024 → now plot) and merges new samples into
+        the local history cache.
+
+        **About azimuth 300°.** Tilt is a vector quantity, so each
+        measurement is projected onto a chosen compass direction. Per USGS:
+        *"On July 9, 2025, tilt azimuths for SDH and UWD plots have been
+        updated from 320 to 300 degrees to optimize displaying maximum
+        magnitudes of deformation consistent with the current activity at
+        the summit of Kīlauea."* This means historical tilt readings from
+        before that date were originally projected at 320° rather than 300°
+        — but the USGS plots themselves have been re-rendered onto the new
+        300° projection across the full historical range, so all data this
+        app ingests is consistent.
         """
     )

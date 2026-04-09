@@ -192,10 +192,9 @@ def build_figure(
             annotation_position="top left",
         )
 
-    fig.update_layout(
-        title=title or None,
+    layout_kwargs = dict(
         xaxis_title="Date",
-        yaxis_title="Electronic tilt — azimuth 300 (µrad)",
+        yaxis_title="Electronic tilt — UWD station, azimuth 300° (µrad)",
         template="plotly_dark",
         hovermode="closest",
         legend=dict(
@@ -205,8 +204,13 @@ def build_figure(
             xanchor="right",
             x=1,
         ),
-        margin=dict(l=60, r=30, t=60, b=60),
+        margin=dict(l=60, r=30, t=40, b=60),
     )
+    # Only set the title key when one is provided. Recent Plotly versions
+    # render `title=None` as the literal string "undefined" above the chart.
+    if title:
+        layout_kwargs["title"] = title
+    fig.update_layout(**layout_kwargs)
     return fig
 
 

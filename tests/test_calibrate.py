@@ -151,3 +151,37 @@ def test_calibrate_axes_raises_on_garbage_image():
     img = np.full((300, 900, 3), 255, dtype=np.uint8)
     with pytest.raises(CalibrationError):
         calibrate_axes(img)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lenient timestamp parser — guards against USGS publishing field overflows
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_lenient_timestamp_parser_handles_seconds_60():
+    """USGS occasionally publishes titles with seconds=60. Real bug seen on
+    2026-04-09: title contained '2026-04-09 23:60:09', which `pd.Timestamp`
+    rejects strictly. The lenient parser should roll over to the next minute.
+    """
+    from kilauea_tracker.ingest.calibrate import _parse_lenient_timestamp
+
+    assert _parse_lenient_timestamp("2026-04-09 23:60:09") == pd.Timestamp(
+        "2026-04-10 00:00:09"
+    )
+
+
+def test_lenient_timestamp_parser_handles_normal_input():
+    from kilauea_tracker.ingest.calibrate import _parse_lenient_timestamp
+
+    assert _parse_lenient_timestamp("2026-04-09 12:34:56") == pd.Timestamp(
+        "2026-04-09 12:34:56"
+    )
+
+
+def test_lenient_timestamp_parser_rejects_unparseable():
+    from kilauea_tracker.ingest.calibrate import _parse_lenient_timestamp
+
+    with pytest.raises(ValueError):
+        _parse_lenient_timestamp("not a timestamp")
+    with pytest.raises(ValueError):
+        _parse_lenient_timestamp("2026-04-09")  # missing time
