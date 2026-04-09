@@ -1,11 +1,17 @@
 """Tests for `kilauea_tracker.cache`.
 
 Cover the cases that matter:
-- Bootstrap from legacy CSV when history doesn't exist
-- Append new rows preserves existing rows
+- load_history reads an existing CSV and returns the canonical schema
+- load_history returns an empty DataFrame (not a crash) when the file is missing
+- append_history adds new rows, preserves existing rows, and writes back
 - Dedupe keeps the newest row when timestamps round to the same bucket
-- Conflict detection flags drifted re-traces
+- Conflict detection flags drifted re-traces (within a single source CSV)
 - Empty input is a no-op
+
+The bootstrap-from-legacy logic that used to live in load_history was
+removed when the per-source storage layer landed in `reconcile.py` —
+legacy is now one of the inputs to `reconcile_sources()` rather than a
+fallback for an empty cache.
 """
 
 from __future__ import annotations
@@ -21,7 +27,6 @@ from kilauea_tracker.cache import (
     append_history,
     load_history,
 )
-from kilauea_tracker.config import LEGACY_CSV
 from kilauea_tracker.model import DATE_COL, TILT_COL
 
 
@@ -40,82 +45,13 @@ def _seed(path: Path, dates: list[str], tilts: list[float]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_load_history_bootstraps_from_legacy(tmp_path: Path):
-    """If the history file doesn't exist, bootstrap from legacy CSV.
+def test_load_history_returns_empty_when_file_missing(tmp_path: Path):
+    """No file → empty DataFrame with the canonical schema, no crash.
 
-    The legacy CSV is the raw v1.0 Google Sheet export and contains ~770
-    blank trailing rows; load_history drops them via `dropna`. We assert that
-    bootstrap produces a non-trivial DataFrame and writes a cache file.
+    The Streamlit app's `load_tilt()` runs `ingest_all()` on first call,
+    which always populates `tilt_history.csv`. Returning empty here is the
+    sane behavior for the brief window between app start and first ingest.
     """
-    history_csv = tmp_path / "tilt_history.csv"
-    assert not history_csv.exists()
-    df = load_history(history_csv)
-    assert len(df) > 100, "bootstrap should preserve all real rows from legacy"
-    assert df[TILT_COL].notna().all(), "no NaN tilts after canonicalization"
-    assert df[DATE_COL].notna().all(), "no NaT dates after canonicalization"
-    assert history_csv.exists()  # bootstrap wrote a copy
-    # Re-loading from the cached file gives the same data
-    df2 = load_history(history_csv)
-    assert len(df2) == len(df)
-
-
-def test_bootstrap_respects_legacy_cutoff(tmp_path: Path):
-    """The bootstrap drops legacy rows older than `LEGACY_BOOTSTRAP_CUTOFF`.
-
-    Verifies the trim that lets DEC2024_TO_NOW provide denser coverage of the
-    pre-July-2025 range than the manually-digitized legacy data.
-    """
-    from kilauea_tracker.config import LEGACY_BOOTSTRAP_CUTOFF
-
-    history_csv = tmp_path / "tilt_history.csv"
-    df = load_history(history_csv)
-    # Every bootstrapped row must be at or after the cutoff
-    assert (df[DATE_COL] >= LEGACY_BOOTSTRAP_CUTOFF).all(), (
-        f"bootstrap returned rows older than cutoff {LEGACY_BOOTSTRAP_CUTOFF}: "
-        f"min date is {df[DATE_COL].min()}"
-    )
-    # And the cutoff actually drops something — sanity check that the legacy
-    # CSV genuinely has pre-cutoff data we'd be dropping.
-    raw_legacy = pd.read_csv(LEGACY_CSV)
-    raw_legacy[DATE_COL] = pd.to_datetime(
-        raw_legacy[DATE_COL], format="mixed", dayfirst=False
-    )
-    raw_legacy = raw_legacy.dropna()
-    pre_cutoff = (raw_legacy[DATE_COL] < LEGACY_BOOTSTRAP_CUTOFF).sum()
-    assert pre_cutoff > 0, (
-        "expected the legacy file to have some pre-cutoff rows; if this "
-        "fails the test is now meaningless"
-    )
-    assert len(df) < len(raw_legacy.dropna()), "trim should drop something"
-
-
-def test_bootstrap_cutoff_only_applies_at_bootstrap(tmp_path: Path):
-    """Reading an existing cache file does NOT apply the cutoff retroactively.
-
-    The cutoff is a bootstrap-time policy. Existing caches that already have
-    pre-cutoff rows (e.g. from a manual ingest) should be returned unchanged.
-    """
-    from kilauea_tracker.config import LEGACY_BOOTSTRAP_CUTOFF
-
-    history_csv = tmp_path / "tilt_history.csv"
-    # Seed the cache with rows that straddle the cutoff
-    pre_date = LEGACY_BOOTSTRAP_CUTOFF - pd.Timedelta(days=30)
-    post_date = LEGACY_BOOTSTRAP_CUTOFF + pd.Timedelta(days=30)
-    _seed(
-        history_csv,
-        [str(pre_date), str(post_date)],
-        [9.0, 10.0],
-    )
-    df = load_history(history_csv)
-    assert len(df) == 2, "load_history of existing cache should not trim"
-    assert (df[DATE_COL] == pd.Timestamp(pre_date)).any()
-    assert (df[DATE_COL] == pd.Timestamp(post_date)).any()
-
-
-def test_load_history_returns_empty_when_no_legacy(tmp_path: Path, monkeypatch):
-    """No history, no legacy → empty DataFrame, no crash."""
-    fake_legacy = tmp_path / "nonexistent.csv"
-    monkeypatch.setattr("kilauea_tracker.cache.LEGACY_CSV", fake_legacy)
     history_csv = tmp_path / "tilt_history.csv"
     df = load_history(history_csv)
     assert len(df) == 0
@@ -212,10 +148,8 @@ def test_append_empty_is_noop(tmp_history: Path):
     assert len(df) == 1
 
 
-def test_append_to_nonexistent_creates_history(tmp_path: Path, monkeypatch):
-    """Cache file doesn't exist AND legacy CSV is fake → new history is created."""
-    fake_legacy = tmp_path / "no-legacy.csv"
-    monkeypatch.setattr("kilauea_tracker.cache.LEGACY_CSV", fake_legacy)
+def test_append_to_nonexistent_creates_history(tmp_path: Path):
+    """append_history on a path that doesn't exist yet creates the file."""
     history_csv = tmp_path / "tilt_history.csv"
     new = pd.DataFrame(
         {

@@ -1,24 +1,28 @@
-"""Append-only tilt history cache.
+"""Tilt CSV reader and per-source append helper.
 
-The cache is just a CSV at `data/tilt_history.csv` with columns
-`Date,Tilt (microradians)` — the same schema v1.0 used, so the bootstrap is
-a literal file copy from `legacy/Tiltmeter Data - Sheet1.csv`.
+This module hosts two responsibilities:
 
-Why CSV instead of parquet/sqlite/etc.: the file is tiny (~30 KB for 11 months
-of v1.0 data; <2 MB for 5 years), CSV diffs cleanly in git so the user can
-always see what new data the ingest pipeline pulled, and the format never
-needs migration. The dedupe logic does all the heavy lifting.
+  1. `load_history()` — reads the merged tilt history CSV that the model
+     and Streamlit UI consume. The merged history is a derived artifact
+     produced by `ingest.pipeline.ingest_all()`; this function just reads
+     whatever's on disk and returns an empty DataFrame if nothing is.
 
-Dedupe strategy:
+  2. `append_history()` — appends new rows to *any* tilt CSV with intra-
+     file dedupe at 15-min buckets. Used by `ingest.pipeline.ingest()` to
+     write into per-source files at `data/sources/<source>.csv`. Each
+     source's file is independent — there is no cross-source merging here;
+     that happens later in `reconcile.reconcile_sources()`.
+
+Dedupe strategy in `append_history`:
   1. Concat existing + new rows.
-  2. Round each Date to the nearest 15-minute bucket — fine enough to preserve
-     real samples (USGS publishes ~hourly), coarse enough to merge near-duplicate
-     re-traces.
-  3. Drop duplicates on the rounded key, keeping the LAST occurrence — fresh
-     re-calibration is allowed to overwrite older y-offsets.
-  4. Detect "conflicts" where the new row's tilt disagrees with the cached row
-     by more than `CONFLICT_THRESHOLD` µrad and emit a soft warning. The
-     warning surfaces in the Streamlit UI so the user can spot calibration drift.
+  2. Round each Date to the nearest 15-minute bucket.
+  3. Drop duplicates on the rounded key, keeping the LAST occurrence —
+     fresh re-traces overwrite older ones because USGS may have re-rendered
+     the same time window with slightly different y values.
+  4. Detect "conflicts" where the new row's tilt disagrees with the cached
+     row by more than `CONFLICT_THRESHOLD` µrad. These are intra-source
+     conflicts (one source re-traced its own data inconsistently between
+     captures) and indicate calibration drift in that single source.
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .config import HISTORY_CSV, LEGACY_BOOTSTRAP_CUTOFF, LEGACY_CSV
+from .config import HISTORY_CSV
 from .model import DATE_COL, TILT_COL
 
 # How fine the dedupe key is rounded. Smaller = more rows preserved, larger =
@@ -48,27 +52,16 @@ class AppendReport:
 
 
 def load_history(path: Path = HISTORY_CSV) -> pd.DataFrame:
-    """Read the local tilt history CSV.
+    """Read the merged tilt history CSV.
 
-    Bootstraps from `legacy/Tiltmeter Data - Sheet1.csv` on first run if the
-    history file doesn't exist yet — gives v2.0 immediate parity with v1.0's
-    11 months of input.
-
-    The bootstrap respects `config.LEGACY_BOOTSTRAP_CUTOFF`: rows older than
-    that date are dropped from the legacy import because the DEC2024_TO_NOW
-    source provides denser, more uniform samples for that range. The legacy
-    file on disk is left intact.
+    Returns an empty DataFrame (with the canonical schema) if the file
+    doesn't exist. The merged history is derived from per-source CSVs by
+    `ingest.pipeline.ingest_all()`; on a fresh checkout the Streamlit
+    app's first call to `load_tilt()` will run the pipeline and populate
+    this file before the UI tries to read it.
     """
     if not path.exists():
-        if LEGACY_CSV.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            df = _read_canonical(LEGACY_CSV)
-            if LEGACY_BOOTSTRAP_CUTOFF is not None:
-                df = df[df[DATE_COL] >= LEGACY_BOOTSTRAP_CUTOFF].reset_index(drop=True)
-            df.to_csv(path, index=False)
-        else:
-            return _empty_history()
-
+        return _empty_history()
     return _read_canonical(path)
 
 

@@ -32,7 +32,7 @@ from kilauea_tracker.config import (
     INGEST_CACHE_TTL_SECONDS,
     PEAK_DEFAULTS,
 )
-from kilauea_tracker.ingest.pipeline import IngestReport, ingest_all
+from kilauea_tracker.ingest.pipeline import IngestRunResult, ingest_all
 from kilauea_tracker.model import DATE_COL, TILT_COL, predict
 from kilauea_tracker.peaks import detect_peaks
 from kilauea_tracker.plotting import build_figure
@@ -73,13 +73,16 @@ st.markdown(
 
 
 @st.cache_data(ttl=INGEST_CACHE_TTL_SECONDS, show_spinner="Fetching latest USGS tilt data…")
-def cached_ingest() -> list[IngestReport]:
-    """Run all four USGS sources through the ingest pipeline.
+def cached_ingest() -> IngestRunResult:
+    """Run all USGS sources through the ingest pipeline and reconcile.
 
     Wrapped in `st.cache_data` so the same browser session reuses results
     until the TTL expires (15 minutes by default — USGS updates these PNGs
     on roughly that cadence). Clearing the cache via `cached_ingest.clear()`
     forces a fresh fetch the next time this function runs.
+
+    Returns the full `IngestRunResult` with per-source reports AND the
+    reconciliation summary (per-source y-offsets, conflicts, warnings).
     """
     return ingest_all()
 
@@ -89,8 +92,6 @@ def cached_ingest() -> list[IngestReport]:
 # accurately even after the cache TTL expires.
 if "last_ingest_at" not in st.session_state:
     st.session_state.last_ingest_at = None
-if "last_ingest_reports" not in st.session_state:
-    st.session_state.last_ingest_reports = []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -186,19 +187,21 @@ with st.sidebar:
 # Run ingest — populates `data/tilt_history.csv`
 # ─────────────────────────────────────────────────────────────────────────────
 
-reports = cached_ingest()
+ingest_result = cached_ingest()
+reports = ingest_result.per_source
+reconcile_report = ingest_result.reconcile
 if st.session_state.last_ingest_at is None:
     st.session_state.last_ingest_at = datetime.now(tz=timezone.utc)
-    st.session_state.last_ingest_reports = reports
 
-# Surface ingest errors and warnings
+# Surface ingest errors and warnings (per-source AND reconciliation-layer)
 ingest_errors = [r for r in reports if r.error]
 ingest_warnings = [w for r in reports for w in r.warnings]
+if reconcile_report is not None:
+    ingest_warnings.extend(reconcile_report.warnings)
 
 if ingest_errors:
     for r in ingest_errors:
-        name = r.source.name if r.source else "DIGITAL"
-        st.error(f"❌ **{name}**: {r.error}")
+        st.error(f"❌ **{r.source_name}**: {r.error}")
 if ingest_warnings:
     with st.expander(f"⚠️ {len(ingest_warnings)} ingest warning(s)"):
         for w in ingest_warnings:
@@ -474,21 +477,20 @@ with st.expander("📡 Ingest pipeline status"):
     if not reports:
         st.write("No ingest reports — pipeline hasn't run yet.")
     else:
+        st.markdown("**Per-source fetch & trace**")
+        st.caption(
+            "Each USGS source is fetched, traced, and appended to its own "
+            "raw CSV under `data/sources/`. The merged history is rebuilt "
+            "from these files plus the digital and legacy reference data "
+            "by the reconciliation step below."
+        )
         for r in reports:
             status_icon = "✅" if r.error is None else "❌"
             with st.container():
-                gap_str = (
-                    f", `{r.rows_dropped_as_filled}` dropped (gap-fill mode)"
-                    if r.gap_fill_mode
-                    else ""
-                )
-                source_name = r.source.name if r.source else "DIGITAL (USGS research release)"
                 st.markdown(
-                    f"{status_icon} **{source_name}** — "
+                    f"{status_icon} **{r.source_name}** — "
                     f"`{r.rows_traced}` rows traced, "
-                    f"`{r.rows_added_to_cache}` added, "
-                    f"`{r.rows_updated_in_cache}` updated"
-                    f"{gap_str}"
+                    f"`{r.rows_appended}` appended to source CSV"
                 )
                 if r.last_modified:
                     st.caption(f"Last-Modified: {r.last_modified}")
@@ -503,10 +505,55 @@ with st.expander("📡 Ingest pipeline status"):
                         f"y-axis ticks recovered: {len(cal.y_labels_found)}, "
                         f"y-fit residual: {cal.fit_residual_per_axis.get('y_max_residual_microrad', 0):.3f} µrad"
                     )
-                if r.applied_y_offset is not None:
+
+        if reconcile_report is not None:
+            st.divider()
+            st.markdown("**Reconciliation** (anchor-based alignment + priority merge)")
+            st.caption(
+                "Every source is shifted into a single y-frame anchored on "
+                "the highest-confidence source it can transitively reach. "
+                "Higher-priority sources win per 15-minute bucket in the "
+                "merge. The merged history has "
+                f"`{reconcile_report.rows_out}` rows."
+            )
+            for s in reconcile_report.sources:
+                if s.is_anchor:
+                    detail = "🎯 **anchor** (defines y-frame, offset 0)"
+                elif s.offset_microrad is not None:
+                    detail = (
+                        f"offset `{s.offset_microrad:+.3f}` µrad "
+                        f"(median over `{s.overlap_buckets}` overlap buckets)"
+                    )
+                else:
+                    detail = f"⚠️ **unaligned** — {s.note}"
+                st.markdown(
+                    f"- `{s.name}` &nbsp;·&nbsp; `{s.rows_in}` rows &nbsp;·&nbsp; {detail}"
+                )
+
+            if reconcile_report.conflicts:
+                st.markdown(
+                    f"\n**{len(reconcile_report.conflicts)} bucket conflict(s)** — "
+                    "the higher-priority source's value won, but the disagreement "
+                    "is recorded here for audit:"
+                )
+                # Show the 5 worst (largest |delta|) conflicts to keep the UI brief
+                worst = sorted(
+                    reconcile_report.conflicts,
+                    key=lambda c: abs(c.delta),
+                    reverse=True,
+                )[:5]
+                for c in worst:
+                    bucket_str = pd.Timestamp(c.bucket).strftime("%Y-%m-%d %H:%M")
                     st.caption(
-                        f"Cross-source y-offset: {r.applied_y_offset:+.3f} µrad "
-                        f"(median over {r.overlap_buckets} overlap buckets)"
+                        f"`{bucket_str}` — "
+                        f"`{c.winning_source}` ({c.winning_tilt:+.2f}) "
+                        f"vs `{c.losing_source}` ({c.losing_tilt:+.2f}) "
+                        f"→ Δ {c.delta:+.2f} µrad"
+                    )
+                if len(reconcile_report.conflicts) > 5:
+                    st.caption(
+                        f"…and {len(reconcile_report.conflicts) - 5} more "
+                        "(smaller deltas)"
                     )
 
 with st.expander("ℹ️ How does this work?"):

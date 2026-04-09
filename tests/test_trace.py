@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from kilauea_tracker.ingest import trace as trace_mod
 from kilauea_tracker.ingest.calibrate import calibrate_axes
 from kilauea_tracker.ingest.exceptions import TraceError
 from kilauea_tracker.ingest.trace import trace_curve
@@ -95,6 +96,53 @@ def test_trace_raises_on_blank_image(fixture_calib):
 # ─────────────────────────────────────────────────────────────────────────────
 # Calibrate + trace + downstream pipeline integration
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Legend exclusion — guards against the phantom-swatch bug
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_legend_swatch_does_not_produce_phantom_samples(fixture_img, fixture_calib):
+    """USGS overlays a 'UWD Raw Data 300.0' legend whose blue color swatch
+    sits at a fixed pixel position on every capture. Without exclusion the
+    HSV mask picks it up as ~26 phantom samples all at the same y (and
+    therefore the same tilt) clustered in the leftmost columns. Lock that
+    bug out by checking the leftmost samples don't show the swatch's
+    fingerprint: many identical tilt values in a row.
+    """
+    df = trace_curve(fixture_img, fixture_calib)
+    leftmost = df.head(30)[TILT_COL].round(4)
+    # If the legend swatch was leaking through, ~26 of the first 30 samples
+    # would share the exact same tilt value (the y of the swatch line).
+    # Real curve data has at least a few µrad of column-to-column variation
+    # in this region of the 3-month plot — no single value should dominate.
+    most_common_count = leftmost.value_counts().iloc[0]
+    assert most_common_count < 10, (
+        f"{most_common_count} of the first 30 samples share an identical tilt — "
+        "looks like the legend swatch is leaking through the HSV mask"
+    )
+
+
+def test_legend_exclusion_actually_changes_the_trace(fixture_img, fixture_calib, monkeypatch):
+    """Sanity-check the exclusion is doing real work: with it disabled, the
+    leftmost samples should look qualitatively different. If this test fails
+    while the previous one passes, the exclusion has been removed but
+    something else is masking the swatch — investigate before deleting.
+    """
+    monkeypatch.setattr(trace_mod, "LEGEND_EXCLUSION_PLOT_RELATIVE", (0, 0, 0, 0))
+    unmasked = trace_curve(fixture_img, fixture_calib)
+    monkeypatch.undo()
+    masked = trace_curve(fixture_img, fixture_calib)
+
+    # The unmasked trace should have at least 5 more identical-value samples
+    # in its leftmost 30 rows than the masked one.
+    unmasked_top = unmasked.head(30)[TILT_COL].round(4).value_counts().iloc[0]
+    masked_top = masked.head(30)[TILT_COL].round(4).value_counts().iloc[0]
+    assert unmasked_top > masked_top + 4, (
+        f"unmasked top-value count ({unmasked_top}) should exceed "
+        f"masked ({masked_top}) by at least 5 — exclusion appears inert"
+    )
 
 
 def test_traced_data_is_consumable_by_peak_detection(fixture_img, fixture_calib):

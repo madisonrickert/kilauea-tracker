@@ -35,6 +35,29 @@ VALUE_FLOOR = 50
 # we accept the trace; below this threshold something is wrong with the mask.
 MIN_COLUMN_COVERAGE = 0.5
 
+# Legend exclusion: USGS overlays a "UWD Raw Data 300.0 / 30.0" legend in the
+# upper-left corner of every plot. The "300.0" entry's color swatch is the
+# SAME blue (H≈120) as the Az 300° curve, so without exclusion the HSV mask
+# picks up the swatch as 26 phantom samples at fixed pixel positions on every
+# capture — they then map to ~26 timestamps near the start of the plot's
+# window, all at the same fake tilt value (~13 µrad), polluting the leftmost
+# region of every source.
+#
+# Coordinates are plot-relative (i.e. inside plot_bbox after cropping), in
+# (x0, y0, x1, y1) order. The exclusion zone is generously padded to cover
+# the entire legend rectangle and not just the swatch — on THREE_MONTH the
+# real curve also passes through this region (the user has confirmed this is
+# the only source where the curve and legend overlap on the canvas), and
+# losing those samples is fine because reconciliation fills them in from
+# higher-resolution sources (TWO_DAY/WEEK/MONTH) for any recent dates.
+#
+# Verified against all 5 fixtures in tests/fixtures/: every source has the
+# legend swatch at the SAME pixel position because USGS uses identical plot
+# geometry across windows. plot_bbox is uniformly (75, 20, 826, 245) so this
+# rectangle covers full-image x∈[75,220], y∈[20,65] — i.e. x∈[~50,~220],
+# y∈[~10,~60] in raw image coords, which matches the visible legend box.
+LEGEND_EXCLUSION_PLOT_RELATIVE = (0, 0, 145, 45)
+
 
 def trace_curve(img: np.ndarray, calib: AxisCalibration) -> pd.DataFrame:
     """Extract the blue (Az 300°) tilt curve from a calibrated image.
@@ -63,6 +86,16 @@ def trace_curve(img: np.ndarray, calib: AxisCalibration) -> pd.DataFrame:
         & (hsv[:, :, 1] >= SATURATION_FLOOR)
         & (hsv[:, :, 2] >= VALUE_FLOOR)
     )
+
+    # Zero out the legend region so the blue swatch doesn't get traced as
+    # phantom samples. Coordinates are plot-relative because `plot` is the
+    # already-cropped interior. Clamp to the actual plot dimensions in case
+    # a future calibration produces an unusually small plot bbox.
+    lx0, ly0, lx1, ly1 = LEGEND_EXCLUSION_PLOT_RELATIVE
+    lx1 = min(lx1, plot.shape[1])
+    ly1 = min(ly1, plot.shape[0])
+    if lx1 > lx0 and ly1 > ly0:
+        mask[ly0:ly1, lx0:lx1] = False
 
     n_columns = plot.shape[1]
     columns_with_curve = int(np.count_nonzero(mask.any(axis=0)))
