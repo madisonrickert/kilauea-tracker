@@ -58,6 +58,21 @@ class Curve:
 
 
 @dataclass(frozen=True)
+class CurveBand:
+    """A confidence ribbon around a fitted curve, evaluated on a fixed x-grid.
+
+    Each entry in `lo` and `hi` is the 10th / 90th percentile of the curve's
+    value at the corresponding `days` x-coordinate, computed from a Monte
+    Carlo sample of the curve's fit parameters. Renders as a filled region
+    between the two y-arrays.
+    """
+
+    days: np.ndarray   # float days since epoch, shape (n_grid,)
+    lo: np.ndarray     # shape (n_grid,)
+    hi: np.ndarray     # shape (n_grid,)
+
+
+@dataclass(frozen=True)
 class Prediction:
     """Result of `predict()`. Any field can be `None` if the underlying fit failed."""
 
@@ -69,6 +84,8 @@ class Prediction:
     exp_x0: Optional[float]             # the date offset baked into the exp fit
     exp_covariance: Optional[np.ndarray]  # for confidence band
     confidence_band: Optional[tuple[pd.Timestamp, pd.Timestamp]]
+    trendline_band: Optional[CurveBand]   # 80% CI ribbon around the trendline
+    exp_band: Optional[CurveBand]         # 80% CI ribbon around the exp curve
     n_peaks_in_fit: int                 # count of peaks that fed the trendline
     fit_diagnostics: dict
 
@@ -179,6 +196,8 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
             exp_x0=None,
             exp_covariance=None,
             confidence_band=None,
+            trendline_band=None,
+            exp_band=None,
             n_peaks_in_fit=n_peaks_in_fit,
             fit_diagnostics=diagnostics,
         )
@@ -213,6 +232,8 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
             exp_x0=None,
             exp_covariance=None,
             confidence_band=None,
+            trendline_band=None,
+            exp_band=None,
             n_peaks_in_fit=n_peaks_in_fit,
             fit_diagnostics=diagnostics,
         )
@@ -240,15 +261,24 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
         last_peak_day=float(peaks_df["_day"].max()),
     )
 
-    # ── Monte Carlo confidence band over the exp covariance ──────────────────
-    confidence_band = _confidence_band(
+    # ── Joint Monte Carlo: date band + trendline ribbon + exp ribbon ────────
+    # Each draw samples a fresh (A, k, C) from the exp covariance AND a fresh
+    # (slope, intercept) from a bootstrap resample of the peak set. We compute
+    # three things from those draws:
+    #   1. confidence_band: 10/90 percentile of the predicted intersection DATE
+    #   2. trendline_band:  10/90 percentile RIBBON around the linear trendline
+    #   3. exp_band:        10/90 percentile RIBBON around the exp saturation
+    confidence_band, trendline_band, exp_band = _monte_carlo_bands(
         next_event_date=next_event_date,
-        params=params,
-        covariance=covariance,
+        exp_params=params,
+        exp_covariance=covariance,
         x0_fit=x0_fit,
         last_current_day=last_current_day,
         last_peak_day=float(peaks_df["_day"].max()),
-        f_lin=trendline.f,
+        peaks_day=peaks_df["_day"].to_numpy(),
+        peaks_tilt=peaks_df[TILT_COL].to_numpy(),
+        trendline_domain=trendline.domain,
+        exp_domain=exp_curve.domain,
     )
 
     return Prediction(
@@ -260,8 +290,124 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
         exp_x0=x0_fit,
         exp_covariance=covariance,
         confidence_band=confidence_band,
+        trendline_band=trendline_band,
+        exp_band=exp_band,
         n_peaks_in_fit=n_peaks_in_fit,
         fit_diagnostics=diagnostics,
+    )
+
+
+def _monte_carlo_bands(
+    next_event_date: Optional[pd.Timestamp],
+    exp_params: np.ndarray,
+    exp_covariance: np.ndarray,
+    x0_fit: float,
+    last_current_day: float,
+    last_peak_day: float,
+    peaks_day: np.ndarray,
+    peaks_tilt: np.ndarray,
+    trendline_domain: tuple[float, float],
+    exp_domain: tuple[float, float],
+    n_samples: int = 200,
+    quantiles: tuple[float, float] = (0.10, 0.90),
+    seed: int = 0,
+    n_grid: int = 200,
+) -> tuple[
+    Optional[tuple[pd.Timestamp, pd.Timestamp]],
+    Optional[CurveBand],
+    Optional[CurveBand],
+]:
+    """Joint Monte Carlo: returns (date_band, trendline_band, exp_band).
+
+    See `predict()` for the high-level explanation. This function does the
+    actual sampling loop and computes three percentile-based confidence
+    products from the same draws.
+    """
+    if exp_covariance is None or not np.all(np.isfinite(exp_covariance)):
+        return None, None, None
+    n_peaks = len(peaks_day)
+    if n_peaks < 2:
+        return None, None, None
+
+    rng = np.random.default_rng(seed)
+    try:
+        exp_draws = rng.multivariate_normal(
+            mean=exp_params, cov=exp_covariance, size=n_samples
+        )
+    except (ValueError, np.linalg.LinAlgError):
+        return None, None, None
+
+    # x-grids for the curve ribbons. We extend the trendline grid forward to
+    # the same end as the exp curve's domain so the trendline ribbon visually
+    # reaches the predicted intersection.
+    trend_x = np.linspace(trendline_domain[0], exp_domain[1], n_grid)
+    exp_x = np.linspace(exp_domain[0], exp_domain[1], n_grid)
+
+    trend_samples: list[np.ndarray] = []  # each entry shape (n_grid,)
+    exp_samples: list[np.ndarray] = []
+    valid_dates: list[pd.Timestamp] = []
+
+    for A, k, C in exp_draws:
+        # A and k must stay positive for the saturation curve to make sense.
+        if A <= 0 or k <= 0:
+            continue
+
+        # Bootstrap resample of the peaks → fresh trendline parameters.
+        idx = rng.integers(0, n_peaks, size=n_peaks)
+        sampled_x = peaks_day[idx]
+        sampled_y = peaks_tilt[idx]
+        if len(np.unique(sampled_x)) < 2:
+            continue
+        try:
+            slope_b, intercept_b = np.polyfit(sampled_x, sampled_y, 1)
+        except (np.linalg.LinAlgError, ValueError):
+            continue
+
+        # Evaluate both curves on their grids for the ribbon bands
+        trend_samples.append(slope_b * trend_x + intercept_b)
+        exp_samples.append(exp_saturation(exp_x, A, k, C, x0_fit))
+
+        # Solve the intersection for the date band
+        def f_lin_b(x, _s=slope_b, _i=intercept_b):
+            return _s * np.asarray(x, dtype=float) + _i
+
+        def f_exp_b(x, _A=A, _k=k, _C=C, _x0=x0_fit):
+            return exp_saturation(np.asarray(x, dtype=float), _A, _k, _C, _x0)
+
+        if next_event_date is not None:
+            date, _ = _find_intersection(
+                f_exp=f_exp_b,
+                f_lin=f_lin_b,
+                last_current_day=last_current_day,
+                last_peak_day=last_peak_day,
+            )
+            if date is not None:
+                valid_dates.append(date)
+
+    if not trend_samples or not exp_samples:
+        return None, None, None
+
+    # ── Date confidence band ─────────────────────────────────────────────────
+    if len(valid_dates) < 10 or next_event_date is None:
+        date_band = None
+    else:
+        sorted_dates = sorted(valid_dates)
+        lo_idx = int(quantiles[0] * len(sorted_dates))
+        hi_idx = min(int(quantiles[1] * len(sorted_dates)), len(sorted_dates) - 1)
+        date_band = (sorted_dates[lo_idx], sorted_dates[hi_idx])
+
+    # ── Curve ribbons ────────────────────────────────────────────────────────
+    trend_arr = np.asarray(trend_samples)  # (n_valid, n_grid)
+    exp_arr = np.asarray(exp_samples)      # (n_valid, n_grid)
+    trend_lo = np.quantile(trend_arr, quantiles[0], axis=0)
+    trend_hi = np.quantile(trend_arr, quantiles[1], axis=0)
+    exp_lo = np.quantile(exp_arr, quantiles[0], axis=0)
+    exp_hi = np.quantile(exp_arr, quantiles[1], axis=0)
+
+    return (
+        date_band,
+        CurveBand(days=trend_x, lo=trend_lo, hi=trend_hi),
+        CurveBand(days=exp_x, lo=exp_lo, hi=exp_hi),
     )
 
 
@@ -272,45 +418,76 @@ def _confidence_band(
     x0_fit: float,
     last_current_day: float,
     last_peak_day: float,
-    f_lin: Callable[[float], float],
+    peaks_day: np.ndarray,
+    peaks_tilt: np.ndarray,
     n_samples: int = 200,
     quantiles: tuple[float, float] = (0.10, 0.90),
     seed: int = 0,
 ) -> Optional[tuple[pd.Timestamp, pd.Timestamp]]:
-    """10th-90th percentile dates from Monte Carlo over the exp fit covariance.
+    """10th-90th percentile dates from a joint Monte Carlo over BOTH fits.
 
-    For each of `n_samples` draws of (A, k, C) from the multivariate normal
-    defined by the curve_fit covariance matrix, re-solve the intersection
-    against the unchanged linear trendline. Report the percentile range of
-    the resulting predicted dates.
+    Each draw independently:
+      1. Samples (A, k, C) from the multivariate normal defined by curve_fit's
+         3×3 covariance matrix on the exponential parameters.
+      2. Bootstrap-resamples the peak set (with replacement) and refits a
+         fresh linear trendline through the resampled peaks. Captures
+         trendline uncertainty without assuming Gaussian residuals.
+      3. Solves the intersection of the resampled exp × resampled trendline.
 
-    Returns `None` if the all-peaks intersection is None (nothing to band) or
-    if the covariance is degenerate / fewer than 10 valid Monte Carlo
-    intersections were found.
+    Reports the 10th/90th percentile of the resulting predicted dates as an
+    80% confidence interval. The combined band correctly widens when EITHER
+    the exponential or the trendline is shaky — the previous version only
+    sampled the exp fit, which understated the uncertainty when the
+    trendline was based on few peaks.
+
+    Returns `None` if the point estimate is None, the exp covariance is
+    degenerate, fewer than 2 peaks are available to bootstrap from, or
+    fewer than 10 valid Monte Carlo intersections were found.
     """
     if next_event_date is None:
         return None
     if covariance is None or not np.all(np.isfinite(covariance)):
         return None
+    n_peaks = len(peaks_day)
+    if n_peaks < 2:
+        return None
 
     rng = np.random.default_rng(seed)
     try:
-        draws = rng.multivariate_normal(mean=params, cov=covariance, size=n_samples)
+        exp_draws = rng.multivariate_normal(
+            mean=params, cov=covariance, size=n_samples
+        )
     except (ValueError, np.linalg.LinAlgError):
         return None
 
     valid_dates: list[pd.Timestamp] = []
-    for A, k, C in draws:
+    for A, k, C in exp_draws:
         # A and k must stay positive for the saturation curve to make sense.
         if A <= 0 or k <= 0:
             continue
 
-        def f_exp_sample(x, _A=A, _k=k, _C=C, _x0=x0_fit):
+        # Bootstrap resample of the peaks (with replacement) → fresh trendline.
+        idx = rng.integers(0, n_peaks, size=n_peaks)
+        sampled_x = peaks_day[idx]
+        sampled_y = peaks_tilt[idx]
+        # Reject degenerate samples (all peaks ended up at the same date) —
+        # polyfit can't fit a line through a single x value.
+        if len(np.unique(sampled_x)) < 2:
+            continue
+        try:
+            slope_b, intercept_b = np.polyfit(sampled_x, sampled_y, 1)
+        except (np.linalg.LinAlgError, ValueError):
+            continue
+
+        def f_lin_b(x, _s=slope_b, _i=intercept_b):
+            return _s * np.asarray(x, dtype=float) + _i
+
+        def f_exp_b(x, _A=A, _k=k, _C=C, _x0=x0_fit):
             return exp_saturation(np.asarray(x, dtype=float), _A, _k, _C, _x0)
 
         date, _ = _find_intersection(
-            f_exp=f_exp_sample,
-            f_lin=f_lin,
+            f_exp=f_exp_b,
+            f_lin=f_lin_b,
             last_current_day=last_current_day,
             last_peak_day=last_peak_day,
         )
@@ -420,6 +597,8 @@ def _empty(diagnostics: dict, n_peaks_in_fit: int = 0) -> Prediction:
         exp_x0=None,
         exp_covariance=None,
         confidence_band=None,
+        trendline_band=None,
+        exp_band=None,
         n_peaks_in_fit=n_peaks_in_fit,
         fit_diagnostics=diagnostics,
     )

@@ -16,14 +16,16 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-from .model import DATE_COL, TILT_COL, Prediction, from_days, to_days
+from .model import DATE_COL, TILT_COL, CurveBand, Prediction, from_days, to_days
 
 # Visual defaults — kept here so the Streamlit theme and the chart agree.
 TILT_LINE_COLOR = "#79b8ff"           # cool blue for raw tilt
 PEAK_FIT_COLOR = "#39d353"            # bright green X — peaks used for the fit
 PEAK_OUT_COLOR = "rgba(57, 211, 83, 0.35)"  # dimmed — peaks NOT in the fit
 TRENDLINE_COLOR = "#ff6b35"           # lava orange (matches .streamlit/config.toml)
+TRENDLINE_BAND_FILL = "rgba(255, 107, 53, 0.18)"
 EXP_COLOR = "#bc8cff"                 # violet for the exponential
+EXP_BAND_FILL = "rgba(188, 140, 255, 0.18)"
 NEXT_EVENT_COLOR = "#ff4d4d"
 CONFIDENCE_BAND_FILL = "rgba(255, 77, 77, 0.22)"
 CONFIDENCE_BAND_LINE = "rgba(255, 77, 77, 0.55)"
@@ -126,7 +128,25 @@ def build_figure(
 
     extent_end_day = _resolve_extent_end_day(tilt_df, prediction)
 
-    # ── 3. linear trendline ─────────────────────────────────────────────────
+    # ── 3a. trendline 80% CI ribbon (drawn BEHIND the trendline) ────────────
+    if prediction.trendline_band is not None:
+        _add_band(
+            fig,
+            band=prediction.trendline_band,
+            fillcolor=TRENDLINE_BAND_FILL,
+            name="Trendline 80% CI",
+        )
+
+    # ── 3b. exp curve 80% CI ribbon (drawn BEHIND the exp curve) ────────────
+    if prediction.exp_band is not None:
+        _add_band(
+            fig,
+            band=prediction.exp_band,
+            fillcolor=EXP_BAND_FILL,
+            name="Exp fit 80% CI",
+        )
+
+    # ── 3c. linear trendline ────────────────────────────────────────────────
     if prediction.trendline is not None:
         n = prediction.n_peaks_in_fit
         _add_curve(
@@ -284,6 +304,31 @@ def _resolve_extent_end_day(
     if prediction.exp_curve is not None:
         candidates.append(prediction.exp_curve.domain[1])
     return max(candidates) if candidates else None
+
+
+def _add_band(
+    fig: go.Figure,
+    *,
+    band: CurveBand,
+    fillcolor: str,
+    name: str,
+) -> None:
+    """Render a CurveBand as a filled ribbon between hi and lo curves."""
+    dates = [from_days(d) for d in band.days]
+    # Plotly's "fill='toself'" needs a closed polygon: forward along hi,
+    # then back along lo reversed.
+    fig.add_trace(
+        go.Scatter(
+            x=dates + dates[::-1],
+            y=list(band.hi) + list(band.lo)[::-1],
+            fill="toself",
+            fillcolor=fillcolor,
+            line=dict(width=0),
+            name=name,
+            hoverinfo="skip",
+            showlegend=True,
+        )
+    )
 
 
 def _add_curve(

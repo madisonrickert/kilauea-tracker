@@ -136,6 +136,19 @@ with st.sidebar:
     )
 
     st.divider()
+    st.subheader("Display")
+    timezone_choice = st.selectbox(
+        "Time zone",
+        options=["HST (Pacific/Honolulu)", "UTC"],
+        index=0,
+        help="All displayed dates use this time zone. HST is the local time at Kīlauea.",
+    )
+    DISPLAY_TZ = (
+        "Pacific/Honolulu" if timezone_choice.startswith("HST") else "UTC"
+    )
+    TZ_LABEL = "HST" if DISPLAY_TZ == "Pacific/Honolulu" else "UTC"
+
+    st.divider()
     st.caption("**Data source**")
     st.caption(
         "Electronic tilt at the **UWD** station (Uēkahuna, summit), **azimuth 300°**. "
@@ -231,10 +244,29 @@ st.caption(
 )
 
 
-def _fmt_date(ts: pd.Timestamp | None) -> str:
+def _to_display_tz(ts: pd.Timestamp | None) -> pd.Timestamp | None:
+    """Convert a naive (assumed-UTC) timestamp into the user's chosen tz."""
     if ts is None:
+        return None
+    aware = ts.tz_localize("UTC") if ts.tzinfo is None else ts
+    return aware.tz_convert(DISPLAY_TZ)
+
+
+def _fmt_date(ts: pd.Timestamp | None) -> str:
+    """Pretty long-form date for the big metric tiles."""
+    converted = _to_display_tz(ts)
+    if converted is None:
         return "—"
-    return ts.strftime("%Y-%m-%d %H:%M HST")
+    # e.g. "Sat, Apr 18 · 3:23 PM HST"
+    return f"{converted.strftime('%a, %b %-d · %-I:%M %p')} {TZ_LABEL}"
+
+
+def _fmt_short(ts: pd.Timestamp | None) -> str:
+    """Short month/day for the confidence band delta."""
+    converted = _to_display_tz(ts)
+    if converted is None:
+        return "—"
+    return converted.strftime("%b %-d")
 
 
 def _ago(ts: datetime) -> str:
@@ -253,7 +285,7 @@ def _fmt_band(band: tuple[pd.Timestamp, pd.Timestamp] | None) -> str:
     if band is None:
         return "—"
     lo, hi = band
-    return f"{lo.strftime('%m/%d')} → {hi.strftime('%m/%d')}"
+    return f"{_fmt_short(lo)} → {_fmt_short(hi)}"
 
 
 col1, col2, col3 = st.columns(3)
