@@ -509,7 +509,7 @@ def _fmt_band(band: tuple[pd.Timestamp, pd.Timestamp] | None) -> str:
 col1, col2, col3 = st.columns(3)
 with col1:
     st.metric(
-        "Next fountain event",
+        "Next fountain event (model)",
         _fmt_date(prediction.next_event_date),
         delta=_fmt_band(prediction.confidence_band),
         delta_color="off",
@@ -520,6 +520,47 @@ with col1:
             "from the exponential fit's covariance matrix."
         ),
     )
+
+    # Independent baseline forecast: median time between detected peaks
+    # added to the most recent peak. Doesn't use the trendline or the exp
+    # curve at all — useful as a sanity check on the model. If both
+    # predictions agree, confidence is higher; if they diverge, the model
+    # is struggling with the current regime.
+    if prediction.interval_based_next_event_date is not None:
+        ib_date = prediction.interval_based_next_event_date
+        ib_band = prediction.interval_based_band
+        median_days = prediction.median_peak_interval_days or 0.0
+
+        # Is the interval-based estimate already in the past? That's a
+        # meaningful "we're overdue by typical-cycle reckoning" signal.
+        ib_aware = (
+            ib_date.tz_localize("UTC") if ib_date.tzinfo is None else ib_date
+        )
+        now_utc = pd.Timestamp.now(tz="UTC")
+        delta_days = (now_utc - ib_aware).total_seconds() / 86400
+        if delta_days > 0.5:
+            overdue_str = f" · ⚠️ **{delta_days:.0f}d overdue** by this metric"
+        else:
+            overdue_str = ""
+
+        band_str = ""
+        if ib_band is not None:
+            band_str = f" &nbsp;·&nbsp; IQR {_fmt_band(ib_band)}"
+
+        st.markdown(
+            f"📊 **Interval baseline:** {_fmt_short(ib_date)}"
+            f"{band_str}"
+            f"{overdue_str}",
+            help=(
+                "Independent forecast based purely on the median time "
+                f"between detected peaks ({median_days:.1f} days), added "
+                "to the most recent detected peak. Doesn't use the curve-"
+                "fit model at all — useful as a sanity check. The IQR "
+                "shows the 25th-75th percentile of historical peak "
+                "intervals so you can see how variable the cycle length "
+                "has been."
+            ),
+        )
 with col2:
     last_data = tilt_df[DATE_COL].max()
     # Compute the age of the latest sample, treating its naive timestamp as

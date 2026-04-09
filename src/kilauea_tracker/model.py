@@ -98,6 +98,17 @@ class Prediction:
     n_peaks_in_fit: int                 # count of peaks that fed the trendline
     fit_diagnostics: dict
 
+    # ── Independent baseline prediction ─────────────────────────────────────
+    # Simple "average peak interval" forecast: median time between consecutive
+    # detected peaks added to the most recent peak. Doesn't use the trendline
+    # or the exponential fit at all — useful as an independent sanity check
+    # against the model-based prediction. If both predictions agree, we have
+    # higher confidence; if they diverge significantly, the model may be
+    # struggling with the current regime.
+    interval_based_next_event_date: Optional[pd.Timestamp] = None
+    interval_based_band: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None
+    median_peak_interval_days: Optional[float] = None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Time helpers — float days since the Unix epoch
@@ -174,6 +185,36 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
     peaks_df = peaks_df.sort_values(DATE_COL).copy()
     peaks_df["_day"] = to_days(peaks_df[DATE_COL])
 
+    # ── interval-based baseline forecast ─────────────────────────────────────
+    # Compute the median time between consecutive detected peaks and project
+    # that interval forward from the most recent peak. This is a simple
+    # statistical baseline — independent of the trendline / exp-curve model
+    # below — useful as a sanity check on the model-based prediction.
+    #
+    # Use median (not mean) so a single anomalously long or short interval
+    # doesn't dominate. The "band" uses the 25th and 75th percentile
+    # intervals, giving a roughly interquartile range around the point
+    # estimate. With ~38 peaks in our current dataset that's well over the
+    # ~5-sample minimum needed for the percentiles to mean anything.
+    interval_based_date: Optional[pd.Timestamp] = None
+    interval_based_band: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None
+    median_interval_days: Optional[float] = None
+    if n_peaks_in_fit >= 2:
+        intervals_days = peaks_df["_day"].diff().dropna().to_numpy()
+        if len(intervals_days) >= 1:
+            last_peak_day = float(peaks_df["_day"].max())
+            median_interval_days = float(np.median(intervals_days))
+            interval_based_date = from_days(last_peak_day + median_interval_days)
+            if len(intervals_days) >= 3:
+                lo_interval = float(np.quantile(intervals_days, 0.25))
+                hi_interval = float(np.quantile(intervals_days, 0.75))
+                interval_based_band = (
+                    from_days(last_peak_day + lo_interval),
+                    from_days(last_peak_day + hi_interval),
+                )
+            diagnostics["median_peak_interval_days"] = median_interval_days
+            diagnostics["mean_peak_interval_days"] = float(np.mean(intervals_days))
+
     # ── linear trendline through the fit-window peaks ────────────────────────
     slope, intercept = np.polyfit(peaks_df["_day"], peaks_df[TILT_COL], 1)
     trendline = _make_linear_curve(
@@ -237,6 +278,9 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
             exp_band=None,
             n_peaks_in_fit=n_peaks_in_fit,
             fit_diagnostics=diagnostics,
+            interval_based_next_event_date=interval_based_date,
+            interval_based_band=interval_based_band,
+            median_peak_interval_days=median_interval_days,
         )
 
     # ── exponential saturation fit (v1.0:122-145) ────────────────────────────
@@ -276,6 +320,9 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
             exp_band=None,
             n_peaks_in_fit=n_peaks_in_fit,
             fit_diagnostics=diagnostics,
+            interval_based_next_event_date=interval_based_date,
+            interval_based_band=interval_based_band,
+            median_peak_interval_days=median_interval_days,
         )
 
     A_exp, k_exp, C_exp = float(params[0]), float(params[1]), float(params[2])
@@ -334,6 +381,9 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
         exp_band=exp_band,
         n_peaks_in_fit=n_peaks_in_fit,
         fit_diagnostics=diagnostics,
+        interval_based_next_event_date=interval_based_date,
+        interval_based_band=interval_based_band,
+        median_peak_interval_days=median_interval_days,
     )
 
 
