@@ -346,11 +346,17 @@ with st.expander("📡 Ingest pipeline status"):
         for r in reports:
             status_icon = "✅" if r.error is None else "❌"
             with st.container():
+                gap_str = (
+                    f", `{r.rows_dropped_as_filled}` dropped (gap-fill mode)"
+                    if r.gap_fill_mode
+                    else ""
+                )
                 st.markdown(
                     f"{status_icon} **{r.source.name}** — "
                     f"`{r.rows_traced}` rows traced, "
                     f"`{r.rows_added_to_cache}` added, "
                     f"`{r.rows_updated_in_cache}` updated"
+                    f"{gap_str}"
                 )
                 if r.last_modified:
                     st.caption(f"Last-Modified: {r.last_modified}")

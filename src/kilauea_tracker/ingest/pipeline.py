@@ -34,6 +34,7 @@ import pandas as pd
 from ..cache import DEDUPE_BUCKET, AppendReport, append_history, load_history
 from ..config import (
     ALL_SOURCES,
+    GAP_FILL_SOURCES,
     HISTORY_CSV,
     LAST_GOOD_CALIBRATION,
     USGS_TILT_URLS,
@@ -68,9 +69,11 @@ class IngestReport:
     rows_traced: int = 0                        # rows produced by trace_curve
     rows_added_to_cache: int = 0                # net new rows after dedupe
     rows_updated_in_cache: int = 0
+    rows_dropped_as_filled: int = 0             # gap-fill mode: rows whose buckets were already covered
     cache_conflicts: list[dict] = field(default_factory=list)
     applied_y_offset: Optional[float] = None    # microradians shifted by cross-source align
     overlap_buckets: int = 0                    # how many buckets the offset was computed over
+    gap_fill_mode: bool = False                 # True if this source ran in fill-gaps-only mode
     last_modified: Optional[str] = None
     calibration: Optional[AxisCalibration] = None
     warnings: list[str] = field(default_factory=list)
@@ -150,6 +153,15 @@ def ingest(
     if offset is not None:
         traced = aligned
 
+    # Gap-fill mode: drop any sample whose 15-min bucket already exists in
+    # the cache. Used for low-resolution long-history sources (DEC2024_TO_NOW)
+    # so they only fill gaps without overwriting the higher-resolution recent
+    # sources that ran earlier in the chain.
+    if source in GAP_FILL_SOURCES:
+        report.gap_fill_mode = True
+        traced, dropped = _filter_to_gap_buckets(traced, existing_for_align)
+        report.rows_dropped_as_filled = dropped
+
     # Append to the cache
     cache_report: AppendReport = append_history(traced, history_path)
     report.rows_added_to_cache = cache_report.rows_added
@@ -166,6 +178,32 @@ def ingest(
     _save_cached_last_modified(source, fetch_result.last_modified)
 
     return report
+
+
+def _filter_to_gap_buckets(
+    new_rows: pd.DataFrame,
+    existing: pd.DataFrame,
+) -> tuple[pd.DataFrame, int]:
+    """Drop new rows whose 15-min bucket already exists in `existing`.
+
+    Used by gap-fill sources so the new low-resolution data only adds rows
+    where the cache is sparse, instead of overwriting buckets covered by
+    higher-resolution sources.
+
+    Returns `(filtered_rows, dropped_count)`.
+    """
+    if len(new_rows) == 0:
+        return new_rows, 0
+    if len(existing) == 0:
+        return new_rows, 0
+
+    new_with_bucket = new_rows.copy()
+    new_with_bucket["_bucket"] = new_with_bucket[DATE_COL].dt.round(DEDUPE_BUCKET)
+    existing_buckets = set(existing[DATE_COL].dt.round(DEDUPE_BUCKET))
+    keep_mask = ~new_with_bucket["_bucket"].isin(existing_buckets)
+    dropped = int((~keep_mask).sum())
+    filtered = new_with_bucket.loc[keep_mask].drop(columns=["_bucket"])
+    return filtered, dropped
 
 
 def _align_to_cache(

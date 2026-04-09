@@ -20,12 +20,13 @@ LAST_GOOD_CALIBRATION = DATA_DIR / "last_good_calibration.json"
 
 
 class TiltSource(Enum):
-    """The four USGS tilt PNG captures we ingest."""
+    """The five USGS tilt PNG captures we ingest."""
 
     TWO_DAY = "2day"
     WEEK = "week"
     MONTH = "month"
     THREE_MONTH = "3month"
+    DEC2024_TO_NOW = "dec2024_to_now"
 
 
 # Hardcoded URLs — naming inconsistency forces this (see module docstring).
@@ -34,17 +35,38 @@ USGS_TILT_URLS: dict[TiltSource, str] = {
     TiltSource.WEEK: "https://volcanoes.usgs.gov/vsc/captures/kilauea/UWD-POC-TILT-week.png",
     TiltSource.MONTH: "https://volcanoes.usgs.gov/vsc/captures/kilauea/UWD-POC-TILT-month.png",
     TiltSource.THREE_MONTH: "https://volcanoes.usgs.gov/vsc/captures/kilauea/UWD-TILT-3month.png",
+    TiltSource.DEC2024_TO_NOW: "https://volcanoes.usgs.gov/vsc/captures/kilauea/UWD-TILT-Dec2024_to_now.png",
 }
 
-# All four sources, ordered shortest-to-longest window. Iteration order matters
-# for the cache: shorter windows have higher resolution and are appended first
-# so the dedupe (`keep="last"`) prefers them when timestamps overlap.
+# Iteration order for `ingest_all`. Each subsequent source's "new" rows
+# displace the previous source's overlapping rows (`keep="last"` in
+# append_history). So we ingest from coarsest-recent-resolution to finest:
+#   THREE_MONTH (~3h/sample)  → populates the last 3 months
+#   MONTH       (~1h/sample)  → overwrites the last month with finer data
+#   WEEK        (~13min/sample) → overwrites the last week
+#   TWO_DAY     (~4min/sample)  → overwrites the last 2 days
+#
+# DEC2024_TO_NOW runs LAST in fill-gaps-only mode (see GAP_FILL_SOURCES). Its
+# y-coordinate frame is much wider (-60 to 80 µrad) so its raw values are not
+# directly comparable to the other sources' (-30 to 20 µrad), but cross-source
+# alignment corrects for that in the overlap region. After alignment, only
+# DEC2024_TO_NOW samples that fall in 15-min buckets the cache *doesn't*
+# already have are appended — filling gaps without overwriting the higher
+# resolution recent data. This is the source that fills the ~6-week gap
+# between the legacy bootstrap (ends 2025-11-25) and THREE_MONTH's earliest
+# sample (~Jan 8 2026).
 ALL_SOURCES: tuple[TiltSource, ...] = (
     TiltSource.THREE_MONTH,
     TiltSource.MONTH,
     TiltSource.WEEK,
     TiltSource.TWO_DAY,
+    TiltSource.DEC2024_TO_NOW,
 )
+
+# Sources whose new rows should only fill gaps in the cache, not overwrite
+# existing buckets. Used for low-resolution long-history sources where the
+# higher-resolution windows already have better data for their region.
+GAP_FILL_SOURCES: frozenset = frozenset({TiltSource.DEC2024_TO_NOW})
 
 
 @dataclass(frozen=True)

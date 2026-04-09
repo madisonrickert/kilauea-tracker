@@ -16,6 +16,7 @@ from kilauea_tracker.ingest.pipeline import (
     MAX_TRUSTED_OFFSET_MICRORAD,
     MIN_OVERLAP_BUCKETS_FOR_ALIGN,
     _align_to_cache,
+    _filter_to_gap_buckets,
 )
 from kilauea_tracker.model import DATE_COL, TILT_COL
 
@@ -123,3 +124,71 @@ def test_align_does_not_mutate_inputs():
     # Original DataFrame untouched — only the returned copy is shifted.
     assert (new[TILT_COL] == new_orig_values).all()
     assert (aligned[TILT_COL] != new[TILT_COL]).all()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _filter_to_gap_buckets — used by gap-fill sources (DEC2024_TO_NOW)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_gap_filter_drops_buckets_already_in_cache():
+    """Standard case: a 5-row new trace with 2 rows whose buckets exist in
+    the cache. Those 2 should be dropped, the other 3 kept.
+    """
+    cache = pd.DataFrame(
+        {
+            DATE_COL: pd.to_datetime(
+                ["2026-01-01 00:00:00", "2026-01-01 12:00:00", "2026-01-02 00:00:00"]
+            ),
+            TILT_COL: [10.0, 11.0, 12.0],
+        }
+    )
+    new = pd.DataFrame(
+        {
+            DATE_COL: pd.to_datetime(
+                [
+                    "2026-01-01 00:05:00",  # bucket overlaps existing 00:00:00
+                    "2026-01-01 06:00:00",  # GAP — keep
+                    "2026-01-01 12:03:00",  # bucket overlaps existing 12:00:00
+                    "2026-01-01 18:00:00",  # GAP — keep
+                    "2026-01-03 00:00:00",  # GAP — keep
+                ]
+            ),
+            TILT_COL: [10.5, 9.0, 11.5, 10.0, 13.0],
+        }
+    )
+    filtered, dropped = _filter_to_gap_buckets(new, cache)
+    assert dropped == 2
+    assert len(filtered) == 3
+    kept_dates = filtered[DATE_COL].dt.strftime("%Y-%m-%d %H:%M").tolist()
+    assert kept_dates == [
+        "2026-01-01 06:00",
+        "2026-01-01 18:00",
+        "2026-01-03 00:00",
+    ]
+
+
+def test_gap_filter_with_empty_cache_keeps_everything():
+    cache = pd.DataFrame({DATE_COL: pd.Series(dtype="datetime64[ns]"), TILT_COL: []})
+    new = _series("2026-01-01", n=10, base_tilt=10.0)
+    filtered, dropped = _filter_to_gap_buckets(new, cache)
+    assert dropped == 0
+    assert len(filtered) == 10
+
+
+def test_gap_filter_with_empty_new_returns_empty():
+    cache = _series("2026-01-01", n=5, base_tilt=10.0)
+    new = pd.DataFrame({DATE_COL: pd.Series(dtype="datetime64[ns]"), TILT_COL: []})
+    filtered, dropped = _filter_to_gap_buckets(new, cache)
+    assert dropped == 0
+    assert len(filtered) == 0
+
+
+def test_gap_filter_does_not_mutate_inputs():
+    cache = _series("2026-01-01", n=5, base_tilt=10.0, freq="1h")
+    new = _series("2026-01-01", n=5, base_tilt=11.0, freq="1h")
+    new_orig = new.copy()
+    cache_orig = cache.copy()
+    _filter_to_gap_buckets(new, cache)
+    pd.testing.assert_frame_equal(new, new_orig)
+    pd.testing.assert_frame_equal(cache, cache_orig)
