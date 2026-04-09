@@ -119,6 +119,29 @@ def test_build_figure_default_zoom_is_recent_history(realistic_inputs):
     assert span > pd.Timedelta(days=30)
 
 
+def test_build_figure_zoom_expands_to_include_all_fit_peaks(realistic_inputs):
+    """When the user cranks the peak slider up, the default zoom should
+    expand backward to include the earliest peak in the fit window — not
+    cut it off at the 90-day default.
+    """
+    df, all_peaks, _, _ = realistic_inputs
+    # Use a very wide fit window: ALL detected peaks (the legacy CSV has
+    # peaks going back to 2024-12, well outside the 90-day window).
+    big_fit = all_peaks.copy().reset_index(drop=True)
+    from kilauea_tracker.model import predict
+    pred = predict(df, big_fit)
+    fig = build_figure(df, big_fit, pred, all_peaks_df=all_peaks)
+    x_range = fig.layout.xaxis.range
+    assert x_range is not None
+    earliest_peak = big_fit[DATE_COL].min()
+    chart_start = pd.Timestamp(x_range[0])
+    # The chart's left edge must be ON OR BEFORE the earliest fit peak.
+    assert chart_start <= earliest_peak, (
+        f"chart starts at {chart_start} but earliest fit peak is at "
+        f"{earliest_peak} — the peak would be cut off"
+    )
+
+
 def test_build_figure_renders_confidence_band(realistic_inputs):
     """The Monte Carlo confidence band should appear as a vertical region
     plus a phantom trace in the legend with the band width."""

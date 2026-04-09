@@ -31,6 +31,9 @@ CONFIDENCE_BAND_LINE = "rgba(255, 77, 77, 0.55)"
 # Default zoom window when no user interaction has happened yet.
 DEFAULT_ZOOM_HISTORY_DAYS = 90
 DEFAULT_ZOOM_FUTURE_DAYS = 14
+# Extra days of padding before the earliest peak that's feeding the trendline,
+# so cranking the peak slider up doesn't pin a peak to the chart's left edge.
+DEFAULT_ZOOM_PEAK_PADDING_DAYS = 7
 
 
 def build_figure(
@@ -202,7 +205,7 @@ def build_figure(
         )
 
     # ── 7. default zoom: recent history + projection horizon ────────────────
-    x_range = _default_x_range(tilt_df, prediction)
+    x_range = _default_x_range(tilt_df, fit_peaks_df, prediction)
 
     layout_kwargs = dict(
         xaxis_title="Date",
@@ -232,18 +235,33 @@ def build_figure(
 
 
 def _default_x_range(
-    tilt_df: pd.DataFrame, prediction: Prediction
+    tilt_df: pd.DataFrame,
+    fit_peaks_df: pd.DataFrame,
+    prediction: Prediction,
 ) -> Optional[list]:
-    """Pick a sensible default zoom: recent history → projection horizon.
+    """Pick a sensible default zoom: enough recent history to show every peak
+    that's currently feeding the trendline, plus the projected event window.
 
-    The full ingested history can span 16+ months but the interesting region
-    for prediction is the last few months plus the projected event window.
+    Baseline is "last 90 days," but if the user has cranked the peak count
+    slider up so the earliest fit peak is older than that, the window
+    expands backward to include it (plus a few days of padding so the peak
+    isn't pinned to the edge).
+
     Returning None lets Plotly auto-fit (used when there's no useful anchor).
     """
     if len(tilt_df) == 0:
         return None
+
     end = tilt_df[DATE_COL].max()
     start = end - pd.Timedelta(days=DEFAULT_ZOOM_HISTORY_DAYS)
+
+    # Expand backward if the earliest fit peak is older than the default window.
+    if len(fit_peaks_df) > 0:
+        earliest_fit_peak = fit_peaks_df[DATE_COL].min()
+        padded_start = earliest_fit_peak - pd.Timedelta(days=DEFAULT_ZOOM_PEAK_PADDING_DAYS)
+        if padded_start < start:
+            start = padded_start
+
     if prediction.next_event_date is not None:
         end = max(end, prediction.next_event_date)
     if prediction.confidence_band is not None:
