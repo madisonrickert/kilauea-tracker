@@ -29,8 +29,9 @@ from typing import Optional
 
 import cv2
 import numpy as np
+import pandas as pd
 
-from ..cache import AppendReport, append_history
+from ..cache import DEDUPE_BUCKET, AppendReport, append_history, load_history
 from ..config import (
     ALL_SOURCES,
     HISTORY_CSV,
@@ -38,6 +39,7 @@ from ..config import (
     USGS_TILT_URLS,
     TiltSource,
 )
+from ..model import DATE_COL, TILT_COL
 from .calibrate import AxisCalibration, calibrate_axes
 from .exceptions import CalibrationError, FetchError, IngestError, TraceError
 from .fetch import fetch_tilt_png
@@ -45,6 +47,16 @@ from .trace import trace_curve
 
 # Where the per-source `Last-Modified` headers are persisted.
 LAST_MODIFIED_FILE = LAST_GOOD_CALIBRATION.parent / "last_modified.json"
+
+# Minimum number of overlapping 15-minute buckets we need before we trust a
+# computed cross-source y-offset. Below this we leave the trace untouched
+# and let the conflict warnings (if any) surface as a real anomaly.
+MIN_OVERLAP_BUCKETS_FOR_ALIGN = 5
+
+# Don't apply offsets larger than this (in microradians). A delta this big
+# isn't a y-axis drift — it's a calibration bug, and silently shifting the
+# data by 15 µrad would mask the bug.
+MAX_TRUSTED_OFFSET_MICRORAD = 15.0
 
 
 @dataclass
@@ -57,6 +69,8 @@ class IngestReport:
     rows_added_to_cache: int = 0                # net new rows after dedupe
     rows_updated_in_cache: int = 0
     cache_conflicts: list[dict] = field(default_factory=list)
+    applied_y_offset: Optional[float] = None    # microradians shifted by cross-source align
+    overlap_buckets: int = 0                    # how many buckets the offset was computed over
     last_modified: Optional[str] = None
     calibration: Optional[AxisCalibration] = None
     warnings: list[str] = field(default_factory=list)
@@ -122,6 +136,20 @@ def ingest(
 
     report.rows_traced = len(traced)
 
+    # Cross-source y-offset alignment. Each USGS PNG re-renders with its own
+    # y-axis labels and Tesseract introduces small intercept differences;
+    # measured drift between captures is ~5-7 µrad systematic. Without
+    # correction, every overlap bucket flags a "conflict" and the model fits
+    # see step jumps where one source hands off to another. Solution: align
+    # the new trace to the existing cache by subtracting the median bucket-
+    # level delta in their overlap region.
+    existing_for_align = load_history(history_path)
+    aligned, offset, overlap_n = _align_to_cache(traced, existing_for_align)
+    report.applied_y_offset = offset
+    report.overlap_buckets = overlap_n
+    if offset is not None:
+        traced = aligned
+
     # Append to the cache
     cache_report: AppendReport = append_history(traced, history_path)
     report.rows_added_to_cache = cache_report.rows_added
@@ -138,6 +166,59 @@ def ingest(
     _save_cached_last_modified(source, fetch_result.last_modified)
 
     return report
+
+
+def _align_to_cache(
+    new_rows: pd.DataFrame,
+    existing: pd.DataFrame,
+) -> tuple[pd.DataFrame, Optional[float], int]:
+    """Compute the median y-offset between `new_rows` and `existing` in their
+    overlapping 15-min buckets, and return a copy of `new_rows` shifted by
+    that offset.
+
+    Returns `(aligned_rows, applied_offset_microrad, overlap_bucket_count)`.
+    `applied_offset_microrad` is `None` when no alignment was applied — either
+    because there wasn't enough overlap, the offset was implausibly large, or
+    one of the inputs was empty.
+
+    Why the median, not the mean: a few buckets near eruption transitions
+    have wildly different values across captures (the curve is moving fast
+    and the per-column median pixel can land at very different positions).
+    The mean would chase those outliers; the median ignores them.
+    """
+    if len(new_rows) == 0 or len(existing) == 0:
+        return new_rows, None, 0
+
+    new_buckets = (
+        new_rows[[DATE_COL, TILT_COL]]
+        .assign(_bucket=lambda d: d[DATE_COL].dt.round(DEDUPE_BUCKET))
+        .groupby("_bucket")[TILT_COL]
+        .mean()
+    )
+    existing_buckets = (
+        existing[[DATE_COL, TILT_COL]]
+        .assign(_bucket=lambda d: d[DATE_COL].dt.round(DEDUPE_BUCKET))
+        .groupby("_bucket")[TILT_COL]
+        .mean()
+    )
+    overlap_index = new_buckets.index.intersection(existing_buckets.index)
+    overlap_n = len(overlap_index)
+
+    if overlap_n < MIN_OVERLAP_BUCKETS_FOR_ALIGN:
+        return new_rows, None, overlap_n
+
+    deltas = new_buckets.loc[overlap_index] - existing_buckets.loc[overlap_index]
+    offset = float(deltas.median())
+
+    # Refuse implausibly large corrections — they indicate calibration bugs,
+    # not y-axis drift, and we want them to surface loudly rather than be
+    # silently masked.
+    if abs(offset) > MAX_TRUSTED_OFFSET_MICRORAD:
+        return new_rows, None, overlap_n
+
+    aligned = new_rows.copy()
+    aligned[TILT_COL] = aligned[TILT_COL] - offset
+    return aligned, offset, overlap_n
 
 
 def ingest_all(history_path: Path = HISTORY_CSV) -> list[IngestReport]:

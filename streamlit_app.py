@@ -365,6 +365,11 @@ with st.expander("📡 Ingest pipeline status"):
                         f"y-axis ticks recovered: {len(cal.y_labels_found)}, "
                         f"y-fit residual: {cal.fit_residual_per_axis.get('y_max_residual_microrad', 0):.3f} µrad"
                     )
+                if r.applied_y_offset is not None:
+                    st.caption(
+                        f"Cross-source y-offset: {r.applied_y_offset:+.3f} µrad "
+                        f"(median over {r.overlap_buckets} overlap buckets)"
+                    )
 
 with st.expander("ℹ️ How does this work?"):
     st.markdown(
