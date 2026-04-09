@@ -152,12 +152,28 @@ def source_csv_path(source_name: str) -> Path:
 
 @dataclass(frozen=True)
 class PeakDetectionDefaults:
-    """Defaults for `peaks.detect_peaks`, derived from v1.0's hardcoded peak data
-    (`legacy/eruption_projection.py:50-67`): peaks 8.2-11.8 µrad spaced 11-23 days."""
+    """Defaults for `peaks.detect_peaks`.
 
-    min_prominence: float = 4.0   # microradians
-    min_distance_days: float = 5.0
-    min_height: float = 5.0       # microradians
+    Originally these were derived from v1.0's hardcoded peak data
+    (`legacy/eruption_projection.py:50-67`): peaks 8.2-11.8 µrad spaced
+    11-23 days. The min_height of 5 µrad was fine for that regime.
+
+    Since then Kīlauea has shifted to a phase with much smaller eruption
+    cycles — peaks at 2-4 µrad and deflation magnitudes still around
+    7-30 µrad. The min_height floor was rejecting valid peaks (e.g.
+    2026-01-11 at 2.84 µrad, 2026-03-10 at 2.65 µrad) even though their
+    prominence (the drop to the next deflation trough) was 16-30 µrad.
+
+    Setting min_height=None defers entirely to prominence, which is the
+    metric that actually distinguishes a real eruption peak from
+    background noise. Prominence measures how much the curve rises above
+    its surrounding minima, regardless of absolute tilt level — so the
+    detector adapts as the volcano cycles through different tilt regimes.
+    """
+
+    min_prominence: float = 4.0          # microradians (drop to next trough)
+    min_distance_days: float = 5.0       # don't double-count peaks closer than this
+    min_height: float | None = None      # no absolute floor; rely on prominence
 
 
 PEAK_DEFAULTS = PeakDetectionDefaults()

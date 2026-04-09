@@ -20,23 +20,31 @@ from .config import PEAK_DEFAULTS
 from .model import DATE_COL, TILT_COL
 
 
+_UNSET = object()  # sentinel so callers can pass min_height=None to disable it
+
+
 def detect_peaks(
     tilt_df: pd.DataFrame,
     min_prominence: float | None = None,
     min_distance_days: float | None = None,
-    min_height: float | None = None,
+    min_height=_UNSET,
 ) -> pd.DataFrame:
     """Detect episodic tilt peaks.
 
     Args:
         tilt_df:           DataFrame with ['Date', 'Tilt (microradians)'].
-        min_prominence:    Minimum peak prominence in microradians. Defaults
-                           to `config.PEAK_DEFAULTS.min_prominence` (4 µrad).
+        min_prominence:    Minimum peak prominence in microradians (the size
+                           of the drop from the peak to the next deflation
+                           trough). Defaults to
+                           `config.PEAK_DEFAULTS.min_prominence` (4 µrad).
         min_distance_days: Minimum time gap between detected peaks. Defaults
                            to `config.PEAK_DEFAULTS.min_distance_days` (5 days).
-        min_height:        Minimum absolute tilt for a sample to count as a
+        min_height:        Minimum *absolute* tilt for a sample to count as a
                            candidate peak. Defaults to
-                           `config.PEAK_DEFAULTS.min_height` (5 µrad).
+                           `config.PEAK_DEFAULTS.min_height` (None — no
+                           absolute floor, rely on prominence). Pass an
+                           explicit number to override; pass `None` to
+                           disable the absolute floor.
 
     Returns:
         DataFrame with columns ['Date', 'Tilt (microradians)', 'prominence'],
@@ -47,7 +55,7 @@ def detect_peaks(
         min_prominence = defaults["min_prominence"]
     if min_distance_days is None:
         min_distance_days = defaults["min_distance_days"]
-    if min_height is None:
+    if min_height is _UNSET:
         min_height = defaults["min_height"]
 
     if len(tilt_df) == 0:
@@ -66,6 +74,7 @@ def detect_peaks(
     if len(df) < 2:
         return _empty_peaks_df()
 
+    # Note: pandas 4.x deprecated capital `H` in favor of lowercase `h`.
     resampled = df.resample("1h").mean().interpolate(method="linear")
     if len(resampled) == 0:
         return _empty_peaks_df()

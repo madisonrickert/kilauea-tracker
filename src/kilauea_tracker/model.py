@@ -42,6 +42,15 @@ _PROJECTION_WINDOW_DAYS = 90.0
 # `curve_fit` retry budget — same as v1.0:142.
 _CURVE_FIT_MAXFEV = 5000
 
+# Physical upper bound on the exp saturation amplitude `A`. Tilt cycles in
+# any plausible regime peak at 5-15 µrad and the asymptote is no more than
+# ~50 µrad above the trough — so capping `A` at 50 prevents the fitter from
+# escaping into degenerate (A→∞, k→0) solutions when the recovery hasn't
+# yet developed enough curvature to pin down both parameters. With the cap,
+# the fit gracefully degrades to "almost-linear" instead of producing
+# nonsensical six-figure asymptotes that confuse the diagnostics panel.
+_MAX_EXP_AMPLITUDE_MICRORAD = 50.0
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Public dataclasses
@@ -175,15 +184,43 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
     )
     diagnostics["trendline_slope_per_day"] = float(slope)
 
-    # ── current episode = tilt samples strictly after the most recent peak ──
+    # ── current episode = recovery phase after the most recent fountain event ─
+    # The fountain event is the sharp deflation that drops tilt by 10-30 µrad
+    # over a few hours. The last detected peak marks the *start* of the
+    # deflation; the *bottom* of the deflation (the trough) is where the
+    # current saturating-rebuild episode begins. Fitting an exp curve to the
+    # data starting at the peak is wrong because the first few hours include
+    # the deflation drop itself, which fits an exponential SATURATION model
+    # extremely badly and degrades the rest of the fit.
+    #
+    # We find the trough as the argmin of tilt in the post-peak window,
+    # constrained to the last 14 days (long enough to bracket any plausible
+    # fountain event but short enough to avoid grabbing an old trough from a
+    # previous cycle if peak detection missed an intermediate peak).
     last_peak_date = peaks_df[DATE_COL].max()
-    current = (
+    post_peak = (
         tilt_df[tilt_df[DATE_COL] > last_peak_date]
         .sort_values(DATE_COL)
         .copy()
     )
+    if len(post_peak) > 0:
+        # Cap the trough search at 14 days post-peak. The deflation usually
+        # bottoms out within ~24h; 14d is a safety margin.
+        search_end = last_peak_date + pd.Timedelta(days=14)
+        trough_search = post_peak[post_peak[DATE_COL] <= search_end]
+        if len(trough_search) > 0:
+            trough_idx = trough_search[TILT_COL].idxmin()
+            trough_date = trough_search.loc[trough_idx, DATE_COL]
+            current = post_peak[post_peak[DATE_COL] >= trough_date].copy()
+        else:
+            current = post_peak
+    else:
+        current = post_peak
+
     current["_day"] = to_days(current[DATE_COL])
     diagnostics["current_episode_n"] = int(len(current))
+    if len(current) > 0:
+        diagnostics["current_episode_start"] = str(current[DATE_COL].iloc[0])
 
     if len(current) < 4:
         diagnostics["warning"] = "not enough current-episode points for exp fit"
@@ -219,7 +256,10 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
             y_data,
             p0=p0,
             maxfev=_CURVE_FIT_MAXFEV,
-            bounds=([0.0, 0.0, -np.inf], [np.inf, np.inf, np.inf]),
+            bounds=(
+                [0.0, 0.0, -np.inf],
+                [_MAX_EXP_AMPLITUDE_MICRORAD, np.inf, np.inf],
+            ),
         )
     except (RuntimeError, ValueError) as e:
         diagnostics["exp_fit_error"] = str(e)

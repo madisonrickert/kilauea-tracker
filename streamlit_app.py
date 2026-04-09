@@ -28,9 +28,12 @@ import streamlit as st
 
 from kilauea_tracker.cache import load_history
 from kilauea_tracker.config import (
+    ALL_SOURCES,
     HISTORY_CSV,
     INGEST_CACHE_TTL_SECONDS,
     PEAK_DEFAULTS,
+    TILT_SOURCE_NAME,
+    USGS_TILT_URLS,
 )
 from kilauea_tracker.ingest.pipeline import IngestRunResult, ingest_all
 from kilauea_tracker.model import DATE_COL, TILT_COL, predict
@@ -111,37 +114,6 @@ with st.sidebar:
         st.session_state.last_ingest_at = None  # force the block below to re-run
 
     st.divider()
-    st.subheader("Peak detection")
-
-    min_prominence = st.slider(
-        "Minimum prominence (µrad)",
-        min_value=1.0,
-        max_value=15.0,
-        value=PEAK_DEFAULTS.min_prominence,
-        step=0.5,
-        help=(
-            "How much the peak must rise above its surrounding troughs. "
-            "Higher = fewer, more confident peaks."
-        ),
-    )
-    min_distance_days = st.slider(
-        "Minimum spacing (days)",
-        min_value=1.0,
-        max_value=30.0,
-        value=PEAK_DEFAULTS.min_distance_days,
-        step=0.5,
-        help="Reject peaks that fall within this many days of a stronger one.",
-    )
-    min_height = st.slider(
-        "Minimum height (µrad)",
-        min_value=-5.0,
-        max_value=20.0,
-        value=PEAK_DEFAULTS.min_height,
-        step=0.5,
-        help="Absolute tilt threshold a sample must clear to count as a peak.",
-    )
-
-    st.divider()
     st.subheader("Trendline window")
     n_peaks_for_fit = st.slider(
         "Number of recent peaks",
@@ -151,9 +123,55 @@ with st.sidebar:
         step=1,
         help=(
             "How many of the most recent detected peaks to use for the linear "
-            "trendline fit. v1.0 used 6."
+            "trendline fit. Smaller = more sensitive to recent shifts; larger "
+            "= smoother long-term trend."
         ),
     )
+
+    # Peak detection lives behind an expander because the defaults work
+    # across the full range of Kīlauea tilt regimes (large 8-15 µrad cycles
+    # AND the recent small 2-5 µrad cycles) — users very rarely need to
+    # tune these. Keep them accessible but out of the default view.
+    with st.expander("⚙️ Advanced: peak detection", expanded=False):
+        min_prominence = st.slider(
+            "Minimum prominence (µrad)",
+            min_value=1.0,
+            max_value=15.0,
+            value=PEAK_DEFAULTS.min_prominence,
+            step=0.5,
+            help=(
+                "How much the peak must rise above its surrounding troughs. "
+                "Higher = fewer, more confident peaks. This is the dominant "
+                "filter — adjust this first if peak detection looks wrong."
+            ),
+        )
+        min_distance_days = st.slider(
+            "Minimum spacing (days)",
+            min_value=1.0,
+            max_value=30.0,
+            value=PEAK_DEFAULTS.min_distance_days,
+            step=0.5,
+            help="Reject peaks that fall within this many days of a stronger one.",
+        )
+        # PEAK_DEFAULTS.min_height defaults to None ("no absolute floor"),
+        # but a slider needs a numeric value. We use -10 µrad as the UI
+        # default — well below any real tilt-cycle trough, so it's
+        # effectively no constraint while still showing a number on the
+        # control.
+        min_height = st.slider(
+            "Minimum height (µrad)",
+            min_value=-20.0,
+            max_value=20.0,
+            value=-10.0,
+            step=0.5,
+            help=(
+                "Absolute tilt threshold a sample must clear to count as a "
+                "peak. The default of -10 effectively disables this filter "
+                "(real tilt cycles never bottom out below ~-30 µrad, so a "
+                "-10 floor accepts all real peaks). Raise this if you only "
+                "want to see peaks above a specific tilt level."
+            ),
+        )
 
     st.divider()
     st.subheader("Display")
@@ -324,9 +342,27 @@ with col1:
     )
 with col2:
     last_data = tilt_df[DATE_COL].max()
+    # Compute the age of the latest sample, treating its naive timestamp as
+    # UTC. This is the freshness number the user actually cares about: how
+    # old is the most recent data point USGS has published, regardless of
+    # when we last polled.
+    if last_data is not None and pd.notna(last_data):
+        last_data_aware = (
+            last_data.tz_localize("UTC") if last_data.tzinfo is None else last_data
+        )
+        sample_age = _ago(last_data_aware.to_pydatetime())
+    else:
+        sample_age = "—"
     st.metric(
         "Latest tilt sample",
         _fmt_date(last_data),
+        delta=sample_age,
+        delta_color="off",
+        help=(
+            "Timestamp of the most recent data point USGS has published. "
+            "USGS updates roughly every 15-30 minutes; the age below shows "
+            "how long ago that point was recorded."
+        ),
     )
 with col3:
     if st.session_state.last_ingest_at is not None:
@@ -339,13 +375,19 @@ with col3:
         else:
             indicator = "🔴"
         st.metric(
-            "Last refresh",
+            "Last poll attempt",
             f"{indicator} {_ago(st.session_state.last_ingest_at)}",
             delta=f"{successful}/{total} sources",
             delta_color="off",
+            help=(
+                "When this app last polled USGS for fresh data. A recent "
+                "poll doesn't guarantee newer data — if USGS hasn't "
+                "published anything new since the last poll, the 'Latest "
+                "tilt sample' above stays the same."
+            ),
         )
     else:
-        st.metric("Last refresh", "—")
+        st.metric("Last poll attempt", "—")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -555,6 +597,52 @@ with st.expander("📡 Ingest pipeline status"):
                         f"…and {len(reconcile_report.conflicts) - 5} more "
                         "(smaller deltas)"
                     )
+
+with st.expander("🛰 USGS source plots"):
+    st.caption(
+        "These are the live PNG plots we fetch from USGS Hawaiian Volcano "
+        "Observatory. Each one covers a different time window — they're "
+        "displayed here at thumbnail size; click any title to open the "
+        "full-resolution original on the USGS site."
+    )
+
+    # Map source_name (e.g. "two_day") back to the upstream URL via the
+    # TiltSource enum so we can render each PNG inline alongside its stats.
+    _source_to_url = {TILT_SOURCE_NAME[s]: USGS_TILT_URLS[s] for s in ALL_SOURCES}
+    _png_reports = [r for r in reports if r.source_name in _source_to_url]
+    # Render in the priority order from ALL_SOURCES (THREE_MONTH first, then
+    # MONTH, WEEK, TWO_DAY, DEC2024_TO_NOW) so the longest-window plot leads.
+    _order = {TILT_SOURCE_NAME[s]: i for i, s in enumerate(ALL_SOURCES)}
+    _png_reports.sort(key=lambda r: _order.get(r.source_name, 999))
+
+    for r in _png_reports:
+        url = _source_to_url[r.source_name]
+        col_img, col_meta = st.columns([3, 2])
+        with col_img:
+            try:
+                st.image(url, width="stretch")
+            except Exception as e:
+                st.caption(f"⚠️ could not load preview: {e}")
+        with col_meta:
+            st.markdown(f"**[{r.source_name}.png]({url})**")
+            if r.last_modified:
+                st.caption(f"USGS Last-Modified: {r.last_modified}")
+            else:
+                st.caption("USGS Last-Modified: —")
+            st.caption(f"Rows traced this run: `{r.rows_traced}`")
+            st.caption(f"Appended to source CSV: `{r.rows_appended}`")
+            if r.calibration:
+                cal = r.calibration
+                st.caption(
+                    f"Calibration: {len(cal.y_labels_found)} y-ticks recovered, "
+                    f"residual {cal.fit_residual_per_axis.get('y_max_residual_microrad', 0):.2f} µrad"
+                )
+            if r.error:
+                st.caption(f"❌ {r.error}")
+            elif not r.fetched:
+                st.caption("ℹ️ Not changed since last poll (304)")
+        st.markdown("---")
+
 
 with st.expander("ℹ️ How does this work?"):
     st.markdown(

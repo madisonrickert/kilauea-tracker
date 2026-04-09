@@ -171,10 +171,18 @@ def test_v1_regression_locked_predicted_date(bootstrap_tilt):
     The expected timestamp here was captured from v2.0's first green run on the
     v1.0 hardcoded peak list and bootstrap CSV. If a future change moves it by
     more than ±1 day, that's a real semantic change to the math.
+
+    Updated 2026-04-09 when the current-episode start was changed from "first
+    sample after the most recent peak" to "trough of the deflation that
+    follows the most recent peak". This excludes the deflation drop itself
+    from the exp fit, which previously degraded the saturation curve. The
+    new expected date is ~2 days later than the pre-fix value (Nov 28 vs
+    Nov 26) — the cleaner exp fit produces a slightly later intersection
+    with the linear trendline.
     """
     pred = predict(bootstrap_tilt, V1_HARDCODED_PEAKS)
     # Captured from a clean run; rerun and update if math intentionally changes.
-    expected = pd.Timestamp("2025-11-26 16:31:01")
+    expected = pd.Timestamp("2025-11-28 16:14:42")
     delta = abs(pred.next_event_date - expected)
     assert delta <= pd.Timedelta(days=1), (
         f"next_event_date drifted: got {pred.next_event_date}, "
