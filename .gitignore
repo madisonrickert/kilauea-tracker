@@ -18,3 +18,8 @@ htmlcov/
 
 # Per-user Claude Code settings (not project config)
 .claude/
+
+# Raw USGS UWD digital tiltmeter source files (large; the *processed*
+# CSV at data/uwd_digital_az300.csv is what's actually used by the
+# pipeline). Run scripts/import_digital_data.py to regenerate.
+data/raw/uwd_digital/UWD_*.csv

@@ -97,6 +97,57 @@ MAX_TRUSTED_OFFSET_MICRORAD = 15.0
 # what survives the merge regardless — the conflict is informational.
 CONFLICT_THRESHOLD_MICRORAD = 1.0
 
+# Proximity-gating radius. A low-priority source's sample is dropped from the
+# merge candidate set if any higher-priority source has a sample within this
+# many minutes. The motivation is dec2024_to_now's local y-frame distortion:
+# even after the median offset is applied, individual samples can still be a
+# few µrad off from the trusted reference. When such a sample lands in a
+# 15-min bucket the higher-priority source happens not to cover, it wins the
+# bucket by default and renders as a visible "spike" between adjacent
+# higher-priority samples. The proximity gate drops these would-be spikes
+# without affecting samples in genuine multi-hour gaps where dec2024_to_now
+# is providing real coverage.
+#
+# 60 min was chosen because:
+#   - digital has 30-min spacing, so a dec2024_to_now sample within ±60 min
+#     of a digital sample is always sandwiched between two digital samples
+#     (or right next to one) and adds no information.
+#   - legacy is irregular at ~6h spacing, so the gate doesn't drop
+#     dec2024_to_now samples that are filling real legacy gaps (>1h from
+#     any legacy sample).
+PROXIMITY_GATE_MINUTES = 60
+
+# Per-source overrides for the proximity gate radius. Sources NOT listed
+# here use PROXIMITY_GATE_MINUTES.
+#
+# `dec2024_to_now` gets a much larger 12-hour radius because its traced
+# curve has non-uniform local y-frame distortion: even after the global
+# median offset is applied, individual samples can still sit several µrad
+# off from the trusted reference. Within the digital-overlap range a
+# 60-minute gate is enough (digital has 30-min spacing). But within the
+# legacy-overlap range, legacy is sparse (~14h average spacing), so the
+# 60-min gate doesn't drop the dec2024_to_now samples that fall between
+# legacy samples — they then render as ~5 µrad sawtooth jumps in the
+# chart. A 12-hour gate aligns with legacy's typical spacing and ensures
+# dec2024_to_now only contributes in true multi-hour gaps.
+#
+# In the post-Nov 2025 → Jan 2026 region (no legacy, no digital, no PNG
+# coverage) dec2024_to_now is alone and the gate is a no-op — every
+# dec2024_to_now sample is far from any higher-priority sample, so they
+# all survive. That's the legitimate gap-fill case.
+PROXIMITY_GATE_OVERRIDES_MINUTES: dict[str, int] = {
+    "dec2024_to_now": 12 * 60,
+}
+
+# Sources for which we run a second-pass piecewise realignment after the
+# first-pass single-offset alignment. The piecewise pass computes per-source
+# residual offsets against each higher-priority source individually so that
+# a source with non-uniform local y-frame distortion (today: dec2024_to_now)
+# can be locally re-corrected. The realignment is purely additive on top of
+# the first-pass global offset, so a residual of 0 means "the global offset
+# was already correct in this region." See _piecewise_realign() for details.
+PIECEWISE_REALIGN_SOURCES: frozenset = frozenset({"dec2024_to_now"})
+
 
 @dataclass
 class SourceAlignment:
@@ -108,6 +159,11 @@ class SourceAlignment:
     overlap_buckets: int = 0          # how many alignment buckets the offset was computed over
     is_anchor: bool = False           # True for the first source (offset by definition 0)
     note: Optional[str] = None        # human-readable explanation when offset is None
+    rows_proximity_dropped: int = 0   # rows removed by the proximity gate before merge
+    piecewise_residuals: dict[str, float] = field(default_factory=dict)
+    """Per-higher-priority-source residual offsets applied in the second-
+    pass piecewise realignment. Empty unless the source is in
+    PIECEWISE_REALIGN_SOURCES."""
 
 
 @dataclass
@@ -132,6 +188,8 @@ class ReconcileReport:
 
 def reconcile_sources(
     sources: dict[str, pd.DataFrame],
+    *,
+    proximity_minutes: int = PROXIMITY_GATE_MINUTES,
 ) -> tuple[pd.DataFrame, ReconcileReport]:
     """Merge raw per-source tilt data into a single deterministic history.
 
@@ -140,6 +198,10 @@ def reconcile_sources(
             `config.SOURCE_PRIORITY`) to a raw, unaligned DataFrame with
             columns `[Date, Tilt (microradians)]`. Sources may be missing or
             empty — they're just skipped.
+        proximity_minutes: radius for the proximity gate (see
+            `PROXIMITY_GATE_MINUTES`). Pass 0 to disable proximity gating
+            entirely — useful for tests that intentionally construct
+            overlapping sources to exercise the merge step.
 
     Returns:
         `(merged_history_df, report)`. `merged_history_df` has the same
@@ -203,7 +265,33 @@ def reconcile_sources(
         report.rows_out = 0
         return _empty_history_df(), report
 
-    merged = _merge_by_priority(aligned, report)
+    # Second-pass piecewise realignment for sources with non-uniform local
+    # y-frame distortion (see PIECEWISE_REALIGN_SOURCES docstring).
+    for target_name in PIECEWISE_REALIGN_SOURCES:
+        aligned, residuals = _piecewise_realign(aligned, target_name)
+        if residuals:
+            record = next(
+                (s for s in report.sources if s.name == target_name), None
+            )
+            if record is not None:
+                record.piecewise_residuals = residuals
+
+    # Drop low-priority samples that would render as spikes between adjacent
+    # higher-priority samples (see PROXIMITY_GATE_MINUTES docstring).
+    if proximity_minutes > 0:
+        gated, gate_drops = _drop_samples_near_higher_priority(
+            aligned, proximity_minutes=proximity_minutes
+        )
+    else:
+        gated, gate_drops = aligned, {}
+    for source_name, n_dropped in gate_drops.items():
+        record = next(
+            (s for s in report.sources if s.name == source_name), None
+        )
+        if record is not None:
+            record.rows_proximity_dropped = n_dropped
+
+    merged = _merge_by_priority(gated, report)
     report.rows_out = len(merged)
     return merged, report
 
@@ -260,6 +348,185 @@ def _median_bucket_offset(
         return None, overlap_n
 
     return offset, overlap_n
+
+
+def _piecewise_realign(
+    aligned: dict[str, pd.DataFrame],
+    target_name: str,
+) -> tuple[dict[str, pd.DataFrame], dict[str, float]]:
+    """Refine `target_name`'s alignment by computing per-source RESIDUAL
+    offsets against each higher-priority source individually, then applying
+    the residual associated with whichever higher-priority source is closest
+    in time to each target row.
+
+    The first-pass alignment loop produces a single global offset for each
+    source — the median delta against the union of higher-priority sources.
+    For most sources that's correct, but for sources with non-uniform local
+    y-frame distortion (today: dec2024_to_now) the global median is biased
+    toward the densest co-existing source's overlap region. Less-dense
+    overlap regions are then left with several µrad of residual error.
+
+    This function computes that residual *per higher-priority source* and
+    applies it as an additional correction. After the second pass:
+
+      - In the digital-overlap range, dec2024_to_now uses the residual
+        relative to digital (≈0 by construction, since digital dominated
+        the first-pass median).
+      - In the legacy-overlap range, dec2024_to_now uses the residual
+        relative to legacy. The saw-tooth artifact at the digital→legacy
+        handoff disappears.
+      - In recent dense-PNG overlap, dec2024_to_now uses the residual
+        relative to whichever PNG source has the closest sample.
+
+    Returns `(new_aligned_dict, residuals_by_source)`. The residuals dict
+    is empty when no usable residuals could be computed (e.g. target has
+    no overlap with any higher-priority source).
+    """
+    if target_name not in aligned or len(aligned[target_name]) == 0:
+        return aligned, {}
+
+    target_df = aligned[target_name]
+    priority_index = {n: i for i, n in enumerate(SOURCE_PRIORITY)}
+    target_priority = priority_index.get(target_name, len(SOURCE_PRIORITY))
+
+    # Compute the residual median delta against each higher-priority source
+    # individually, using the SAME bucket granularity as the first-pass
+    # alignment so the numbers are comparable.
+    per_source_residuals: dict[str, float] = {}
+    for other_name, other_df in aligned.items():
+        if other_name == target_name or len(other_df) == 0:
+            continue
+        other_priority = priority_index.get(other_name, len(SOURCE_PRIORITY))
+        if other_priority >= target_priority:
+            continue
+        residual, n = _median_bucket_offset(target_df, other_df)
+        if residual is not None and n >= MIN_OVERLAP_BUCKETS:
+            per_source_residuals[other_name] = residual
+
+    if not per_source_residuals:
+        return aligned, {}
+
+    # Build a sorted lookup of (date, source_name) for the higher-priority
+    # sources we have residuals for. Each target row gets the residual of
+    # whichever source's nearest sample is closest in time.
+    rows: list[tuple[pd.Timestamp, str]] = []
+    for src_name in per_source_residuals:
+        for d in aligned[src_name][DATE_COL]:
+            rows.append((pd.Timestamp(d), src_name))
+    if not rows:
+        return aligned, per_source_residuals
+
+    rows.sort(key=lambda r: r[0])
+    nearest_lookup = pd.DataFrame(rows, columns=["_date", "_src"])
+    nearest_lookup["_date"] = pd.to_datetime(nearest_lookup["_date"]).astype(
+        "datetime64[ns]"
+    )
+
+    target_sorted = target_df.sort_values(DATE_COL).reset_index(drop=True).copy()
+    target_sorted[DATE_COL] = target_sorted[DATE_COL].astype("datetime64[ns]")
+
+    nearest = pd.merge_asof(
+        target_sorted[[DATE_COL]].copy(),
+        nearest_lookup,
+        left_on=DATE_COL,
+        right_on="_date",
+        direction="nearest",
+    )
+
+    corrections = nearest["_src"].map(per_source_residuals).fillna(0.0)
+
+    new_target = target_sorted.copy()
+    new_target[TILT_COL] = new_target[TILT_COL] - corrections.values
+
+    new_aligned = dict(aligned)
+    new_aligned[target_name] = new_target
+    return new_aligned, per_source_residuals
+
+
+def _drop_samples_near_higher_priority(
+    aligned: dict[str, pd.DataFrame],
+    *,
+    proximity_minutes: int = PROXIMITY_GATE_MINUTES,
+) -> tuple[dict[str, pd.DataFrame], dict[str, int]]:
+    """Drop low-priority samples that fall within `proximity_minutes` of any
+    higher-priority sample.
+
+    Each source can override the default radius via
+    `PROXIMITY_GATE_OVERRIDES_MINUTES`. Sources that opt for a larger
+    radius are dropped more aggressively when higher-priority sources are
+    nearby — used today for dec2024_to_now whose local y-frame distortion
+    means even a "well aligned" sample can render as a sawtooth between
+    legacy samples that are 2-12 hours away.
+
+    Why this exists: dec2024_to_now's traced curve has non-uniform local
+    y-frame distortion. Even after a global median offset is applied, an
+    individual dec2024_to_now sample can still sit a few µrad off from the
+    trusted reference. When such a sample lands in a 15-min merge bucket
+    that no higher-priority source happens to cover, it wins by default and
+    renders as a visible spike between the adjacent higher-priority samples.
+    Proximity gating drops the spike-makers BEFORE the merge, leaving
+    higher-priority sources to render their natural smooth curves and only
+    letting low-priority sources contribute in genuine multi-hour gaps.
+
+    Returns `(gated_aligned, drops_per_source)`. The dict counts how many
+    rows were dropped from each source so the report can surface it.
+    """
+    priority_index = {name: i for i, name in enumerate(SOURCE_PRIORITY)}
+
+    result: dict[str, pd.DataFrame] = {}
+    drops: dict[str, int] = {}
+
+    for name, df in aligned.items():
+        my_priority = priority_index.get(name, len(SOURCE_PRIORITY))
+        # Per-source override takes precedence over the caller-supplied default.
+        my_radius = PROXIMITY_GATE_OVERRIDES_MINUTES.get(name, proximity_minutes)
+        proximity = pd.Timedelta(minutes=my_radius)
+        # Build the union of all higher-priority sources' timestamps. We
+        # only care about the dates here; the tilt values don't matter for
+        # proximity testing.
+        higher_dates = []
+        for other_name, other_df in aligned.items():
+            other_priority = priority_index.get(other_name, len(SOURCE_PRIORITY))
+            if other_priority < my_priority and len(other_df) > 0:
+                higher_dates.append(other_df[DATE_COL])
+
+        if not higher_dates:
+            # No higher-priority sources to gate against — pass through.
+            result[name] = df
+            continue
+
+        higher = pd.concat(higher_dates, ignore_index=True)
+        # Normalize to nanosecond resolution so merge_asof's dtype check
+        # passes — different sources can carry M8[us] vs M8[ns] depending
+        # on how they were ingested (PNG traces produce ns; the digital
+        # CSV via pandas.read_csv produces us).
+        higher = pd.to_datetime(higher).astype("datetime64[ns]")
+        higher = higher.sort_values().reset_index(drop=True)
+
+        df_sorted = df.sort_values(DATE_COL).reset_index(drop=True).copy()
+        df_sorted[DATE_COL] = df_sorted[DATE_COL].astype("datetime64[ns]")
+        higher_df = pd.DataFrame({"_higher_date": higher})
+
+        # merge_asof finds the nearest higher-priority date for each row in
+        # df_sorted in O(n log m) time. Both inputs must be sorted, which
+        # they are.
+        nearest = pd.merge_asof(
+            df_sorted,
+            higher_df,
+            left_on=DATE_COL,
+            right_on="_higher_date",
+            direction="nearest",
+        )
+        time_to_higher = (nearest[DATE_COL] - nearest["_higher_date"]).abs()
+        keep_mask = time_to_higher > proximity
+
+        kept = df_sorted[keep_mask].reset_index(drop=True)
+        result[name] = kept
+        n_dropped = int((~keep_mask).sum())
+        if n_dropped > 0:
+            drops[name] = n_dropped
+
+    return result, drops
 
 
 def _merge_by_priority(

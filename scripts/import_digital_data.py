@@ -1,9 +1,9 @@
 """One-shot import of the USGS UWD digital tiltmeter data.
 
-The digital files at `~/Downloads/UWD_digital/` contain 1-minute samples of
-raw X-Y tilt from the Uēkahuna LILY borehole tiltmeter for Jan–Jun 2025. They
-are *much* more accurate than anything we trace out of the USGS plot images,
-but they are NOT live — USGS publishes them as a one-time research release.
+The digital files are 1-minute samples of raw X-Y tilt from the Uēkahuna
+LILY borehole tiltmeter for Jan–Jun 2025. They are *much* more accurate
+than anything we trace out of the USGS plot images, but they are NOT live —
+USGS publishes them as a one-time research release.
 
 This script:
   1. Reads the 6 segment CSVs (file boundaries are at instrument relevelings).
@@ -12,10 +12,15 @@ This script:
          tilt_300 = Xtilt * sin(300°) + Ytilt * cos(300°)
   3. Resamples each segment to 30-minute means (1-minute spacing is overkill
      for our model and would balloon the committed CSV).
-  4. Tags each row with `segment` (1..6) so the ingest pipeline can align
-     each releveling-bounded segment independently against the existing
-     cache (each releveling resets the absolute baseline).
+  4. Tags each row with `segment` (1..6) so the reconcile layer can align
+     each releveling-bounded segment independently if it ever needs to.
   5. Writes the result to `data/uwd_digital_az300.csv` for the pipeline.
+
+Place the raw `UWD_*.csv` segment files inside `data/raw/uwd_digital/` and
+run the script with no arguments. The raw directory is gitignored because
+the source files are large and the *processed* CSV (~350 KB) is what
+actually feeds the pipeline. If you keep the raw files somewhere else,
+pass `--source DIR` to point at them.
 
 Run with:
     uv run python scripts/import_digital_data.py [--source DIR]
@@ -29,8 +34,11 @@ from pathlib import Path
 
 import pandas as pd
 
-DEFAULT_SOURCE = Path.home() / "Downloads" / "UWD_digital"
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# Default to a project-relative path so the script is self-contained — no
+# user-specific Downloads paths leaking into the app. The directory is
+# gitignored; drop the raw segment files here before running.
+DEFAULT_SOURCE = REPO_ROOT / "data" / "raw" / "uwd_digital"
 OUTPUT_PATH = REPO_ROOT / "data" / "uwd_digital_az300.csv"
 
 # Resample period — 30 min is fine grained enough to capture the model's
@@ -82,18 +90,35 @@ def main() -> int:
         "--source",
         type=Path,
         default=DEFAULT_SOURCE,
-        help="Directory containing UWD_*.csv files (default: ~/Downloads/UWD_digital)",
+        help=(
+            "Directory containing UWD_*.csv segment files. Defaults to the "
+            "project-relative path data/raw/uwd_digital/ — drop the raw "
+            "files there to keep the import self-contained."
+        ),
     )
     args = parser.parse_args()
 
     source: Path = args.source
     if not source.exists():
-        print(f"ERROR: source directory does not exist: {source}")
+        rel = (
+            source.relative_to(REPO_ROOT)
+            if source.is_absolute() and REPO_ROOT in source.parents
+            else source
+        )
+        print(f"ERROR: source directory does not exist: {rel}")
+        print(
+            "       Create it and place the UWD_*.csv segment files inside, "
+            "or pass --source DIR to point at them."
+        )
         return 1
 
     files = sorted(source.glob("UWD_*.csv"))
     if not files:
         print(f"ERROR: no UWD_*.csv files found in {source}")
+        print(
+            "       The raw segment files are named UWD_<segment>.csv. "
+            "Check that the directory contains them."
+        )
         return 1
 
     print(f"Reading {len(files)} segment file(s) from {source}…")

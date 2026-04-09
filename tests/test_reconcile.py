@@ -26,6 +26,7 @@ from kilauea_tracker.reconcile import (
     CONFLICT_THRESHOLD_MICRORAD,
     MAX_TRUSTED_OFFSET_MICRORAD,
     MIN_OVERLAP_BUCKETS,
+    PROXIMITY_GATE_MINUTES,
     reconcile_sources,
 )
 
@@ -192,13 +193,16 @@ def test_higher_priority_source_wins_overlapping_buckets():
     """Two sources, both perfectly aligned. The higher-priority one wins
     every bucket — but the lower-priority one still contributes its
     non-overlapping buckets.
+
+    Disable proximity gating because the test deliberately creates
+    overlapping samples to exercise the merge step.
     """
     digital = _series("2025-03-01", n=24, base=10.0, freq="1h")
     # two_day overlaps the second half of digital and extends past it
     two_day = _series("2025-03-01 12:00:00", n=24, base=10.0, freq="1h")
     sources = {"digital": digital, "two_day": two_day}
 
-    merged, _ = reconcile_sources(sources)
+    merged, _ = reconcile_sources(sources, proximity_minutes=0)
 
     # Total unique 15-min buckets across both = 36 hourly buckets with no gaps
     # (digital 0-23, two_day 12-35) = 36 distinct buckets
@@ -210,13 +214,17 @@ def test_higher_priority_source_wins_overlapping_buckets():
 def test_low_priority_source_only_fills_gaps():
     """Lowest-priority source only contributes where higher-priority sources
     have nothing — exactly the behavior that used to require GAP_FILL_SOURCES.
+
+    Disable proximity gating because the test deliberately creates
+    overlapping hourly samples; with the gate enabled the lower-priority
+    source's overlap-region samples would be dropped before the merge.
     """
     digital = _series("2025-03-01", n=12, base=10.0, freq="1h")
     # three_month overlaps digital but ALSO extends earlier (the "gap")
     three_month = _series("2025-02-28 12:00:00", n=24, base=10.0, freq="1h")
     sources = {"digital": digital, "three_month": three_month}
 
-    merged, _ = reconcile_sources(sources)
+    merged, _ = reconcile_sources(sources, proximity_minutes=0)
 
     # Earliest bucket should come from three_month (digital doesn't cover it)
     earliest = merged[DATE_COL].iloc[0]
@@ -227,10 +235,152 @@ def test_low_priority_source_only_fills_gaps():
     assert len(merged) == 24  # union of 12+24 with 12-bucket overlap
 
 
+def test_proximity_gate_drops_low_priority_spike_between_high_priority():
+    """The bug case from the user observation on 2025-04-20: dec2024_to_now
+    has an isolated sample at 18:07:35 with a slightly off y-frame, sandwiched
+    between two digital samples at 18:00 and 18:30. Without the gate, the
+    18:07:35 sample wins its 15-min bucket (which digital doesn't cover) and
+    renders as a visible spike in the chart. With the gate, the dec2024_to_now
+    sample is dropped because both digital samples are within 60 min of it.
+    """
+    # digital: hourly samples that don't have a row at 18:07
+    digital_dates = pd.to_datetime([
+        "2025-04-20 17:30:00",
+        "2025-04-20 18:00:00",
+        "2025-04-20 18:30:00",
+        "2025-04-20 19:00:00",
+    ])
+    digital = pd.DataFrame({DATE_COL: digital_dates, TILT_COL: [11.36, 11.36, 11.33, 11.31]})
+    # The dec2024_to_now spike sample
+    spike = pd.DataFrame(
+        {DATE_COL: pd.to_datetime(["2025-04-20 18:07:35"]), TILT_COL: [14.43]}
+    )
+
+    merged, report = reconcile_sources({"digital": digital, "dec2024_to_now": spike})
+
+    # The spike should not appear in the merged history at all
+    assert (merged[TILT_COL].between(11.0, 12.0)).all(), (
+        f"unexpected high values in merged: {merged[TILT_COL].tolist()}"
+    )
+    # And the report should record that one row was proximity-gated
+    d2n_record = next(s for s in report.sources if s.name == "dec2024_to_now")
+    assert d2n_record.rows_proximity_dropped == 1
+
+
+def test_proximity_gate_keeps_low_priority_in_genuine_gaps():
+    """The flip side of the gate: a low-priority sample that's NOT within
+    proximity of any higher-priority sample should be retained — that's the
+    whole point of having a low-priority source as a gap-filler.
+
+    Setup: digital has samples on 2025-04-20 only. dec2024_to_now has a
+    sample on 2025-04-22 (>2 days from any digital sample). The gate should
+    not touch the 2025-04-22 sample.
+    """
+    digital = _series("2025-04-20", n=8, base=10.0, freq="3h")
+    fill = pd.DataFrame(
+        {DATE_COL: pd.to_datetime(["2025-04-22 12:00:00"]), TILT_COL: [12.0]}
+    )
+
+    merged, report = reconcile_sources({"digital": digital, "dec2024_to_now": fill})
+
+    # The fill sample is far from any digital sample, so it should survive
+    assert (merged[DATE_COL] == pd.Timestamp("2025-04-22 12:00:00")).any()
+    d2n_record = next(s for s in report.sources if s.name == "dec2024_to_now")
+    assert d2n_record.rows_proximity_dropped == 0
+
+
+def test_piecewise_realign_runs_for_dec2024_to_now_and_records_residuals():
+    """The piecewise pass runs against each higher-priority source that
+    dec2024_to_now overlaps with and records a residual offset on the
+    SourceAlignment record.
+
+    Caveat: this test only verifies the MECHANICS — that the piecewise
+    pass runs, finds overlaps, and stores residuals. The residuals against
+    sources that themselves were aligned via dec2024_to_now's chain
+    (notably `legacy`, which has no direct overlap with `digital` and so
+    must align via dec2024_to_now in the alignment loop) come out as ~0
+    by construction: legacy was already shifted into dec2024_to_now's
+    local frame, so the residual between them is zero. The chicken-and-egg
+    is real and is mitigated by the per-source proximity gate override
+    (PROXIMITY_GATE_OVERRIDES_MINUTES["dec2024_to_now"] = 12h), not by
+    the piecewise pass alone. See the proximity_gate tests below.
+    """
+    digital = _series("2025-01-01", n=180, base=0.0, freq="1D")
+    legacy = pd.DataFrame(
+        {
+            DATE_COL: pd.date_range("2025-07-02", periods=120, freq="1D"),
+            TILT_COL: [0.0] * 120,
+        }
+    )
+    d2n_dates = list(pd.date_range("2025-01-01", periods=60, freq="3D")) + list(
+        pd.date_range("2025-07-02", periods=60, freq="2D")
+    )
+    d2n_tilts = [6.928] * 60 + [12.928] * 60
+    d2n = pd.DataFrame({DATE_COL: d2n_dates, TILT_COL: d2n_tilts})
+
+    sources = {
+        "digital": digital,
+        "legacy": legacy,
+        "dec2024_to_now": d2n,
+    }
+    _, report = reconcile_sources(sources, proximity_minutes=0)
+
+    d2n_record = next(s for s in report.sources if s.name == "dec2024_to_now")
+    # First-pass offset is positive (median of d2n - digital ≈ +6.928).
+    assert d2n_record.offset_microrad is not None
+    assert abs(d2n_record.offset_microrad - 6.928) < 0.5
+
+    # The piecewise pass ran and recorded residuals for both higher-
+    # priority sources. The residual VALUES are not asserted here because
+    # they depend on the alignment chain (see test docstring caveat).
+    assert "digital" in d2n_record.piecewise_residuals
+    assert "legacy" in d2n_record.piecewise_residuals
+
+
+def test_piecewise_realign_skips_sources_not_in_PIECEWISE_REALIGN_SOURCES():
+    """The realignment is targeted: it only runs for sources listed in
+    PIECEWISE_REALIGN_SOURCES (today: just dec2024_to_now). Other sources
+    keep their single-offset alignment from the first pass.
+    """
+    digital = _series("2025-01-01", n=48, base=10.0, freq="1h")
+    two_day = _series("2025-01-01", n=48, base=15.0, freq="1h")
+    sources = {"digital": digital, "two_day": two_day}
+
+    _, report = reconcile_sources(sources, proximity_minutes=0)
+    two_day_record = next(s for s in report.sources if s.name == "two_day")
+    # two_day is NOT in PIECEWISE_REALIGN_SOURCES, so its piecewise_residuals
+    # dict should be empty.
+    assert two_day_record.piecewise_residuals == {}
+
+
+def test_proximity_gate_can_be_disabled():
+    """proximity_minutes=0 disables the gate — useful for tests of the merge
+    step that intentionally construct overlapping sources.
+    """
+    digital = _series("2025-04-20", n=4, base=10.0, freq="1h")
+    spike = pd.DataFrame(
+        {DATE_COL: pd.to_datetime(["2025-04-20 00:30:00"]), TILT_COL: [15.0]}
+    )
+
+    # With gate at default 60min: spike is dropped
+    merged_gated, _ = reconcile_sources({"digital": digital, "dec2024_to_now": spike})
+    # With gate disabled: spike is kept (and wins its 15-min bucket)
+    merged_open, _ = reconcile_sources(
+        {"digital": digital, "dec2024_to_now": spike}, proximity_minutes=0
+    )
+
+    assert 15.0 not in merged_gated[TILT_COL].tolist()
+    assert 15.0 in merged_open[TILT_COL].tolist()
+
+
 def test_conflict_recorded_when_aligned_sources_disagree():
     """After alignment, if the winning source's value differs from the
     losing source's value at the SAME bucket by more than CONFLICT_THRESHOLD,
     it shows up on the report with both source names and both values.
+
+    Disable proximity gating — the test puts both sources at the same
+    timestamps to force a same-bucket disagreement, which the gate would
+    otherwise short-circuit by dropping the lower-priority source's row.
     """
     # Anchor is flat. Lower-priority source mostly agrees but one bucket
     # is +5 µrad off (the conflict).
@@ -240,7 +390,7 @@ def test_conflict_recorded_when_aligned_sources_disagree():
     new = pd.DataFrame({DATE_COL: anchor[DATE_COL].copy(), TILT_COL: new_vals})
     sources = {"digital": anchor, "two_day": new}
 
-    _, report = reconcile_sources(sources)
+    _, report = reconcile_sources(sources, proximity_minutes=0)
 
     # The median delta is 0 (most buckets agree), so the offset for two_day
     # is ~0 — meaning the aligned values are still ~10 except for one at ~15.
