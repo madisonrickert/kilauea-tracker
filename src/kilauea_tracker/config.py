@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+import pandas as pd
+
 # Project paths
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
@@ -67,6 +69,16 @@ ALL_SOURCES: tuple[TiltSource, ...] = (
 # existing buckets. Used for low-resolution long-history sources where the
 # higher-resolution windows already have better data for their region.
 GAP_FILL_SOURCES: frozenset = frozenset({TiltSource.DEC2024_TO_NOW})
+
+# When bootstrapping the cache from `legacy/Tiltmeter Data - Sheet1.csv`,
+# drop rows older than this date. The legacy file's pre-July-2025 coverage
+# is sparse and irregular (~2-day median spacing, manually digitized) while
+# DEC2024_TO_NOW provides ~15h-spaced samples for the same range. By
+# trimming the legacy bootstrap here, DEC2024_TO_NOW's gap-fill mode
+# naturally populates the pre-July buckets with its denser data on the
+# next ingest cycle. The legacy file on disk is left intact as a
+# historical record.
+LEGACY_BOOTSTRAP_CUTOFF = pd.Timestamp("2025-07-01")
 
 
 @dataclass(frozen=True)

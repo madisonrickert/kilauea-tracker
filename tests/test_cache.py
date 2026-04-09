@@ -21,6 +21,7 @@ from kilauea_tracker.cache import (
     append_history,
     load_history,
 )
+from kilauea_tracker.config import LEGACY_CSV
 from kilauea_tracker.model import DATE_COL, TILT_COL
 
 
@@ -56,6 +57,59 @@ def test_load_history_bootstraps_from_legacy(tmp_path: Path):
     # Re-loading from the cached file gives the same data
     df2 = load_history(history_csv)
     assert len(df2) == len(df)
+
+
+def test_bootstrap_respects_legacy_cutoff(tmp_path: Path):
+    """The bootstrap drops legacy rows older than `LEGACY_BOOTSTRAP_CUTOFF`.
+
+    Verifies the trim that lets DEC2024_TO_NOW provide denser coverage of the
+    pre-July-2025 range than the manually-digitized legacy data.
+    """
+    from kilauea_tracker.config import LEGACY_BOOTSTRAP_CUTOFF
+
+    history_csv = tmp_path / "tilt_history.csv"
+    df = load_history(history_csv)
+    # Every bootstrapped row must be at or after the cutoff
+    assert (df[DATE_COL] >= LEGACY_BOOTSTRAP_CUTOFF).all(), (
+        f"bootstrap returned rows older than cutoff {LEGACY_BOOTSTRAP_CUTOFF}: "
+        f"min date is {df[DATE_COL].min()}"
+    )
+    # And the cutoff actually drops something — sanity check that the legacy
+    # CSV genuinely has pre-cutoff data we'd be dropping.
+    raw_legacy = pd.read_csv(LEGACY_CSV)
+    raw_legacy[DATE_COL] = pd.to_datetime(
+        raw_legacy[DATE_COL], format="mixed", dayfirst=False
+    )
+    raw_legacy = raw_legacy.dropna()
+    pre_cutoff = (raw_legacy[DATE_COL] < LEGACY_BOOTSTRAP_CUTOFF).sum()
+    assert pre_cutoff > 0, (
+        "expected the legacy file to have some pre-cutoff rows; if this "
+        "fails the test is now meaningless"
+    )
+    assert len(df) < len(raw_legacy.dropna()), "trim should drop something"
+
+
+def test_bootstrap_cutoff_only_applies_at_bootstrap(tmp_path: Path):
+    """Reading an existing cache file does NOT apply the cutoff retroactively.
+
+    The cutoff is a bootstrap-time policy. Existing caches that already have
+    pre-cutoff rows (e.g. from a manual ingest) should be returned unchanged.
+    """
+    from kilauea_tracker.config import LEGACY_BOOTSTRAP_CUTOFF
+
+    history_csv = tmp_path / "tilt_history.csv"
+    # Seed the cache with rows that straddle the cutoff
+    pre_date = LEGACY_BOOTSTRAP_CUTOFF - pd.Timedelta(days=30)
+    post_date = LEGACY_BOOTSTRAP_CUTOFF + pd.Timedelta(days=30)
+    _seed(
+        history_csv,
+        [str(pre_date), str(post_date)],
+        [9.0, 10.0],
+    )
+    df = load_history(history_csv)
+    assert len(df) == 2, "load_history of existing cache should not trim"
+    assert (df[DATE_COL] == pd.Timestamp(pre_date)).any()
+    assert (df[DATE_COL] == pd.Timestamp(post_date)).any()
 
 
 def test_load_history_returns_empty_when_no_legacy(tmp_path: Path, monkeypatch):

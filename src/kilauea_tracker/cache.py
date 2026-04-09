@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .config import HISTORY_CSV, LEGACY_CSV
+from .config import HISTORY_CSV, LEGACY_BOOTSTRAP_CUTOFF, LEGACY_CSV
 from .model import DATE_COL, TILT_COL
 
 # How fine the dedupe key is rounded. Smaller = more rows preserved, larger =
@@ -53,11 +53,18 @@ def load_history(path: Path = HISTORY_CSV) -> pd.DataFrame:
     Bootstraps from `legacy/Tiltmeter Data - Sheet1.csv` on first run if the
     history file doesn't exist yet — gives v2.0 immediate parity with v1.0's
     11 months of input.
+
+    The bootstrap respects `config.LEGACY_BOOTSTRAP_CUTOFF`: rows older than
+    that date are dropped from the legacy import because the DEC2024_TO_NOW
+    source provides denser, more uniform samples for that range. The legacy
+    file on disk is left intact.
     """
     if not path.exists():
         if LEGACY_CSV.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
             df = _read_canonical(LEGACY_CSV)
+            if LEGACY_BOOTSTRAP_CUTOFF is not None:
+                df = df[df[DATE_COL] >= LEGACY_BOOTSTRAP_CUTOFF].reset_index(drop=True)
             df.to_csv(path, index=False)
         else:
             return _empty_history()
