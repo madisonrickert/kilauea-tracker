@@ -20,8 +20,21 @@ the cheap pure-function math.
 from __future__ import annotations
 
 import math
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Make `src/kilauea_tracker/` importable WITHOUT relying on the package being
+# pip-installed. Streamlit Cloud's build cache sometimes serves a stale
+# installed copy of the project — the streamlit_app.py file at the repo root
+# gets hot-reloaded on every push, but the installed kilauea_tracker package
+# can lag, leading to an ImportError when streamlit_app.py references a name
+# that was added to the package after the cached install. Inserting src/ at
+# the front of sys.path means imports always resolve against the source tree
+# in the live checkout, regardless of whether the package was reinstalled.
+_SRC = Path(__file__).resolve().parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 import numpy as np
 import pandas as pd
