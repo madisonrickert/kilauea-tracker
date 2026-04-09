@@ -83,6 +83,39 @@ def test_align_refuses_implausibly_large_offset():
     assert (aligned[TILT_COL] == new[TILT_COL]).all()
 
 
+def test_align_with_coarser_bucket_finds_more_overlap():
+    """The bug case: two sources whose individual sample timestamps never
+    quite line up at 15-min granularity, but DO share hourly buckets often.
+
+    Setup: cache has rows every 4 hours offset by 7 minutes (so they don't
+    snap to a 15-min boundary nicely). New trace has rows every 4 hours
+    offset by 23 minutes. At 15-min bucketing only a few collide; at 1-hour
+    bucketing every pair shares an hour bucket.
+    """
+    base = pd.Timestamp("2025-08-01 00:07:00")
+    cache = pd.DataFrame(
+        {
+            DATE_COL: [base + pd.Timedelta(hours=4 * i) for i in range(40)],
+            TILT_COL: [10.0] * 40,
+        }
+    )
+    new_base = pd.Timestamp("2025-08-01 00:23:00")
+    new = pd.DataFrame(
+        {
+            DATE_COL: [new_base + pd.Timedelta(hours=4 * i) for i in range(40)],
+            TILT_COL: [16.0] * 40,
+        }
+    )
+
+    _, _, overlap_15min = _align_to_cache(new, cache, bucket_freq="15min")
+    _, offset_1h, overlap_1h = _align_to_cache(new, cache, bucket_freq="1h")
+
+    assert overlap_1h > overlap_15min
+    assert overlap_1h >= MIN_OVERLAP_BUCKETS_FOR_ALIGN
+    assert offset_1h is not None
+    assert abs(offset_1h - 6.0) < 0.5
+
+
 def test_align_uses_median_not_mean():
     """A few outlier buckets near a transition shouldn't pull the offset.
 

@@ -167,7 +167,8 @@ ingest_warnings = [w for r in reports for w in r.warnings]
 
 if ingest_errors:
     for r in ingest_errors:
-        st.error(f"❌ **{r.source.name}**: {r.error}")
+        name = r.source.name if r.source else "DIGITAL"
+        st.error(f"❌ **{name}**: {r.error}")
 if ingest_warnings:
     with st.expander(f"⚠️ {len(ingest_warnings)} ingest warning(s)"):
         for w in ingest_warnings:
@@ -363,8 +364,9 @@ with st.expander("📡 Ingest pipeline status"):
                     if r.gap_fill_mode
                     else ""
                 )
+                source_name = r.source.name if r.source else "DIGITAL (USGS research release)"
                 st.markdown(
-                    f"{status_icon} **{r.source.name}** — "
+                    f"{status_icon} **{source_name}** — "
                     f"`{r.rows_traced}` rows traced, "
                     f"`{r.rows_added_to_cache}` added, "
                     f"`{r.rows_updated_in_cache}` updated"

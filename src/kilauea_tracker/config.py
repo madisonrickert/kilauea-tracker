@@ -19,6 +19,11 @@ DATA_DIR = PROJECT_ROOT / "data"
 HISTORY_CSV = DATA_DIR / "tilt_history.csv"
 LEGACY_CSV = PROJECT_ROOT / "legacy" / "Tiltmeter Data - Sheet1.csv"
 LAST_GOOD_CALIBRATION = DATA_DIR / "last_good_calibration.json"
+# Pre-processed digital tiltmeter data — produced once by
+# `scripts/import_digital_data.py` from USGS's research-release CSVs.
+# This is the canonical reference for Jan-Jun 2025; the ingest pipeline
+# anchors everything else to it.
+DIGITAL_CSV = DATA_DIR / "uwd_digital_az300.csv"
 
 
 class TiltSource(Enum):

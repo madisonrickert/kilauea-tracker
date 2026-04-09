@@ -30,6 +30,12 @@ render the chart.
   y-axis on every fetch via Tesseract OCR (USGS shifts the y-offset between
   captures), traces the blue Az 300° curve via OpenCV HSV masking, and merges
   new samples into a local history CSV with conflict detection.
+- **Digital tiltmeter ingest** — pre-processed CSV from USGS's research-release
+  digital tiltmeter export (Jan–Jun 2025, 1-minute samples). Resampled to
+  30-minute means and split by instrument relevelings; the ingest pipeline
+  aligns each releveling-bounded segment independently against the cache.
+  Gives us ~30× denser coverage of the early 2025 period than any image trace
+  could provide.
 - **Cross-source alignment** — each new trace is shifted by the median bucket-
   level delta against the existing cache before merging, so the systematic
   ~5–7 µrad y-offsets between captures don't introduce step jumps in the
@@ -57,8 +63,8 @@ render the chart.
   pipeline and commits the freshened `data/tilt_history.csv` back to `main`,
   triggering a Streamlit Cloud redeploy. First-time viewers always see recent
   data even if no one's clicked Refresh in a while.
-- **62 tests** covering the model, peaks, cache, plotting, calibration, trace,
-  ingest pipeline, alignment, and gap-fill modules.
+- **63 tests** covering the model, peaks, cache, plotting, calibration, trace,
+  ingest pipeline, alignment, gap-fill, and digital ingest modules.
 
 ## Run locally
 
@@ -114,11 +120,13 @@ kilauea-tracker/
 │   └── refresh-cache.yml       # daily cron that updates the committed cache
 ├── data/
 │   ├── tilt_history.csv        # the live cache (bootstraps from legacy/)
+│   ├── uwd_digital_az300.csv   # processed digital tiltmeter data (Jan-Jun 2025)
 │   └── last_modified.json      # If-Modified-Since state per source
 ├── docs/
 │   └── screenshot.png          # README screenshot
 ├── scripts/
-│   └── take_screenshot.py      # regenerate docs/screenshot.png via Playwright
+│   ├── take_screenshot.py      # regenerate docs/screenshot.png via Playwright
+│   └── import_digital_data.py  # one-shot import of USGS digital tiltmeter CSVs
 ├── src/kilauea_tracker/
 │   ├── config.py               # the 5 USGS URLs, paths, defaults
 │   ├── ingest/
@@ -197,8 +205,9 @@ loading skeleton), captures at retina, and writes `docs/screenshot.png`.
 uv run pytest
 ```
 
-Coverage: **62 tests** across model, peaks, cache, plotting, calibration,
-trace, ingest pipeline, cross-source alignment, and gap-fill modules.
+Coverage: **63 tests** across model, peaks, cache, plotting, calibration,
+trace, ingest pipeline, cross-source alignment, gap-fill, and digital ingest
+modules.
 
 ## License
 

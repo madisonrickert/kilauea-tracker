@@ -34,6 +34,7 @@ import pandas as pd
 from ..cache import DEDUPE_BUCKET, AppendReport, append_history, load_history
 from ..config import (
     ALL_SOURCES,
+    DIGITAL_CSV,
     GAP_FILL_SOURCES,
     HISTORY_CSV,
     LAST_GOOD_CALIBRATION,
@@ -49,7 +50,14 @@ from .trace import trace_curve
 # Where the per-source `Last-Modified` headers are persisted.
 LAST_MODIFIED_FILE = LAST_GOOD_CALIBRATION.parent / "last_modified.json"
 
-# Minimum number of overlapping 15-minute buckets we need before we trust a
+# Bucket size used for cross-source alignment. Intentionally coarser than the
+# dedupe bucket (15 min) so that sparse / irregular sources (legacy CSV at
+# ~6.5h spacing, DEC2024_TO_NOW at ~16h spacing) can find enough overlapping
+# buckets to compute a meaningful median offset. The dedupe step still uses
+# 15-min buckets — only the alignment step bins more aggressively.
+ALIGNMENT_BUCKET = "1h"
+
+# Minimum number of overlapping alignment buckets we need before we trust a
 # computed cross-source y-offset. Below this we leave the trace untouched
 # and let the conflict warnings (if any) surface as a real anomaly.
 MIN_OVERLAP_BUCKETS_FOR_ALIGN = 5
@@ -209,10 +217,12 @@ def _filter_to_gap_buckets(
 def _align_to_cache(
     new_rows: pd.DataFrame,
     existing: pd.DataFrame,
+    *,
+    bucket_freq: str = ALIGNMENT_BUCKET,
 ) -> tuple[pd.DataFrame, Optional[float], int]:
     """Compute the median y-offset between `new_rows` and `existing` in their
-    overlapping 15-min buckets, and return a copy of `new_rows` shifted by
-    that offset.
+    overlapping `bucket_freq` time buckets, and return a copy of `new_rows`
+    shifted by that offset.
 
     Returns `(aligned_rows, applied_offset_microrad, overlap_bucket_count)`.
     `applied_offset_microrad` is `None` when no alignment was applied — either
@@ -223,19 +233,25 @@ def _align_to_cache(
     have wildly different values across captures (the curve is moving fast
     and the per-column median pixel can land at very different positions).
     The mean would chase those outliers; the median ignores them.
+
+    Why a coarser bucket than the dedupe bucket: alignment needs to find
+    overlap between sources whose individual sample timestamps may not line
+    up exactly (e.g. legacy at ~6.5h irregular vs DEC2024_TO_NOW at ~16h).
+    Binning into 1-hour or larger buckets gives them more chances to share
+    a bucket. Dedupe stays at 15-min granularity.
     """
     if len(new_rows) == 0 or len(existing) == 0:
         return new_rows, None, 0
 
     new_buckets = (
         new_rows[[DATE_COL, TILT_COL]]
-        .assign(_bucket=lambda d: d[DATE_COL].dt.round(DEDUPE_BUCKET))
+        .assign(_bucket=lambda d: d[DATE_COL].dt.floor(bucket_freq))
         .groupby("_bucket")[TILT_COL]
         .mean()
     )
     existing_buckets = (
         existing[[DATE_COL, TILT_COL]]
-        .assign(_bucket=lambda d: d[DATE_COL].dt.round(DEDUPE_BUCKET))
+        .assign(_bucket=lambda d: d[DATE_COL].dt.floor(bucket_freq))
         .groupby("_bucket")[TILT_COL]
         .mean()
     )
@@ -259,15 +275,87 @@ def _align_to_cache(
     return aligned, offset, overlap_n
 
 
-def ingest_all(history_path: Path = HISTORY_CSV) -> list[IngestReport]:
-    """Run `ingest()` for every source in `config.ALL_SOURCES`.
+def ingest_digital(history_path: Path = HISTORY_CSV) -> IngestReport:
+    """Ingest the pre-processed UWD digital tiltmeter CSV.
 
-    Sources are processed in order from longest to shortest time window
-    (3-month → 2-day) so that the high-resolution short-window captures take
-    precedence in the cache dedupe (`keep="last"`) when their timestamps
-    overlap with the broader 3-month capture.
+    The digital data is the most accurate source we have but covers only
+    Jan-Jun 2025. It's split into 6 segments at instrument relevelings — each
+    relevel resets the absolute baseline, so we align each segment
+    independently against the existing cache (the cache supplies the
+    canonical y-frame from the live image sources).
+
+    The processed CSV is produced once by `scripts/import_digital_data.py`
+    from the raw USGS research-release files at `~/Downloads/UWD_digital/`,
+    then committed to the repo.
     """
-    return [ingest(s, history_path=history_path) for s in ALL_SOURCES]
+    # We re-use the IngestReport shape but synthesize a "source" that isn't
+    # in the TiltSource enum. The Streamlit UI special-cases `source` being
+    # None to render this differently.
+    report = IngestReport(source=None)  # type: ignore[arg-type]
+    if not DIGITAL_CSV.exists():
+        report.warnings.append(
+            f"digital data CSV not found at {DIGITAL_CSV} — "
+            "run `scripts/import_digital_data.py` to generate it"
+        )
+        return report
+
+    digital = pd.read_csv(DIGITAL_CSV)
+    digital[DATE_COL] = pd.to_datetime(digital[DATE_COL])
+    if "segment" not in digital.columns:
+        digital["segment"] = 1
+
+    existing = load_history(history_path)
+
+    aligned_segments: list[pd.DataFrame] = []
+    per_segment_offsets: list[Optional[float]] = []
+    total_overlap = 0
+    for seg_id, seg_df in digital.groupby("segment", sort=True):
+        seg_df = seg_df[[DATE_COL, TILT_COL]].copy()
+        # Each segment aligns independently — different relevelings → different
+        # absolute baselines.
+        seg_aligned, seg_offset, seg_overlap = _align_to_cache(seg_df, existing)
+        per_segment_offsets.append(seg_offset)
+        total_overlap += seg_overlap
+        if seg_offset is not None:
+            aligned_segments.append(seg_aligned)
+        else:
+            aligned_segments.append(seg_df)
+            report.warnings.append(
+                f"digital segment {seg_id} could not be aligned "
+                f"(overlap={seg_overlap} buckets)"
+            )
+
+    combined = pd.concat(aligned_segments, ignore_index=True)
+    combined = combined.sort_values(DATE_COL).reset_index(drop=True)
+    report.rows_traced = len(combined)
+    report.fetched = True
+    report.overlap_buckets = total_overlap
+    # Aggregate offset reported is the median across segments (informational)
+    valid_offsets = [o for o in per_segment_offsets if o is not None]
+    if valid_offsets:
+        report.applied_y_offset = float(np.median(valid_offsets))
+
+    cache_report = append_history(combined, history_path)
+    report.rows_added_to_cache = cache_report.rows_added
+    report.rows_updated_in_cache = cache_report.rows_updated
+    report.cache_conflicts = cache_report.conflicts
+
+    return report
+
+
+def ingest_all(history_path: Path = HISTORY_CSV) -> list[IngestReport]:
+    """Run `ingest()` for every source in `config.ALL_SOURCES`, plus the
+    one-shot digital data ingest at the end.
+
+    Order matters because each subsequent source aligns to the cache built
+    by the previous ones. The digital data runs LAST so it can anchor itself
+    to the y-frame already established by the image sources — and because
+    its samples are dense enough (~30 min) to dominate the cache for the
+    Jan-Jun 2025 region after the dedupe.
+    """
+    reports = [ingest(s, history_path=history_path) for s in ALL_SOURCES]
+    reports.append(ingest_digital(history_path=history_path))
+    return reports
 
 
 # ─────────────────────────────────────────────────────────────────────────────
