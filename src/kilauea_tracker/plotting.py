@@ -1,11 +1,8 @@
 """Build the interactive Plotly figure for the Streamlit dashboard.
 
 Replaces the matplotlib code at `legacy/eruption_projection.py:78-336`. Plotly
-gives us:
-  - hover tooltips with exact tilt readings,
-  - pan/zoom without re-running the model,
-  - no hardcoded axis limits — the user explores the chart at any time scale,
-  - the same dark theme as the rest of the Streamlit app.
+gives us hover tooltips, pan/zoom, no hardcoded axis limits, and the same dark
+theme as the rest of the Streamlit app.
 
 `build_figure` is a pure function — same inputs always give the same figure.
 The Streamlit layer is responsible for embedding it via `st.plotly_chart`.
@@ -22,35 +19,39 @@ import plotly.graph_objects as go
 from .model import DATE_COL, TILT_COL, Prediction, from_days, to_days
 
 # Visual defaults — kept here so the Streamlit theme and the chart agree.
-TILT_LINE_COLOR = "#79b8ff"        # cool blue for raw tilt
-PEAK_MARKER_COLOR = "#39d353"      # green X glyphs
-LINEAR_COLOR = "#ff6b35"           # lava orange (matches .streamlit/config.toml)
-LINEAR3_COLOR = "#ffa657"          # softer orange for the steeper trendline
-EXP_COLOR = "#bc8cff"              # violet for the exponential
+TILT_LINE_COLOR = "#79b8ff"           # cool blue for raw tilt
+PEAK_FIT_COLOR = "#39d353"            # bright green X — peaks used for the fit
+PEAK_OUT_COLOR = "rgba(57, 211, 83, 0.35)"  # dimmed — peaks NOT in the fit
+TRENDLINE_COLOR = "#ff6b35"           # lava orange (matches .streamlit/config.toml)
+EXP_COLOR = "#bc8cff"                 # violet for the exponential
 NEXT_EVENT_COLOR = "#ff4d4d"
-EARLIEST_EVENT_COLOR = "#ffd700"
-CONFIDENCE_BAND_COLOR = "rgba(255, 77, 77, 0.18)"
+CONFIDENCE_BAND_FILL = "rgba(255, 77, 77, 0.22)"
+CONFIDENCE_BAND_LINE = "rgba(255, 77, 77, 0.55)"
+
+# Default zoom window when no user interaction has happened yet.
+DEFAULT_ZOOM_HISTORY_DAYS = 90
+DEFAULT_ZOOM_FUTURE_DAYS = 14
 
 
 def build_figure(
     tilt_df: pd.DataFrame,
-    peaks_df: pd.DataFrame,
+    fit_peaks_df: pd.DataFrame,
     prediction: Prediction,
     *,
-    title: str = "Kīlauea Summit Electronic Tilt — Projection",
+    all_peaks_df: Optional[pd.DataFrame] = None,
+    title: str = "",
 ) -> go.Figure:
     """Render the full prediction chart.
 
     Args:
-        tilt_df:    DataFrame `[Date, Tilt (microradians)]` — the full history.
-        peaks_df:   DataFrame `[Date, Tilt (microradians), prominence]` from
-                    `peaks.detect_peaks`. May be empty.
-        prediction: A `Prediction` from `model.predict`. Any field may be None.
-        title:      Plot title. Pass an empty string if Streamlit is providing
-                    its own header.
-
-    Returns:
-        A `plotly.graph_objects.Figure` ready for `st.plotly_chart`.
+        tilt_df:       Full tilt history (`[Date, Tilt (microradians)]`).
+        fit_peaks_df:  Peaks that fed the trendline fit — drawn as bright X.
+        prediction:    A `Prediction` from `model.predict`. Any field may be
+                       None when the underlying fit didn't converge.
+        all_peaks_df:  Optional. All detected peaks, a superset of
+                       `fit_peaks_df`. Peaks NOT in the fit window are drawn
+                       as dimmed X markers so the user sees what was excluded.
+        title:         Plot title. Pass empty when Streamlit provides its own.
     """
     fig = go.Figure()
 
@@ -72,19 +73,45 @@ def build_figure(
             )
         )
 
-    # ── 2. detected peaks ───────────────────────────────────────────────────
-    if len(peaks_df) > 0:
+    # ── 2. detected peaks (split into "in fit" and "not in fit") ────────────
+    fit_dates: set[pd.Timestamp] = (
+        set(fit_peaks_df[DATE_COL]) if len(fit_peaks_df) > 0 else set()
+    )
+    if all_peaks_df is not None and len(all_peaks_df) > 0:
+        excluded = all_peaks_df[~all_peaks_df[DATE_COL].isin(fit_dates)]
+        if len(excluded) > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=excluded[DATE_COL],
+                    y=excluded[TILT_COL],
+                    mode="markers",
+                    name="Excluded peaks",
+                    marker=dict(
+                        symbol="x",
+                        color=PEAK_OUT_COLOR,
+                        size=10,
+                        line=dict(width=1.5, color=PEAK_OUT_COLOR),
+                    ),
+                    hovertemplate=(
+                        "Peak (excluded from fit): %{x|%Y-%m-%d %H:%M}<br>"
+                        "<b>%{y:.2f}</b> µrad"
+                        "<extra></extra>"
+                    ),
+                )
+            )
+
+    if len(fit_peaks_df) > 0:
         fig.add_trace(
             go.Scatter(
-                x=peaks_df[DATE_COL],
-                y=peaks_df[TILT_COL],
+                x=fit_peaks_df[DATE_COL],
+                y=fit_peaks_df[TILT_COL],
                 mode="markers",
-                name="Detected peaks",
+                name=f"Peaks in fit ({len(fit_peaks_df)})",
                 marker=dict(
                     symbol="x",
-                    color=PEAK_MARKER_COLOR,
+                    color=PEAK_FIT_COLOR,
                     size=14,
-                    line=dict(width=2, color=PEAK_MARKER_COLOR),
+                    line=dict(width=2, color=PEAK_FIT_COLOR),
                 ),
                 hovertemplate=(
                     "Peak: %{x|%Y-%m-%d %H:%M}<br>"
@@ -94,30 +121,18 @@ def build_figure(
             )
         )
 
-    # The forward extent for trendline visualization. We extend each curve to
-    # reach the latest of: end of its own domain, the predicted intersection
-    # date, or the latest tilt sample + 7 days. This keeps the projected lines
-    # visually anchored to the data.
     extent_end_day = _resolve_extent_end_day(tilt_df, prediction)
 
-    # ── 3. linear trendlines ────────────────────────────────────────────────
-    if prediction.linear_curve is not None:
+    # ── 3. linear trendline ─────────────────────────────────────────────────
+    if prediction.trendline is not None:
+        n = prediction.n_peaks_in_fit
         _add_curve(
             fig,
-            curve=prediction.linear_curve,
+            curve=prediction.trendline,
             extent_end_day=extent_end_day,
-            name="Linear (all peaks)",
-            color=LINEAR_COLOR,
+            name=f"Trendline (last {n} peaks)",
+            color=TRENDLINE_COLOR,
             dash="dash",
-        )
-    if prediction.linear3_curve is not None:
-        _add_curve(
-            fig,
-            curve=prediction.linear3_curve,
-            extent_end_day=extent_end_day,
-            name="Linear (last 3 peaks)",
-            color=LINEAR3_COLOR,
-            dash="dashdot",
         )
 
     # ── 4. exponential saturation curve ─────────────────────────────────────
@@ -132,7 +147,38 @@ def build_figure(
             width=2.5,
         )
 
-    # ── 5. predicted event markers ──────────────────────────────────────────
+    # ── 5. confidence band — drawn BEFORE the event marker so the marker
+    #      sits on top of the band, not under it ─────────────────────────────
+    if prediction.confidence_band is not None:
+        lo, hi = prediction.confidence_band
+        fig.add_vrect(
+            x0=lo,
+            x1=hi,
+            fillcolor=CONFIDENCE_BAND_FILL,
+            line_width=0,
+            layer="below",
+        )
+        for x_edge in (lo, hi):
+            fig.add_vline(
+                x=x_edge,
+                line=dict(color=CONFIDENCE_BAND_LINE, width=1, dash="dot"),
+                layer="below",
+            )
+        # Phantom trace so the band shows up in the legend with a width label.
+        band_width_days = (hi - lo).total_seconds() / 86400.0
+        fig.add_trace(
+            go.Scatter(
+                x=[lo, hi],
+                y=[None, None],
+                mode="lines",
+                name=f"80% confidence ({band_width_days:.0f} days)",
+                line=dict(color=CONFIDENCE_BAND_LINE, width=8),
+                showlegend=True,
+                hoverinfo="skip",
+            )
+        )
+
+    # ── 6. predicted event marker ───────────────────────────────────────────
     if prediction.next_event_date is not None and prediction.next_event_tilt is not None:
         fig.add_trace(
             go.Scatter(
@@ -155,42 +201,8 @@ def build_figure(
             )
         )
 
-    if (
-        prediction.earliest_event_date is not None
-        and prediction.earliest_event_tilt is not None
-    ):
-        fig.add_trace(
-            go.Scatter(
-                x=[prediction.earliest_event_date],
-                y=[prediction.earliest_event_tilt],
-                mode="markers",
-                name="Earliest likely",
-                marker=dict(
-                    symbol="triangle-up",
-                    color=EARLIEST_EVENT_COLOR,
-                    size=18,
-                    line=dict(width=2, color="black"),
-                ),
-                hovertemplate=(
-                    f"<b>Earliest likely fountain event</b><br>"
-                    f"{prediction.earliest_event_date.strftime('%Y-%m-%d %H:%M')}<br>"
-                    f"Tilt: {prediction.earliest_event_tilt:.2f} µrad"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-    # ── 6. confidence band (Monte Carlo over exp covariance) ────────────────
-    if prediction.confidence_band is not None:
-        lo, hi = prediction.confidence_band
-        fig.add_vrect(
-            x0=lo,
-            x1=hi,
-            fillcolor=CONFIDENCE_BAND_COLOR,
-            line_width=0,
-            annotation_text="Confidence band",
-            annotation_position="top left",
-        )
+    # ── 7. default zoom: recent history + projection horizon ────────────────
+    x_range = _default_x_range(tilt_df, prediction)
 
     layout_kwargs = dict(
         xaxis_title="Date",
@@ -206,8 +218,8 @@ def build_figure(
         ),
         margin=dict(l=60, r=30, t=40, b=60),
     )
-    # Only set the title key when one is provided. Recent Plotly versions
-    # render `title=None` as the literal string "undefined" above the chart.
+    if x_range is not None:
+        layout_kwargs["xaxis"] = dict(range=x_range)
     if title:
         layout_kwargs["title"] = title
     fig.update_layout(**layout_kwargs)
@@ -219,6 +231,27 @@ def build_figure(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _default_x_range(
+    tilt_df: pd.DataFrame, prediction: Prediction
+) -> Optional[list]:
+    """Pick a sensible default zoom: recent history → projection horizon.
+
+    The full ingested history can span 16+ months but the interesting region
+    for prediction is the last few months plus the projected event window.
+    Returning None lets Plotly auto-fit (used when there's no useful anchor).
+    """
+    if len(tilt_df) == 0:
+        return None
+    end = tilt_df[DATE_COL].max()
+    start = end - pd.Timedelta(days=DEFAULT_ZOOM_HISTORY_DAYS)
+    if prediction.next_event_date is not None:
+        end = max(end, prediction.next_event_date)
+    if prediction.confidence_band is not None:
+        end = max(end, prediction.confidence_band[1])
+    end = end + pd.Timedelta(days=DEFAULT_ZOOM_FUTURE_DAYS)
+    return [start, end]
+
+
 def _resolve_extent_end_day(
     tilt_df: pd.DataFrame, prediction: Prediction
 ) -> Optional[float]:
@@ -228,8 +261,8 @@ def _resolve_extent_end_day(
         candidates.append(to_days(tilt_df[DATE_COL].max()) + 7.0)
     if prediction.next_event_date is not None:
         candidates.append(to_days(prediction.next_event_date) + 3.0)
-    if prediction.earliest_event_date is not None:
-        candidates.append(to_days(prediction.earliest_event_date) + 3.0)
+    if prediction.confidence_band is not None:
+        candidates.append(to_days(prediction.confidence_band[1]) + 3.0)
     if prediction.exp_curve is not None:
         candidates.append(prediction.exp_curve.domain[1])
     return max(candidates) if candidates else None

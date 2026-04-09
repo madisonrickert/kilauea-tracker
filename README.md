@@ -11,8 +11,8 @@
 
 Predicts the next eruption pulse at Kīlauea by tracing tilt data straight from
 USGS plot images and fitting an exponential saturation curve against the recent
-peak trendline. Built as an interactive Streamlit app — non-technical viewers
-just open a URL and see the current prediction.
+peak trendline. Built as an interactive Streamlit web app — non-technical
+viewers just open a URL and see the current prediction.
 
 Tiltmeter source: USGS Hawaiian Volcano Observatory **UWD** station (Uēkahuna,
 summit), **azimuth 300°**.
@@ -25,29 +25,40 @@ render the chart.
 
 ## What's in v2.0
 
-- **Automated image ingestion** — fetches the four USGS tilt PNGs (2-day,
-  week, month, 3-month), re-calibrates the y-axis on every fetch via
-  Tesseract OCR (USGS shifts the y-offset between captures), traces the blue
-  Az 300° curve via OpenCV HSV masking, and merges new samples into a local
-  history CSV with conflict detection.
-- **Auto peak detection** — `scipy.signal.find_peaks` over a 1-hour
-  resampled tilt series. Replaces v1.0's hardcoded 6-peak list. Tunable from
-  the sidebar.
-- **Same v1.0 model** — linear trendline through recent peaks × exponential
-  saturation fit on the current episode, intersected via `scipy.optimize.brentq`.
-  Bracketed root finding (more robust than v1.0's `fsolve`).
+- **Automated image ingestion** — fetches **five** USGS tilt PNGs (2-day, week,
+  month, 3-month, and the long-history Dec 2024 → now plot), re-calibrates the
+  y-axis on every fetch via Tesseract OCR (USGS shifts the y-offset between
+  captures), traces the blue Az 300° curve via OpenCV HSV masking, and merges
+  new samples into a local history CSV with conflict detection.
+- **Cross-source alignment** — each new trace is shifted by the median bucket-
+  level delta against the existing cache before merging, so the systematic
+  ~5–7 µrad y-offsets between captures don't introduce step jumps in the
+  merged time series.
+- **Gap-fill mode** — the long-history Dec 2024 → now source runs last in
+  fill-gaps-only mode: it only adds samples to 15-min buckets the cache
+  doesn't already have, so the high-resolution recent data stays untouched
+  while the older sparse regions get populated.
+- **Auto peak detection** — `scipy.signal.find_peaks` over a 1-hour resampled
+  tilt series. Replaces v1.0's hardcoded 6-peak list. Tunable from the sidebar.
+- **Same v1.0 model, productionized** — linear trendline through the most
+  recent N peaks (slider-controlled) × exponential saturation fit on the
+  current episode, intersected via `scipy.optimize.brentq` (bracketed bisection
+  is more robust than v1.0's `fsolve`).
 - **Monte Carlo confidence band** — 200 draws from the exp fit covariance
-  give a 10th–90th percentile range on the predicted date.
-- **Interactive Plotly chart** with hover, pan, zoom, and a shaded
-  confidence band — no hardcoded axis limits.
-- **Conditional fetching** with `If-Modified-Since` headers, so refresh
-  doesn't hammer USGS.
+  give a 10th–90th percentile range on the predicted date, rendered as a
+  shaded vertical region on the chart.
+- **Interactive Plotly chart** with hover, pan, zoom, default zoom on the
+  recent ~3 months + projection, and a clear visual distinction between peaks
+  used for the fit (bright X) and peaks excluded by the slider window
+  (dimmed X).
+- **Conditional fetching** with `If-Modified-Since` headers — refresh doesn't
+  hammer USGS.
 - **Self-watering cache** — a daily GitHub Actions cron runs the ingest
   pipeline and commits the freshened `data/tilt_history.csv` back to `main`,
-  triggering a Streamlit Cloud redeploy. First-time viewers always see
-  recent data even if no one's clicked Refresh in a while.
-- **42 tests** covering the model, peaks, cache, plotting, calibration,
-  and trace modules.
+  triggering a Streamlit Cloud redeploy. First-time viewers always see recent
+  data even if no one's clicked Refresh in a while.
+- **62 tests** covering the model, peaks, cache, plotting, calibration, trace,
+  ingest pipeline, alignment, and gap-fill modules.
 
 ## Run locally
 
@@ -60,7 +71,7 @@ uv run streamlit run streamlit_app.py
 ```
 
 The app opens at <http://localhost:8501>. The first ingest takes ~5 seconds
-(four PNG fetches + OCR); after that, the cache TTL is 15 minutes.
+(five PNG fetches + OCR); after that, results are cached for 15 minutes.
 
 ## Deploy to Streamlit Community Cloud
 
@@ -99,21 +110,28 @@ kilauea-tracker/
 ├── packages.txt                # apt packages for Streamlit Cloud (tesseract)
 ├── .python-version             # 3.11
 ├── .streamlit/config.toml      # dark theme + lava-orange accent
+├── .github/workflows/
+│   └── refresh-cache.yml       # daily cron that updates the committed cache
 ├── data/
-│   └── tilt_history.csv        # the live cache (bootstraps from legacy/)
+│   ├── tilt_history.csv        # the live cache (bootstraps from legacy/)
+│   └── last_modified.json      # If-Modified-Since state per source
+├── docs/
+│   └── screenshot.png          # README screenshot
+├── scripts/
+│   └── take_screenshot.py      # regenerate docs/screenshot.png via Playwright
 ├── src/kilauea_tracker/
-│   ├── config.py               # the 4 USGS URLs, paths, defaults
+│   ├── config.py               # the 5 USGS URLs, paths, defaults
 │   ├── ingest/
 │   │   ├── fetch.py            # GET with If-Modified-Since
 │   │   ├── calibrate.py        # OCR axes → pixel↔data transforms
 │   │   ├── trace.py            # HSV mask + per-column curve extraction
-│   │   ├── pipeline.py         # orchestration, fallbacks, error reporting
+│   │   ├── pipeline.py         # orchestration, alignment, gap-fill, errors
 │   │   └── exceptions.py
 │   ├── peaks.py                # find_peaks wrapper
 │   ├── model.py                # predict() — curve fit + brentq intersection
 │   ├── cache.py                # CSV history + dedupe + conflict detection
 │   └── plotting.py             # Plotly figure builder
-├── tests/                      # 41 tests
+├── tests/                      # 62 tests + committed PNG fixtures
 ├── legacy/
 │   ├── eruption_projection.py  # the v1.0 Colab script (frozen)
 │   └── Tiltmeter Data - Sheet1.csv
@@ -124,32 +142,54 @@ kilauea-tracker/
 
 Electronic tilt at Uēkahuna (UWD), azimuth 300°, published as auto-updating
 PNGs by [USGS Hawaiian Volcano Observatory](https://www.usgs.gov/volcanoes/kilauea/science/monitoring-data-kilauea).
-Specific image URLs:
+The five image URLs we ingest:
 
-- 2-day:   `https://volcanoes.usgs.gov/vsc/captures/kilauea/UWD-TILT-2day.png`
-- 1-week:  `https://volcanoes.usgs.gov/vsc/captures/kilauea/UWD-POC-TILT-week.png`
-- 1-month: `https://volcanoes.usgs.gov/vsc/captures/kilauea/UWD-POC-TILT-month.png`
-- 3-month: `https://volcanoes.usgs.gov/vsc/captures/kilauea/UWD-TILT-3month.png`
+| Window | URL |
+|---|---|
+| 2-day | `https://volcanoes.usgs.gov/vsc/captures/kilauea/UWD-TILT-2day.png` |
+| 1-week | `https://volcanoes.usgs.gov/vsc/captures/kilauea/UWD-POC-TILT-week.png` |
+| 1-month | `https://volcanoes.usgs.gov/vsc/captures/kilauea/UWD-POC-TILT-month.png` |
+| 3-month | `https://volcanoes.usgs.gov/vsc/captures/kilauea/UWD-TILT-3month.png` |
+| Dec 2024 → now | `https://volcanoes.usgs.gov/vsc/captures/kilauea/UWD-TILT-Dec2024_to_now.png` |
 
-USGS does not publish raw tilt data as CSV/JSON — only these auto-updating
-plot images. v2.0 traces the curves directly out of the PNGs.
+USGS does not publish raw tilt data as CSV/JSON for these stations — only
+these auto-updating plot images. v2.0 traces the curves directly out of the
+PNGs.
+
+**Note on azimuth:** per USGS, *"On July 9, 2025, tilt azimuths for SDH and
+UWD plots have been updated from 320 to 300 degrees to optimize displaying
+maximum magnitudes of deformation consistent with the current activity at
+the summit of Kīlauea."* The USGS plots are re-rendered onto the new 300°
+projection across the full historical range, so all data the tracker
+ingests is consistent.
 
 ## Known limits
 
 1. **Y-axis OCR fragility.** If USGS changes their plot fonts, colors, or
-   tick spacing, the OCR can fail to recover enough labels. The committed
-   PNG fixture in `tests/fixtures/` is dated, so test_calibrate.py will fail
-   loudly the day this happens — that's our regression alarm.
-2. **Calibration drift between captures.** Each USGS PNG has its own
-   y-offset, so the same time bucket can produce slightly different tilts
-   depending on which capture window you ingested. The cache surfaces these
-   as soft "conflict" warnings.
-3. **The model assumes the current episode is rising.** If tilt is in a
-   post-eruption recovery / flat regime, the exp fit may not produce a
+   tick spacing, OCR can fail to recover enough labels. The committed PNG
+   fixtures in `tests/fixtures/` are dated, so `test_calibrate.py` will fail
+   loudly the day this happens — that's the regression alarm.
+2. **The model assumes the current episode is rising.** If tilt is in a
+   post-eruption recovery or flat regime, the exp fit may not produce a
    meaningful intersection — the app correctly shows "—" rather than
    inventing a date.
-4. **Streamlit Community Cloud cold starts** take ~30 seconds after periods
+3. **Streamlit Community Cloud cold starts** take ~30 seconds after periods
    of inactivity. Document this for your viewers if relevant.
+4. **The legacy bootstrap CSV pre-July-2025 is sparse.** v2.0 trims it at
+   `2025-07-01` so the long-history DEC2024_TO_NOW source provides denser
+   coverage of the early period via gap-fill mode.
+
+## Regenerate the screenshot
+
+```bash
+uv sync --extra screenshot
+uv run playwright install chromium
+uv run python scripts/take_screenshot.py
+```
+
+The script boots a temporary Streamlit instance, drives a headless Chromium
+via Playwright, waits for the chart's data trace to render (not just the
+loading skeleton), captures at retina, and writes `docs/screenshot.png`.
 
 ## Tests
 
@@ -157,8 +197,8 @@ plot images. v2.0 traces the curves directly out of the PNGs.
 uv run pytest
 ```
 
-Coverage: 42 tests across model, peaks, cache, plotting, calibration,
-trace, and ingest pipeline modules.
+Coverage: **62 tests** across model, peaks, cache, plotting, calibration,
+trace, ingest pipeline, cross-source alignment, and gap-fill modules.
 
 ## License
 

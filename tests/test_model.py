@@ -137,33 +137,22 @@ def test_v1_regression_predicts_consistent_dates(bootstrap_tilt):
     """Feed v1.0's exact inputs through v2.0's predict() and verify it works.
 
     Strong assertions:
-      - The all-peaks intersection (`next_event_date`) exists. v1.0's main
-        prediction must reproduce.
-      - That date lies in the future relative to the last bootstrap tilt sample.
-      - The exp fit parameters are positive and finite (the bounds at v1.0:143
-        require A > 0, k > 0).
-      - The 3-peak intersection (`earliest_event_date`) is allowed to be None.
-        On this dataset, the last 3 peaks have a steeply negative slope
-        (~−0.077 µrad/day), so the rising exp curve has already passed below
-        the 3-peak linear trendline by the last bootstrap data point. v1.0
-        would also reject this root via its `root > projection_start_num_new`
-        check (eruption_projection.py:265). When the 3-peak intersection IS
-        produced, it must be no later than the all-peaks one.
+      - The trendline intersection exists.
+      - The date lies in the future relative to the last bootstrap sample.
+      - The exp fit parameters are positive and finite.
+      - n_peaks_in_fit reports the count of peaks we actually fed in.
     """
     pred = predict(bootstrap_tilt, V1_HARDCODED_PEAKS)
 
     assert pred.next_event_date is not None, (
-        f"v1.0 hardcoded peaks should produce an all-peaks intersection. "
+        f"v1.0 hardcoded peaks should produce an intersection. "
         f"Diagnostics: {pred.fit_diagnostics}"
     )
     assert pred.next_event_tilt is not None
+    assert pred.trendline is not None
 
     last_data_point = bootstrap_tilt[DATE_COL].max()
     assert pred.next_event_date > last_data_point
-
-    if pred.earliest_event_date is not None:
-        assert pred.earliest_event_date > last_data_point
-        assert pred.earliest_event_date <= pred.next_event_date
 
     # Exp fit sanity
     A, k, C = pred.exp_params
@@ -172,6 +161,8 @@ def test_v1_regression_predicts_consistent_dates(bootstrap_tilt):
     assert np.isfinite(A) and np.isfinite(k) and np.isfinite(C)
     assert pred.exp_covariance is not None
     assert pred.exp_covariance.shape == (3, 3)
+
+    assert pred.n_peaks_in_fit == len(V1_HARDCODED_PEAKS)
 
 
 def test_v1_regression_locked_predicted_date(bootstrap_tilt):
@@ -196,7 +187,6 @@ def test_v1_regression_self_consistency(bootstrap_tilt):
     a = predict(bootstrap_tilt, V1_HARDCODED_PEAKS)
     b = predict(bootstrap_tilt, V1_HARDCODED_PEAKS)
     assert a.next_event_date == b.next_event_date
-    assert a.earliest_event_date == b.earliest_event_date
     assert a.exp_params == b.exp_params
 
 
@@ -215,13 +205,13 @@ def test_too_few_peaks_returns_empty():
     peaks = pd.DataFrame({DATE_COL: [pd.Timestamp("2025-12-15")], TILT_COL: [9.0]})
     pred = predict(tilt, peaks)
     assert pred.next_event_date is None
-    assert pred.earliest_event_date is None
-    assert pred.linear_curve is None
+    assert pred.trendline is None
+    assert pred.n_peaks_in_fit == 1
     assert "error" in pred.fit_diagnostics
 
 
 def test_too_few_current_episode_points_returns_partial():
-    """Linear trendlines fit, but exp fit needs ≥4 points (v1.0:121)."""
+    """Trendline fits, but exp fit needs ≥4 points."""
     peaks = pd.DataFrame(
         {
             DATE_COL: pd.to_datetime(
@@ -237,10 +227,10 @@ def test_too_few_current_episode_points_returns_partial():
         }
     )
     pred = predict(tilt, peaks)
-    assert pred.linear_curve is not None
-    assert pred.linear3_curve is not None
+    assert pred.trendline is not None
     assert pred.exp_curve is None
     assert pred.next_event_date is None
+    assert pred.n_peaks_in_fit == 4
     assert "warning" in pred.fit_diagnostics
 
 

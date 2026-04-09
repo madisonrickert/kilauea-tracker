@@ -62,16 +62,14 @@ class Prediction:
     """Result of `predict()`. Any field can be `None` if the underlying fit failed."""
 
     next_event_date: Optional[pd.Timestamp]
-    earliest_event_date: Optional[pd.Timestamp]
     next_event_tilt: Optional[float]
-    earliest_event_tilt: Optional[float]
-    linear_curve: Optional[Curve]       # all-peaks linear trendline
-    linear3_curve: Optional[Curve]      # last-3-peaks linear trendline
+    trendline: Optional[Curve]          # linear fit through the fit-window peaks
     exp_curve: Optional[Curve]          # current-episode exponential saturation fit
-    exp_params: Optional[tuple[float, float, float]]  # (A, k, C) — v1.0:144
+    exp_params: Optional[tuple[float, float, float]]  # (A, k, C)
     exp_x0: Optional[float]             # the date offset baked into the exp fit
-    exp_covariance: Optional[np.ndarray]  # used by the future confidence-band step
+    exp_covariance: Optional[np.ndarray]  # for confidence band
     confidence_band: Optional[tuple[pd.Timestamp, pd.Timestamp]]
+    n_peaks_in_fit: int                 # count of peaks that fed the trendline
     fit_diagnostics: dict
 
 
@@ -141,37 +139,24 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
         computed (e.g. too few data points). The function never raises.
     """
     diagnostics: dict = {}
+    n_peaks_in_fit = len(peaks_df)
 
-    if len(peaks_df) < 2:
+    if n_peaks_in_fit < 2:
         diagnostics["error"] = "need at least 2 peaks for a linear trendline"
-        return _empty(diagnostics)
+        return _empty(diagnostics, n_peaks_in_fit=n_peaks_in_fit)
 
     peaks_df = peaks_df.sort_values(DATE_COL).copy()
     peaks_df["_day"] = to_days(peaks_df[DATE_COL])
 
-    # ── all-peaks linear trendline (v1.0:94) ──────────────────────────────────
-    slope_all, intercept_all = np.polyfit(peaks_df["_day"], peaks_df[TILT_COL], 1)
-    linear_curve = _make_linear_curve(
-        "all_peaks_linear",
-        slope_all,
-        intercept_all,
+    # ── linear trendline through the fit-window peaks ────────────────────────
+    slope, intercept = np.polyfit(peaks_df["_day"], peaks_df[TILT_COL], 1)
+    trendline = _make_linear_curve(
+        "trendline",
+        slope,
+        intercept,
         domain=(float(peaks_df["_day"].min()), float(peaks_df["_day"].max())),
     )
-    diagnostics["linear_slope_per_day"] = float(slope_all)
-
-    # ── last-3-peaks linear trendline (v1.0:238) ─────────────────────────────
-    if len(peaks_df) >= 3:
-        last3 = peaks_df.tail(3)
-        slope_3, intercept_3 = np.polyfit(last3["_day"], last3[TILT_COL], 1)
-        linear3_curve: Optional[Curve] = _make_linear_curve(
-            "last_3_peaks_linear",
-            slope_3,
-            intercept_3,
-            domain=(float(last3["_day"].min()), float(last3["_day"].max())),
-        )
-        diagnostics["linear3_slope_per_day"] = float(slope_3)
-    else:
-        linear3_curve = None
+    diagnostics["trendline_slope_per_day"] = float(slope)
 
     # ── current episode = tilt samples strictly after the most recent peak ──
     last_peak_date = peaks_df[DATE_COL].max()
@@ -183,20 +168,18 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
     current["_day"] = to_days(current[DATE_COL])
     diagnostics["current_episode_n"] = int(len(current))
 
-    if len(current) < 4:  # v1.0:121 — need at least 4 points for 3 parameters
+    if len(current) < 4:
         diagnostics["warning"] = "not enough current-episode points for exp fit"
         return Prediction(
             next_event_date=None,
-            earliest_event_date=None,
             next_event_tilt=None,
-            earliest_event_tilt=None,
-            linear_curve=linear_curve,
-            linear3_curve=linear3_curve,
+            trendline=trendline,
             exp_curve=None,
             exp_params=None,
             exp_x0=None,
             exp_covariance=None,
             confidence_band=None,
+            n_peaks_in_fit=n_peaks_in_fit,
             fit_diagnostics=diagnostics,
         )
 
@@ -223,16 +206,14 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
         diagnostics["exp_fit_error"] = str(e)
         return Prediction(
             next_event_date=None,
-            earliest_event_date=None,
             next_event_tilt=None,
-            earliest_event_tilt=None,
-            linear_curve=linear_curve,
-            linear3_curve=linear3_curve,
+            trendline=trendline,
             exp_curve=None,
             exp_params=None,
             exp_x0=None,
             exp_covariance=None,
             confidence_band=None,
+            n_peaks_in_fit=n_peaks_in_fit,
             fit_diagnostics=diagnostics,
         )
 
@@ -251,24 +232,13 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
 
     last_current_day = float(x_data.max())
 
-    # ── intersection: all-peaks linear × exponential (v1.0:158-180) ──────────
+    # ── intersection of trendline × exponential ──────────────────────────────
     next_event_date, next_event_tilt = _find_intersection(
         f_exp=_exp_eval,
-        f_lin=linear_curve.f,
+        f_lin=trendline.f,
         last_current_day=last_current_day,
         last_peak_day=float(peaks_df["_day"].max()),
     )
-
-    # ── intersection: last-3-peaks linear × exponential (v1.0:247-271) ───────
-    if linear3_curve is not None:
-        earliest_event_date, earliest_event_tilt = _find_intersection(
-            f_exp=_exp_eval,
-            f_lin=linear3_curve.f,
-            last_current_day=last_current_day,
-            last_peak_day=float(peaks_df.tail(3)["_day"].max()),
-        )
-    else:
-        earliest_event_date, earliest_event_tilt = None, None
 
     # ── Monte Carlo confidence band over the exp covariance ──────────────────
     confidence_band = _confidence_band(
@@ -278,21 +248,19 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
         x0_fit=x0_fit,
         last_current_day=last_current_day,
         last_peak_day=float(peaks_df["_day"].max()),
-        f_lin=linear_curve.f,
+        f_lin=trendline.f,
     )
 
     return Prediction(
         next_event_date=next_event_date,
-        earliest_event_date=earliest_event_date,
         next_event_tilt=next_event_tilt,
-        earliest_event_tilt=earliest_event_tilt,
-        linear_curve=linear_curve,
-        linear3_curve=linear3_curve,
+        trendline=trendline,
         exp_curve=exp_curve,
         exp_params=(A_exp, k_exp, C_exp),
         exp_x0=x0_fit,
         exp_covariance=covariance,
         confidence_band=confidence_band,
+        n_peaks_in_fit=n_peaks_in_fit,
         fit_diagnostics=diagnostics,
     )
 
@@ -442,18 +410,16 @@ def _find_intersection(
     return from_days(root), tilt_at_root
 
 
-def _empty(diagnostics: dict) -> Prediction:
+def _empty(diagnostics: dict, n_peaks_in_fit: int = 0) -> Prediction:
     return Prediction(
         next_event_date=None,
-        earliest_event_date=None,
         next_event_tilt=None,
-        earliest_event_tilt=None,
-        linear_curve=None,
-        linear3_curve=None,
+        trendline=None,
         exp_curve=None,
         exp_params=None,
         exp_x0=None,
         exp_covariance=None,
         confidence_band=None,
+        n_peaks_in_fit=n_peaks_in_fit,
         fit_diagnostics=diagnostics,
     )

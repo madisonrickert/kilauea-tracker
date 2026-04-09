@@ -28,32 +28,54 @@ def realistic_inputs():
     df = pd.read_csv(BOOTSTRAP_CSV)
     df[DATE_COL] = pd.to_datetime(df[DATE_COL], format="mixed", dayfirst=False)
     df = df.dropna().sort_values(DATE_COL).reset_index(drop=True)
-    peaks = detect_peaks(df).tail(6).reset_index(drop=True)
-    pred = predict(df, peaks)
-    return df, peaks, pred
+    all_peaks = detect_peaks(df)
+    fit_peaks = all_peaks.tail(6).reset_index(drop=True)
+    pred = predict(df, fit_peaks)
+    return df, all_peaks, fit_peaks, pred
 
 
 def test_build_figure_returns_figure(realistic_inputs):
-    df, peaks, pred = realistic_inputs
-    fig = build_figure(df, peaks, pred)
+    df, all_peaks, fit_peaks, pred = realistic_inputs
+    fig = build_figure(df, fit_peaks, pred, all_peaks_df=all_peaks)
     assert isinstance(fig, go.Figure)
 
 
 def test_build_figure_includes_core_traces(realistic_inputs):
     """For the realistic v1.0 inputs, the figure should have:
-    raw tilt, peak markers, two linear trendlines, exp curve, next-event marker.
-    Earliest-event marker is allowed to be missing on this dataset (see
-    test_model.test_v1_regression_predicts_consistent_dates).
+    raw tilt, in-fit peaks, single trendline, exp curve, next-event marker.
     """
-    df, peaks, pred = realistic_inputs
-    fig = build_figure(df, peaks, pred)
+    df, all_peaks, fit_peaks, pred = realistic_inputs
+    fig = build_figure(df, fit_peaks, pred, all_peaks_df=all_peaks)
     names = [t.name for t in fig.data]
     assert "Tilt" in names
-    assert "Detected peaks" in names
-    assert "Linear (all peaks)" in names
-    assert "Linear (last 3 peaks)" in names
+    # Peaks-in-fit trace name includes the count
+    assert any(n and n.startswith("Peaks in fit") for n in names)
+    assert any(n and n.startswith("Trendline (last") for n in names)
     assert "Current episode (exp fit)" in names
     assert "Next fountain event" in names
+    # The "Linear (last 3 peaks)" trace from v1.0 must NOT be present anymore.
+    assert not any(n and "last 3 peaks" in n for n in names)
+    # And the "Earliest likely" marker should be gone.
+    assert "Earliest likely" not in names
+
+
+def test_build_figure_shows_excluded_peaks_when_provided(realistic_inputs):
+    """When all_peaks_df is a strict superset of fit_peaks_df, the excluded
+    ones get their own dimmed trace."""
+    df, all_peaks, fit_peaks, pred = realistic_inputs
+    if len(all_peaks) <= len(fit_peaks):
+        pytest.skip("not enough excluded peaks to test this case")
+    fig = build_figure(df, fit_peaks, pred, all_peaks_df=all_peaks)
+    names = [t.name for t in fig.data]
+    assert "Excluded peaks" in names
+
+
+def test_build_figure_omits_excluded_when_all_peaks_not_passed(realistic_inputs):
+    """If the caller doesn't pass all_peaks_df, no excluded trace appears."""
+    df, _, fit_peaks, pred = realistic_inputs
+    fig = build_figure(df, fit_peaks, pred)  # no all_peaks_df
+    names = [t.name for t in fig.data]
+    assert "Excluded peaks" not in names
 
 
 def test_build_figure_handles_empty_history():
@@ -71,15 +93,40 @@ def test_build_figure_handles_empty_history():
     pred = predict(empty_tilt, empty_peaks)
     fig = build_figure(empty_tilt, empty_peaks, pred)
     assert isinstance(fig, go.Figure)
-    # Title is still set so the chart is self-explanatory
-    assert fig.layout.title.text
+    # No title — Streamlit provides its own header above the chart.
+    assert not (fig.layout.title and fig.layout.title.text)
 
 
 def test_build_figure_dark_template(realistic_inputs):
     """Streamlit theme is dark — the figure must match."""
-    df, peaks, pred = realistic_inputs
-    fig = build_figure(df, peaks, pred)
-    template_name = fig.layout.template.layout.colorway is not None
-    # Either the template name resolves or the layout was set; both indicate
-    # we got plotly_dark applied.
-    assert template_name or fig.layout.template is not None
+    df, all_peaks, fit_peaks, pred = realistic_inputs
+    fig = build_figure(df, fit_peaks, pred, all_peaks_df=all_peaks)
+    assert fig.layout.template is not None
+
+
+def test_build_figure_default_zoom_is_recent_history(realistic_inputs):
+    """The default x-range should be the last ~3 months + projection,
+    not the full 16-month history."""
+    df, all_peaks, fit_peaks, pred = realistic_inputs
+    fig = build_figure(df, fit_peaks, pred, all_peaks_df=all_peaks)
+    x_range = fig.layout.xaxis.range
+    assert x_range is not None
+    span = pd.Timestamp(x_range[1]) - pd.Timestamp(x_range[0])
+    # Recent-history window is 90 days; projection extends another ~2 weeks.
+    # The full history (~16 months) would be ~480 days, so anything <200 days
+    # is good evidence we're not auto-fitting the whole history.
+    assert span < pd.Timedelta(days=200)
+    assert span > pd.Timedelta(days=30)
+
+
+def test_build_figure_renders_confidence_band(realistic_inputs):
+    """The Monte Carlo confidence band should appear as a vertical region
+    plus a phantom trace in the legend with the band width."""
+    df, all_peaks, fit_peaks, pred = realistic_inputs
+    if pred.confidence_band is None:
+        pytest.skip("model didn't produce a confidence band on this fixture")
+    fig = build_figure(df, fit_peaks, pred, all_peaks_df=all_peaks)
+    legend_names = [t.name for t in fig.data if t.name]
+    assert any("confidence" in n.lower() for n in legend_names)
+    # And there should be at least one shape (the vrect)
+    assert fig.layout.shapes is not None and len(fig.layout.shapes) > 0

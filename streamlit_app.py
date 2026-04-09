@@ -145,6 +145,12 @@ with st.sidebar:
         "manual digitization required."
     )
 
+    st.divider()
+    st.caption(
+        "Built by [Madison Rickert](https://github.com/madisonrickert) · "
+        "[source on GitHub](https://github.com/madisonrickert/kilauea-tracker)"
+    )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Run ingest — populates `data/tilt_history.csv`
@@ -249,7 +255,7 @@ def _fmt_band(band: tuple[pd.Timestamp, pd.Timestamp] | None) -> str:
     return f"{lo.strftime('%m/%d')} → {hi.strftime('%m/%d')}"
 
 
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3 = st.columns(3)
 with col1:
     st.metric(
         "Next fountain event",
@@ -257,24 +263,19 @@ with col1:
         delta=_fmt_band(prediction.confidence_band),
         delta_color="off",
         help=(
-            "Intersection of the all-peaks linear trendline with the exp fit. "
-            "The delta line is the 10th–90th percentile Monte Carlo "
-            "confidence band over the exp fit's covariance."
+            "Date where the rising exponential fit on the current episode "
+            "crosses the trendline through recent peaks. The delta line is "
+            "the 10th–90th percentile Monte Carlo confidence band derived "
+            "from the exponential fit's covariance matrix."
         ),
     )
 with col2:
-    st.metric(
-        "Earliest likely",
-        _fmt_date(prediction.earliest_event_date),
-        help="Intersection using only the most recent 3 peaks (steeper trend).",
-    )
-with col3:
     last_data = tilt_df[DATE_COL].max()
     st.metric(
         "Latest tilt sample",
         _fmt_date(last_data),
     )
-with col4:
+with col3:
     if st.session_state.last_ingest_at is not None:
         successful = sum(1 for r in reports if r.error is None)
         total = len(reports)
@@ -298,7 +299,13 @@ with col4:
 # Main chart
 # ─────────────────────────────────────────────────────────────────────────────
 
-fig = build_figure(tilt_df, recent_peaks, prediction, title="")
+fig = build_figure(
+    tilt_df,
+    recent_peaks,
+    prediction,
+    all_peaks_df=all_peaks,
+    title="",
+)
 st.plotly_chart(fig, width="stretch")
 
 
