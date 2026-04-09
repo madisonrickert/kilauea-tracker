@@ -165,26 +165,27 @@ def test_align_does_not_mutate_inputs():
 
 
 def test_gap_filter_drops_buckets_already_in_cache():
-    """Standard case: a 5-row new trace with 2 rows whose buckets exist in
-    the cache. Those 2 should be dropped, the other 3 kept.
+    """Default 1-day bucket: any new row whose calendar day is already
+    represented in the cache gets dropped. Existing rows on Jan 1 and Jan 2
+    block ALL new rows on those days regardless of hour-of-day.
     """
     cache = pd.DataFrame(
         {
             DATE_COL: pd.to_datetime(
-                ["2026-01-01 00:00:00", "2026-01-01 12:00:00", "2026-01-02 00:00:00"]
+                ["2026-01-01 03:00:00", "2026-01-02 17:00:00"]
             ),
-            TILT_COL: [10.0, 11.0, 12.0],
+            TILT_COL: [10.0, 11.0],
         }
     )
     new = pd.DataFrame(
         {
             DATE_COL: pd.to_datetime(
                 [
-                    "2026-01-01 00:05:00",  # bucket overlaps existing 00:00:00
-                    "2026-01-01 06:00:00",  # GAP — keep
-                    "2026-01-01 12:03:00",  # bucket overlaps existing 12:00:00
-                    "2026-01-01 18:00:00",  # GAP — keep
-                    "2026-01-03 00:00:00",  # GAP — keep
+                    "2026-01-01 12:00:00",  # same day as cache → DROP
+                    "2026-01-02 06:00:00",  # same day as cache → DROP
+                    "2026-01-03 00:00:00",  # GAP day → keep
+                    "2026-01-04 00:00:00",  # GAP day → keep
+                    "2026-01-05 12:00:00",  # GAP day → keep
                 ]
             ),
             TILT_COL: [10.5, 9.0, 11.5, 10.0, 13.0],
@@ -193,12 +194,31 @@ def test_gap_filter_drops_buckets_already_in_cache():
     filtered, dropped = _filter_to_gap_buckets(new, cache)
     assert dropped == 2
     assert len(filtered) == 3
-    kept_dates = filtered[DATE_COL].dt.strftime("%Y-%m-%d %H:%M").tolist()
-    assert kept_dates == [
-        "2026-01-01 06:00",
-        "2026-01-01 18:00",
-        "2026-01-03 00:00",
-    ]
+    kept_days = filtered[DATE_COL].dt.strftime("%Y-%m-%d").tolist()
+    assert kept_days == ["2026-01-03", "2026-01-04", "2026-01-05"]
+
+
+def test_gap_filter_with_finer_bucket_freq():
+    """Test the bucket_freq parameter with 15-min bins (the old default).
+    Locks in that the function still works at finer granularity."""
+    cache = pd.DataFrame(
+        {DATE_COL: pd.to_datetime(["2026-01-01 00:00:00"]), TILT_COL: [10.0]}
+    )
+    new = pd.DataFrame(
+        {
+            DATE_COL: pd.to_datetime(
+                [
+                    "2026-01-01 00:05:00",  # same 15-min bucket → DROP
+                    "2026-01-01 00:30:00",  # different bucket → keep
+                    "2026-01-01 06:00:00",  # different bucket → keep
+                ]
+            ),
+            TILT_COL: [10.5, 11.0, 12.0],
+        }
+    )
+    filtered, dropped = _filter_to_gap_buckets(new, cache, bucket_freq="15min")
+    assert dropped == 1
+    assert len(filtered) == 2
 
 
 def test_gap_filter_with_empty_cache_keeps_everything():

@@ -19,6 +19,7 @@ the cheap pure-function math.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,6 +46,24 @@ st.set_page_config(
     page_icon="🌋",
     layout="wide",
     initial_sidebar_state="expanded",
+)
+
+# Streamlit's st.metric refuses to wrap long values by default — they get
+# truncated with an ellipsis. The pretty timestamp format ("Sat, Apr 18 ·
+# 4:31 AM HST") doesn't fit on one line in a 3-column layout, so we override
+# the white-space rule with a tiny CSS injection.
+st.markdown(
+    """
+    <style>
+    [data-testid="stMetricValue"] {
+        white-space: normal !important;
+        overflow-wrap: anywhere;
+        line-height: 1.1;
+        font-size: 1.6rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 
@@ -151,11 +170,9 @@ with st.sidebar:
     st.divider()
     st.caption("**Data source**")
     st.caption(
-        "Electronic tilt at the **UWD** station (Uēkahuna, summit), **azimuth 300°**. "
-        "Published as auto-updating PNGs by USGS HVO at "
-        "[volcanoes.usgs.gov](https://volcanoes.usgs.gov/vsc/captures/kilauea/). "
-        "v2.0 traces those images directly via OpenCV + Tesseract OCR — no "
-        "manual digitization required."
+        "Electronic tilt at the **UWD** station (Uēkahuna, summit), "
+        "**azimuth 300°**. Published by USGS Hawaiian Volcano Observatory at "
+        "[volcanoes.usgs.gov](https://volcanoes.usgs.gov/vsc/captures/kilauea/)."
     )
 
     st.divider()
@@ -376,13 +393,82 @@ with st.expander("🔬 Model diagnostics"):
     if not diag:
         st.write("No diagnostics available.")
     else:
-        st.json(diag)
+        # ─── Trendline slope ──────────────────────────────────────────────
+        slope = diag.get("trendline_slope_per_day")
+        if slope is not None:
+            direction = "rising" if slope > 0 else "falling"
+            st.markdown(
+                f"**Trendline slope** &nbsp;·&nbsp; "
+                f"`{slope:+.4f} µrad/day` &nbsp;·&nbsp; "
+                f"{direction} ~`{abs(slope) * 7:.2f}` µrad/week"
+            )
+            st.caption(
+                "How fast the peak heights are changing over time. Positive "
+                "means the deformation episodes are getting more intense (more "
+                "magma pressure builds before each release); negative means "
+                "they're tapering off. The trendline is the linear regression "
+                "through the last N peaks (slider-controlled)."
+            )
+            st.markdown("&nbsp;")
+
+        # ─── Current episode sample count ────────────────────────────────
+        n_episode = diag.get("current_episode_n")
+        if n_episode is not None:
+            st.markdown(
+                f"**Current episode samples** &nbsp;·&nbsp; "
+                f"`{n_episode}` tilt readings since the last detected peak"
+            )
+            st.caption(
+                "How many tilt samples fed the exponential saturation fit. "
+                "The fit needs at least 4 to estimate its 3 parameters; more "
+                "samples (and more variation across them) give a tighter fit "
+                "and a narrower confidence band."
+            )
+            st.markdown("&nbsp;")
+
+        # ─── Exponential fit parameters ──────────────────────────────────
         if prediction.exp_params:
             A, k, C = prediction.exp_params
-            st.write(
-                f"**Exp fit:** A = {A:.3f}, k = {k:.4f}, C = {C:.3f}  "
-                f"(asymptotes to {A + C:.2f} µrad)"
+            asymptote = A + C
+            tau_days = 1.0 / k if k > 0 else float("inf")
+            half_life = math.log(2) / k if k > 0 else float("inf")
+            st.markdown(
+                f"**Exponential saturation fit** &nbsp;·&nbsp; "
+                f"`tilt = A·(1 − exp(−k·t)) + C`"
             )
+            col_a, col_k, col_c, col_asym = st.columns(4)
+            col_a.metric("A (amplitude)", f"{A:.2f} µrad")
+            col_k.metric("k (rise rate)", f"{k:.4f} /day")
+            col_c.metric("C (baseline)", f"{C:.2f} µrad")
+            col_asym.metric("A + C (asymptote)", f"{asymptote:.2f} µrad")
+            st.caption(
+                f"Each parameter has a job. **A** is the total rise amplitude "
+                f"this episode will gain if it's allowed to fully saturate. "
+                f"**k** is how fast it rises — the time constant 1/k is "
+                f"~{tau_days:.1f} days to reach 63% of A, and the half-time "
+                f"ln(2)/k is ~{half_life:.1f} days to reach 50% of A. "
+                f"**C** is the starting tilt offset where the episode began "
+                f"(the trough after the previous eruption). **A + C** is the "
+                f"asymptote — where tilt would settle if no eruption "
+                f"interrupted the rise. The next fountain event is predicted "
+                f"to happen well *before* this asymptote, when the rising "
+                f"exp curve crosses the linear trendline through recent peaks."
+            )
+            st.markdown("&nbsp;")
+
+        # ─── Warnings + errors ───────────────────────────────────────────
+        if "warning" in diag:
+            st.warning(f"⚠️ {diag['warning']}")
+        if "error" in diag:
+            st.error(f"❌ {diag['error']}")
+        if "exp_fit_error" in diag:
+            st.error(f"❌ Exp fit error: {diag['exp_fit_error']}")
+
+        # ─── Footer: peaks in fit ────────────────────────────────────────
+        st.markdown(
+            f"**Peaks in fit** &nbsp;·&nbsp; `{prediction.n_peaks_in_fit}` "
+            "(controlled by the sidebar's *Number of recent peaks* slider)"
+        )
 
 with st.expander("📡 Ingest pipeline status"):
     if not reports:
@@ -441,13 +527,11 @@ with st.expander("ℹ️ How does this work?"):
         controls how many of those peaks feed the linear fit.
 
         **Data source.** Electronic tilt at the **UWD** station (Uēkahuna,
-        on the summit caldera rim), **azimuth 300°**, published as
-        auto-updating PNGs by USGS Hawaiian Volcano Observatory. v2.0's
-        ingest pipeline traces those images directly via OpenCV + Tesseract
-        OCR — no manual digitization required. The "Refresh" button
-        re-fetches all five time windows (2-day, week, month, 3-month, and
-        the long-history Dec 2024 → now plot) and merges new samples into
-        the local history cache.
+        on the summit caldera rim), **azimuth 300°**, published by USGS
+        Hawaiian Volcano Observatory. The "Refresh" button re-fetches the
+        five tilt plots (2-day, week, month, 3-month, and the long-history
+        Dec 2024 → now) and merges new samples into the local history
+        cache.
 
         **About azimuth 300°.** Tilt is a vector quantity, so each
         measurement is projected onto a chosen compass direction. Per USGS:

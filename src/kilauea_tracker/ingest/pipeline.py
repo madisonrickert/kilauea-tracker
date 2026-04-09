@@ -57,6 +57,17 @@ LAST_MODIFIED_FILE = LAST_GOOD_CALIBRATION.parent / "last_modified.json"
 # 15-min buckets — only the alignment step bins more aggressively.
 ALIGNMENT_BUCKET = "1h"
 
+# Bucket size used by the gap-fill filter. A single existing sample blocks
+# any gap-fill source samples within the SAME calendar day. This is
+# intentionally aggressive: when DEC2024_TO_NOW runs in gap-fill mode, we
+# don't want any of its ~16h-spaced samples slotting in between dense
+# legacy data — DEC2024_TO_NOW's residual local y-frame drift (which can
+# differ from the global median by 5-10 µrad in any given week) shows up
+# as visual scatter when interleaved with the higher-fidelity legacy
+# samples. Day-level bucketing means DEC2024_TO_NOW only appears in
+# calendar days that have NO other sample at all.
+GAP_FILL_BUCKET = "1d"
+
 # Minimum number of overlapping alignment buckets we need before we trust a
 # computed cross-source y-offset. Below this we leave the trace untouched
 # and let the conflict warnings (if any) surface as a real anomaly.
@@ -191,12 +202,15 @@ def ingest(
 def _filter_to_gap_buckets(
     new_rows: pd.DataFrame,
     existing: pd.DataFrame,
+    *,
+    bucket_freq: str = GAP_FILL_BUCKET,
 ) -> tuple[pd.DataFrame, int]:
-    """Drop new rows whose 15-min bucket already exists in `existing`.
+    """Drop new rows whose `bucket_freq` time bucket already exists in `existing`.
 
     Used by gap-fill sources so the new low-resolution data only adds rows
-    where the cache is sparse, instead of overwriting buckets covered by
-    higher-resolution sources.
+    where the cache is genuinely sparse, instead of slotting samples in
+    between existing dense data. Default 6-hour bucket means a single
+    existing sample inhibits any gap-fill source within ±3 hours.
 
     Returns `(filtered_rows, dropped_count)`.
     """
@@ -206,8 +220,8 @@ def _filter_to_gap_buckets(
         return new_rows, 0
 
     new_with_bucket = new_rows.copy()
-    new_with_bucket["_bucket"] = new_with_bucket[DATE_COL].dt.round(DEDUPE_BUCKET)
-    existing_buckets = set(existing[DATE_COL].dt.round(DEDUPE_BUCKET))
+    new_with_bucket["_bucket"] = new_with_bucket[DATE_COL].dt.floor(bucket_freq)
+    existing_buckets = set(existing[DATE_COL].dt.floor(bucket_freq))
     keep_mask = ~new_with_bucket["_bucket"].isin(existing_buckets)
     dropped = int((~keep_mask).sum())
     filtered = new_with_bucket.loc[keep_mask].drop(columns=["_bucket"])
