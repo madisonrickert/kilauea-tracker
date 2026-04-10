@@ -77,6 +77,12 @@ class IngestReport:
     rows_appended: int = 0                      # net new rows in the per-source CSV
     last_modified: Optional[str] = None
     calibration: Optional[AxisCalibration] = None
+    # Intra-source frame alignment diagnostics — populated from the
+    # AppendReport returned by cache.append_history. A non-zero offset
+    # means Part 1 of the 2026-04 drift fix corrected for a y-axis shift
+    # between this fetch and the existing per-source CSV.
+    frame_offset_microrad: float = 0.0
+    frame_overlap_buckets: int = 0
     warnings: list[str] = field(default_factory=list)
     error: Optional[str] = None
 
@@ -151,17 +157,25 @@ def ingest(
 
     report.rows_traced = len(traced)
 
-    # Append to the per-source CSV. `append_history` does intra-source dedupe
-    # at 15-min buckets — re-tracing the same time period (because the PNG's
-    # sliding window still includes it) refreshes those buckets via "keep
-    # latest." No cross-source contamination because each source has its own
-    # file.
+    # Append to the per-source CSV. `append_history` does intra-source
+    # frame alignment + dedupe at 15-min buckets — re-tracing the same
+    # time period (because the PNG's sliding window still includes it)
+    # has its frame anchored to the existing CSV's first-fetch frame
+    # before the dedupe runs, so the per-source CSV stays in one
+    # consistent y-frame across many fetches. No cross-source contamination
+    # because each source has its own file.
     csv_path = source_csv_path(name)
     if sources_dir is not None:
         csv_path = sources_dir / f"{name}.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     append_result = append_history(traced, csv_path)
     report.rows_appended = append_result.rows_added + append_result.rows_updated
+    # Surface frame alignment diagnostics + warnings so the CLI / UI can
+    # show them. Without this propagation Part 1's diagnostics would be
+    # invisible in production.
+    report.frame_offset_microrad = append_result.frame_offset_microrad
+    report.frame_overlap_buckets = append_result.frame_overlap_buckets
+    report.warnings.extend(append_result.warnings)
 
     _save_cached_last_modified(source, fetch_result.last_modified)
     return report
@@ -303,7 +317,7 @@ def _save_cached_last_modified(source: TiltSource, value: Optional[str]) -> None
 
 def _cli_main() -> int:
     """Run the full ingest+reconcile pipeline and print a one-line summary
-    per source plus the reconciliation report.
+    per source plus the reconciliation and archive reports.
 
     Used by the GitHub Actions cache-refresh workflow. Returns 0 if the
     reconcile produced any rows, 1 if everything failed.
@@ -318,9 +332,20 @@ def _cli_main() -> int:
             f"traced={r.rows_traced:5d}  "
             f"appended={r.rows_appended:5d}"
         )
+        # Surface intra-source frame-alignment diagnostics from cache.
+        # append_history. These tell us whether Part 1 of the 2026-04 drift
+        # fix is actually doing its job in production: a non-zero offset
+        # means we corrected for a y-axis shift between fetches.
+        if hasattr(r, "frame_offset_microrad") and r.frame_overlap_buckets:
+            line += (
+                f"  frame_offset={r.frame_offset_microrad:+.3f} µrad "
+                f"over {r.frame_overlap_buckets} buckets"
+            )
         if r.error:
             line += f"  error={r.error}"
         print(line)
+        for w in r.warnings:
+            print(f"      WARN: {w}")
 
     if result.reconcile is not None:
         print(f"\nReconciliation: {result.reconcile.rows_out} rows in merged history")
@@ -337,6 +362,20 @@ def _cli_main() -> int:
         if result.reconcile.warnings:
             for w in result.reconcile.warnings:
                 print(f"  WARN: {w}")
+
+    # Archive growth — Part 2 of the drift fix. The archive accumulates
+    # one row per timestamp the first time we ever observe it; subsequent
+    # runs that see the same timestamp report it as already_archived. A
+    # healthy run should show monotonic growth equal to (or close to) the
+    # number of genuinely new timestamps the latest fetch produced.
+    if result.archive is not None:
+        a = result.archive
+        print(
+            f"\nArchive: {a.rows_in_archive_before} → {a.rows_in_archive_after} rows  "
+            f"(promoted={a.rows_promoted}, already_archived={a.rows_already_archived})"
+        )
+        for w in a.warnings:
+            print(f"  WARN: {w}")
 
     if result.reconcile is None or result.reconcile.rows_out == 0:
         return 1

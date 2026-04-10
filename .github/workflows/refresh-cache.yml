@@ -69,7 +69,7 @@ jobs:
       - name: Commit and push refreshed cache
         run: |
           set -e
-          if git diff --quiet data/; then
+          if git diff --quiet data/ && [ -z "$(git ls-files --others --exclude-standard data/)" ]; then
             echo "No cache changes — nothing to commit."
             exit 0
           fi
@@ -77,7 +77,20 @@ jobs:
           echo "Cache changed:"
           git diff --stat data/
 
-          git add data/tilt_history.csv data/last_modified.json
+          # Stage every non-gitignored file under data/. Critically, this
+          # includes:
+          #   - data/tilt_history.csv  (the merged view the model reads)
+          #   - data/last_modified.json (HTTP If-Modified-Since cache)
+          #   - data/sources/*.csv     (per-source raw caches — Part 1's
+          #     frame alignment needs the previous fetch's CSV on disk to
+          #     anchor against, so dropping these would silently disable
+          #     drift correction in production)
+          #   - data/archive.csv       (Part 2's append-only canonical
+          #     archive — must accumulate across runs, dropping these
+          #     would reset history to whatever was last committed)
+          # The `data/raw/uwd_digital/UWD_*.csv` files are gitignored, so
+          # `git add data/` will skip them automatically.
+          git add data/
 
           # Per-command identity override — same pattern as the manual
           # commits in the repo, keeps the runner's git config untouched.
