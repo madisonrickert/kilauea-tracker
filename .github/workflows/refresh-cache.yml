@@ -10,7 +10,9 @@ name: Refresh tilt cache
 #   committed in the repo. Without this workflow, the cache only updates
 #   when a viewer happens to click "Refresh data" — and even then the change
 #   only lives until the next redeploy. With this workflow, every redeploy
-#   starts with cache that's at most 4 hours stale.
+#   starts with cache that's at most 24 hours stale (daily cron). Live
+#   viewers can still click "Refresh data" to fetch even fresher rows on
+#   demand; the cron just guarantees a daily floor.
 
 on:
   schedule:
