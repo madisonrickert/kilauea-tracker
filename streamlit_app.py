@@ -228,19 +228,36 @@ reconcile_report = ingest_result.reconcile
 if st.session_state.last_ingest_at is None:
     st.session_state.last_ingest_at = datetime.now(tz=timezone.utc)
 
-# Surface ingest errors and warnings (per-source AND reconciliation-layer)
+# Surface ingest errors and warnings (per-source AND reconciliation-layer).
+# Errors stay loud (red ❌ banner) — the user needs to know a fetch failed.
+# Warnings are non-fatal (frame-shift corrections, low-confidence anchors,
+# proximity-gate drops, etc.) and live in a collapsed expander rendered as
+# muted bulleted text rather than yellow `st.warning` boxes, so a normal-
+# operations day with a few harmless frame-alignment notices doesn't yell
+# at the user.
 ingest_errors = [r for r in reports if r.error]
-ingest_warnings = [w for r in reports for w in r.warnings]
+ingest_warnings: list[tuple[str, str]] = []
+for r in reports:
+    for w in r.warnings:
+        ingest_warnings.append((r.source_name, w))
 if reconcile_report is not None:
-    ingest_warnings.extend(reconcile_report.warnings)
+    for w in reconcile_report.warnings:
+        ingest_warnings.append(("reconcile", w))
 
 if ingest_errors:
     for r in ingest_errors:
         st.error(f"❌ **{r.source_name}**: {r.error}")
 if ingest_warnings:
-    with st.expander(f"⚠️ {len(ingest_warnings)} ingest warning(s)"):
-        for w in ingest_warnings:
-            st.warning(w)
+    with st.expander(
+        f"ⓘ {len(ingest_warnings)} ingest note(s)", expanded=False
+    ):
+        st.caption(
+            "Non-fatal diagnostics from the ingest + reconcile pipeline. "
+            "Frame-shift corrections and proximity-gate drops are normal; "
+            "they're surfaced here for transparency, not as warnings."
+        )
+        for src, w in ingest_warnings:
+            st.markdown(f"- **{src}** — {w}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

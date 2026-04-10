@@ -20,6 +20,7 @@ import pytest
 
 from kilauea_tracker.ingest.calibrate import (
     AxisCalibration,
+    _recover_ocr_year_misread,
     calibrate_axes,
     detect_plot_bbox,
     ocr_title_timestamps,
@@ -151,6 +152,82 @@ def test_calibrate_axes_raises_on_garbage_image():
     img = np.full((300, 900, 3), 255, dtype=np.uint8)
     with pytest.raises(CalibrationError):
         calibrate_axes(img)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OCR year recovery — guards against single-digit year misreads in the
+# title timestamp OCR. The dominant failure mode in 2026-04 was a 2 → 0
+# flip in one of the year digits, producing a non-chronological range.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_recover_ocr_year_misread_fixes_real_2026_to_2006_failure():
+    """The exact failure observed on prod on 2026-04-09: the week PNG's
+    title OCR returned end_year=2006 instead of 2026. Recovery should
+    substitute end.year = start.year and produce a valid 6-day range.
+    """
+    start = pd.Timestamp("2026-04-03 02:51:26")
+    end = pd.Timestamp("2006-04-09 02:51:26")
+    out_start, out_end = _recover_ocr_year_misread(start, end)
+    assert out_start == start
+    assert out_end == pd.Timestamp("2026-04-09 02:51:26")
+    assert out_end - out_start == pd.Timedelta(days=6)
+
+
+def test_recover_ocr_year_misread_fixes_start_year_misread():
+    """Less common but possible: start's year is the OCR victim."""
+    start = pd.Timestamp("2006-04-03 02:51:26")
+    end = pd.Timestamp("2026-04-09 02:51:26")
+    out_start, out_end = _recover_ocr_year_misread(start, end)
+    # When start.year < end.year - 1 the recovery substitutes start.year = end.year.
+    assert out_start == pd.Timestamp("2026-04-03 02:51:26")
+    assert out_end == end
+
+
+def test_recover_ocr_year_misread_passes_through_chronological_input():
+    """No recovery needed when the range is already valid — return verbatim."""
+    start = pd.Timestamp("2026-04-03 00:00:00")
+    end = pd.Timestamp("2026-04-09 00:00:00")
+    out_start, out_end = _recover_ocr_year_misread(start, end)
+    assert out_start == start
+    assert out_end == end
+
+
+def test_recover_ocr_year_misread_passes_through_new_year_boundary():
+    """A start/end spanning a new-year boundary differs by exactly 1 year and
+    is chronologically valid — must NOT be flagged as an OCR misread.
+    """
+    start = pd.Timestamp("2025-12-28 00:00:00")
+    end = pd.Timestamp("2026-01-04 00:00:00")
+    out_start, out_end = _recover_ocr_year_misread(start, end)
+    assert (out_start, out_end) == (start, end)
+
+
+def test_recover_ocr_year_misread_returns_unchanged_when_recovery_doesnt_help():
+    """If substituting the year doesn't yield a chronological range (e.g.
+    the wrong digit was somewhere else entirely), return the original
+    inputs unchanged so the caller raises a proper CalibrationError.
+    """
+    # Both within 2026 but end is BEFORE start (impossible OCR state where
+    # the day was misread, not the year). Recovery shouldn't touch it.
+    start = pd.Timestamp("2026-04-09 00:00:00")
+    end = pd.Timestamp("2026-04-03 00:00:00")
+    out_start, out_end = _recover_ocr_year_misread(start, end)
+    assert (out_start, out_end) == (start, end)
+
+
+def test_recover_ocr_year_misread_handles_feb_29_safely():
+    """`pd.Timestamp.replace(year=...)` raises on Feb 29 in non-leap years.
+    Recovery must catch that and return inputs unchanged rather than
+    crashing — degraded output is fine; a hard crash inside calibrate is not.
+    """
+    # 2024 is a leap year; 2025 is not. Feb 29 2024 cannot be replaced
+    # with year=2025 because Feb 29 2025 doesn't exist.
+    start = pd.Timestamp("2025-02-15 00:00:00")
+    end = pd.Timestamp("2024-02-29 00:00:00")
+    # Should not raise; should return unchanged so the caller errors cleanly.
+    out_start, out_end = _recover_ocr_year_misread(start, end)
+    assert (out_start, out_end) == (start, end)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

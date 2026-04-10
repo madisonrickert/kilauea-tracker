@@ -143,7 +143,11 @@ def ingest(
     try:
         calibration = calibrate_axes(img)
     except CalibrationError as e:
-        report.warnings.append(f"calibration failed for {source.name}: {e}")
+        # Set the error ONLY — don't also append to warnings, or the
+        # Streamlit panel will show the same message both as a red ❌
+        # banner (from the error path) AND as a yellow item in the
+        # warnings expander, which is the duplication the user reported
+        # in 2026-04.
         report.error = f"calibration failed: {e}"
         return report
 

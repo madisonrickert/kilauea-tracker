@@ -260,10 +260,73 @@ def ocr_title_timestamps(
     except (ValueError, TypeError) as e:
         raise CalibrationError(f"unparseable timestamp in title: {e}") from e
 
+    start, end = _recover_ocr_year_misread(start, end)
+
     if end <= start:
         raise CalibrationError(
             f"title timestamps are not chronological: {start} → {end}"
         )
+
+    return start, end
+
+
+def _recover_ocr_year_misread(
+    start: pd.Timestamp, end: pd.Timestamp
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Heuristically repair single-digit year OCR misreads in title timestamps.
+
+    The dominant title-OCR failure mode is a single digit in the YEAR field
+    being misread (most often a `2` ↔ `0` flip — they look similar at low
+    resolution). USGS PNG titles always show ranges where start/end years
+    differ by at most 1 (across new-year boundaries), so a year diff > 1 is
+    a near-certain OCR error.
+
+    Two failure modes are handled:
+
+    A) Non-chronological after misread (the common case):
+       OCR returned end_year smaller than start_year, e.g.
+           start = 2026-04-03 02:51:26
+           end   = 2006-04-09 02:51:26      ← misread
+       The strict `end <= start` check fires. We try substituting
+       `end.year = start.year` and accept the result if it's chronological.
+
+    B) Chronological-but-implausibly-wide (rarer, silently dangerous):
+       OCR returned a smaller year for `start` than for `end`, e.g.
+           start = 2006-04-03 02:51:26      ← misread
+           end   = 2026-04-09 02:51:26
+       The strict check passes (2006 < 2026) but the implied 20-year
+       range would produce a wildly wrong x-axis calibration. Caught by
+       `abs(year diff) > 1` regardless of chronological order, then
+       recovered by substituting `start.year = end.year` (or vice versa
+       for the analogous reverse case).
+
+    Returns the (possibly-recovered) `(start, end)` tuple. Always pure;
+    never raises — ill-behaved inputs round-trip unchanged so the caller
+    can raise a proper CalibrationError.
+    """
+    if abs(end.year - start.year) <= 1:
+        # Year diff plausible (same year or new-year crossing) — trust it.
+        return start, end
+
+    if end.year < start.year:
+        # end's year is the OCR victim (covers failure mode A and the
+        # less-common "end was misread to be older than the real start").
+        try:
+            recovered_end = end.replace(year=start.year)
+        except ValueError:
+            # `replace(year=...)` fails on Feb 29 in non-leap years.
+            return start, end
+        if recovered_end > start:
+            return start, recovered_end
+    else:
+        # end.year > start.year by more than 1 → start's year is the OCR
+        # victim (failure mode B). Substitute start.year = end.year.
+        try:
+            recovered_start = start.replace(year=end.year)
+        except ValueError:
+            return start, end
+        if recovered_start < end:
+            return recovered_start, end
 
     return start, end
 
