@@ -104,6 +104,28 @@ def cached_ingest() -> IngestRunResult:
     return ingest_all()
 
 
+# Safety alert sources (USGS HANS aviation color code + NWS Hawaii
+# alerts) live in their own module — they're independent of the tilt
+# ingest pipeline and have their own cache TTL. 15 minutes matches the
+# tilt cache so a single Refresh-button click busts both caches via
+# `cached_safety_alerts.clear()` below.
+from kilauea_tracker.safety_alerts import (  # noqa: E402
+    SafetyAlertSummary,
+    fetch_safety_alerts,
+)
+
+
+@st.cache_data(ttl=INGEST_CACHE_TTL_SECONDS, show_spinner=False)
+def cached_safety_alerts() -> SafetyAlertSummary:
+    """Fetch USGS HANS volcano status + filtered NWS Hawaii alerts.
+
+    Best-effort: errors from either source are recorded on the returned
+    SafetyAlertSummary.errors list rather than raised, so the rest of
+    the app keeps rendering if the alert APIs are slow or down.
+    """
+    return fetch_safety_alerts()
+
+
 # Initialize session state — used to remember whether ingestion has already
 # run at least once in this Streamlit session, so we can show "Last update"
 # accurately even after the cache TTL expires.
@@ -125,6 +147,7 @@ with st.sidebar:
     )
     if refresh_clicked:
         cached_ingest.clear()
+        cached_safety_alerts.clear()
         st.session_state.last_ingest_at = None  # force the block below to re-run
 
     st.divider()
@@ -777,6 +800,101 @@ elif eruption_state == "overdue":
         )
 # `calm` shows no banner — the metric tiles above already convey the
 # upcoming-event countdown without adding visual noise.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public safety alerts (USGS HANS aviation color code + NWS Hawaii alerts)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Independent of the tilt model — these come from official channels (USGS
+# HANS for the volcano alert level / aviation color code, NWS for tephra/
+# wind/SO2 advisories). Rendered here, immediately below the eruption
+# lifecycle banner, because that's where the user is already looking when
+# the volcano is doing something interesting.
+
+safety = cached_safety_alerts()
+
+
+def _render_usgs_color_badge(status) -> None:
+    """Render the USGS aviation color code as a colored markdown badge."""
+    color_map = {
+        "GREEN": "#1e8e3e",
+        "YELLOW": "#f9ab00",
+        "ORANGE": "#e8710a",
+        "RED": "#d93025",
+    }
+    bg = color_map.get(status.color_code, "#5f6368")
+    sent_str = ""
+    if status.sent_utc is not None:
+        sent_local = pd.Timestamp(status.sent_utc).tz_convert(DISPLAY_TZ)
+        sent_str = f" · issued {sent_local.strftime('%b %-d, %-I:%M %p')} {TZ_LABEL}"
+    notice_link = (
+        f" &nbsp;[full notice ↗]({status.notice_url})"
+        if status.notice_url
+        else ""
+    )
+    st.markdown(
+        f"<div style='padding: 0.6rem 0.9rem; border-radius: 6px; "
+        f"background: {bg}; color: white; font-weight: 600; "
+        f"margin-bottom: 0.5rem;'>"
+        f"USGS volcano alert: <b>{status.color_code}</b> aviation color · "
+        f"<b>{status.alert_level}</b> ground alert"
+        f"<span style='font-weight: 400; opacity: 0.9;'>{sent_str}</span>"
+        f"</div>"
+        f"<div style='font-size: 0.85rem; color: #aaa; margin-bottom: 1rem;'>"
+        f"{status.observatory}{notice_link}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_nws_alert(alert) -> None:
+    """Render one filtered NWS alert as a compact info card."""
+    severity_icon = {
+        "Extreme": "🛑",
+        "Severe": "⚠️",
+        "Moderate": "🟠",
+        "Minor": "🟡",
+    }.get(alert.severity, "ⓘ")
+    expires_str = ""
+    if alert.expires is not None:
+        exp_local = pd.Timestamp(alert.expires).tz_convert(DISPLAY_TZ)
+        expires_str = f" · expires {exp_local.strftime('%b %-d, %-I:%M %p')} {TZ_LABEL}"
+    st.markdown(
+        f"**{severity_icon} {alert.event}** &nbsp; "
+        f"<span style='color:#888'>· {alert.area_desc}{expires_str}</span>",
+        unsafe_allow_html=True,
+    )
+    if alert.headline and alert.headline != alert.event:
+        st.caption(alert.headline)
+    if alert.description:
+        with st.expander("Full advisory text"):
+            st.text(alert.description)
+
+
+if safety.usgs_status is not None or safety.nws_alerts:
+    _render_usgs_color_badge(safety.usgs_status) if safety.usgs_status else None
+    if safety.nws_alerts:
+        st.markdown(
+            f"**Active NWS advisories ({len(safety.nws_alerts)})** "
+            f"<span style='color:#888; font-size:0.85rem'>"
+            f"· filtered for Kīlauea / Big Island relevance</span>",
+            unsafe_allow_html=True,
+        )
+        for alert in safety.nws_alerts:
+            _render_nws_alert(alert)
+        st.caption(
+            "Source: USGS Hazard Alert Notification System + NWS Honolulu. "
+            "Updated every 15 minutes; click the sidebar Refresh button to "
+            "force a fresh fetch."
+        )
+elif safety.errors:
+    # Both sources failed. Show a single quiet caption rather than a
+    # loud red banner — alerts are auxiliary, not load-bearing.
+    st.caption(
+        "Safety alerts unavailable right now "
+        f"({len(safety.errors)} source(s) returned an error)."
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
