@@ -508,25 +508,48 @@ def _fmt_band(band: tuple[pd.Timestamp, pd.Timestamp] | None) -> str:
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.metric(
-        "Next fountain event (model)",
-        _fmt_date(prediction.next_event_date),
-        delta=_fmt_band(prediction.confidence_band),
-        delta_color="off",
-        help=(
-            "Date where the rising exponential fit on the current episode "
-            "crosses the trendline through recent peaks. The delta line is "
-            "the 10th–90th percentile Monte Carlo confidence band derived "
-            "from the exponential fit's covariance matrix."
-        ),
-    )
+    if eruption_state == "active":
+        # Don't display a "next fountain event" forecast while one is
+        # actively underway — at best the number is stale (still pointing
+        # at the event that just started), at worst it implies the user
+        # should be waiting for something other than what's happening on
+        # the live webcam right now. Replace the prediction tile with a
+        # plain "currently erupting" status so the column doesn't go blank.
+        st.metric(
+            "Status",
+            "🔴 Erupting now",
+            delta="forecast paused",
+            delta_color="off",
+            help=(
+                "An active fountain event is in progress. The next-event "
+                "forecast is hidden until deflation completes and the "
+                "next inflation cycle establishes a new exponential fit."
+            ),
+        )
+    else:
+        st.metric(
+            "Next fountain event (model)",
+            _fmt_date(prediction.next_event_date),
+            delta=_fmt_band(prediction.confidence_band),
+            delta_color="off",
+            help=(
+                "Date where the rising exponential fit on the current episode "
+                "crosses the trendline through recent peaks. The delta line is "
+                "the 10th–90th percentile Monte Carlo confidence band derived "
+                "from the exponential fit's covariance matrix."
+            ),
+        )
 
     # Independent baseline forecast: median time between detected peaks
     # added to the most recent peak. Doesn't use the trendline or the exp
     # curve at all — useful as a sanity check on the model. If both
     # predictions agree, confidence is higher; if they diverge, the model
     # is struggling with the current regime.
-    if prediction.interval_based_next_event_date is not None:
+    #
+    # Suppressed during an active eruption for the same reason as the
+    # primary forecast above — we don't want to imply we're waiting for
+    # something while the volcano is in the middle of doing it.
+    if eruption_state != "active" and prediction.interval_based_next_event_date is not None:
         ib_date = prediction.interval_based_next_event_date
         ib_band = prediction.interval_based_band
         median_days = prediction.median_peak_interval_days or 0.0
@@ -742,6 +765,13 @@ elif eruption_state == "overdue":
 # Hide it so the chart doesn't tell two contradictory stories at once.
 _episode_curve_visible = eruption_state not in ("active", "starting")
 
+# Once an eruption is CONFIRMED active, also suppress the next-event
+# prediction (the star marker and the 80% confidence band rectangle).
+# We don't want to show "next eruption: someday" while one is visibly in
+# progress on the live webcam — that's the chart equivalent of telling
+# someone to look out for the bus they're already riding.
+_next_event_visible = eruption_state != "active"
+
 fig = build_figure(
     tilt_df,
     recent_peaks,
@@ -749,6 +779,7 @@ fig = build_figure(
     all_peaks_df=all_peaks,
     title="",
     show_current_episode=_episode_curve_visible,
+    show_next_event_prediction=_next_event_visible,
 )
 st.plotly_chart(fig, width="stretch")
 

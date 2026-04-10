@@ -46,26 +46,36 @@ def build_figure(
     all_peaks_df: Optional[pd.DataFrame] = None,
     title: str = "",
     show_current_episode: bool = True,
+    show_next_event_prediction: bool = True,
 ) -> go.Figure:
     """Render the full prediction chart.
 
     Args:
-        tilt_df:              Full tilt history (`[Date, Tilt (microradians)]`).
-        fit_peaks_df:         Peaks that fed the trendline fit — drawn as bright X.
-        prediction:           A `Prediction` from `model.predict`. Any field may
-                              be None when the underlying fit didn't converge.
-        all_peaks_df:         Optional. All detected peaks, a superset of
-                              `fit_peaks_df`. Peaks NOT in the fit window are
-                              drawn as dimmed X markers so the user sees what
-                              was excluded.
-        title:                Plot title. Pass empty when Streamlit provides
-                              its own.
-        show_current_episode: When False, suppress the exponential
-                              "current episode" curve and its confidence band.
-                              The Streamlit layer flips this off once an
-                              eruption is actively underway — at that point
-                              the exp fit is modelling the inflation phase
-                              that just ended, so it would only mislead.
+        tilt_df:                    Full tilt history (`[Date, Tilt (microradians)]`).
+        fit_peaks_df:               Peaks that fed the trendline fit — drawn as bright X.
+        prediction:                 A `Prediction` from `model.predict`. Any
+                                    field may be None when the underlying fit
+                                    didn't converge.
+        all_peaks_df:               Optional. All detected peaks, a superset of
+                                    `fit_peaks_df`. Peaks NOT in the fit window
+                                    are drawn as dimmed X markers so the user
+                                    sees what was excluded.
+        title:                      Plot title. Pass empty when Streamlit
+                                    provides its own.
+        show_current_episode:       When False, suppress the exponential
+                                    "current episode" curve and its confidence
+                                    band. The Streamlit layer flips this off
+                                    once an eruption is actively underway —
+                                    at that point the exp fit is modelling
+                                    the inflation phase that just ended, so
+                                    it would only mislead.
+        show_next_event_prediction: When False, suppress the predicted-event
+                                    star marker and its 80% confidence band
+                                    rectangle. Streamlit flips this off when
+                                    an eruption is confirmed to be active —
+                                    at that point we shouldn't be telling
+                                    the user when "the next" event is when
+                                    one is happening on screen.
     """
     fig = go.Figure()
 
@@ -181,7 +191,7 @@ def build_figure(
 
     # ── 5. confidence band — drawn BEFORE the event marker so the marker
     #      sits on top of the band, not under it ─────────────────────────────
-    if prediction.confidence_band is not None:
+    if show_next_event_prediction and prediction.confidence_band is not None:
         lo, hi = prediction.confidence_band
         fig.add_vrect(
             x0=lo,
@@ -211,7 +221,11 @@ def build_figure(
         )
 
     # ── 6. predicted event marker ───────────────────────────────────────────
-    if prediction.next_event_date is not None and prediction.next_event_tilt is not None:
+    if (
+        show_next_event_prediction
+        and prediction.next_event_date is not None
+        and prediction.next_event_tilt is not None
+    ):
         fig.add_trace(
             go.Scatter(
                 x=[prediction.next_event_date],
