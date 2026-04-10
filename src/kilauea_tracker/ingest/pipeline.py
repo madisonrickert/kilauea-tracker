@@ -40,9 +40,12 @@ import cv2
 import numpy as np
 import pandas as pd
 
+from ..archive import ArchivePromotionReport, load_archive, promote_to_archive
 from ..cache import append_history
 from ..config import (
     ALL_SOURCES,
+    ARCHIVE_CSV,
+    ARCHIVE_SOURCE_NAME,
     DIGITAL_CSV,
     DIGITAL_SOURCE_NAME,
     HISTORY_CSV,
@@ -85,6 +88,8 @@ class IngestRunResult:
     per_source: list[IngestReport] = field(default_factory=list)
     reconcile: Optional[ReconcileReport] = None
     history_path: Optional[Path] = None         # where the merged CSV was written
+    archive: Optional[ArchivePromotionReport] = None
+    archive_path: Optional[Path] = None         # where the archive CSV was written
 
 
 def ingest(
@@ -166,16 +171,28 @@ def ingest_all(
     history_path: Path = HISTORY_CSV,
     *,
     sources_dir: Optional[Path] = None,
+    archive_path: Path = ARCHIVE_CSV,
 ) -> IngestRunResult:
-    """Run the per-source ingest for every USGS source, then reconcile all
-    raw sources into the merged tilt history.
+    """Run the per-source ingest for every USGS source, reconcile all raw
+    sources into the merged tilt history, then promote any new rows into
+    the append-only archive.
 
     The merged history at `history_path` is overwritten on every call —
-    it's a derived view, not a primary store. The primary stores are the
-    per-source CSVs (under `data/sources/`) and the static legacy + digital
-    reference files.
+    it's a derived view, not a primary store. The primary stores are
+    the per-source CSVs (under `data/sources/`), the static digital
+    reference file, and the append-only archive at `archive_path`.
+
+    The archive is BOTH an input to reconciliation AND an output target:
+
+      - As an input, it sits in `SOURCE_PRIORITY` just below `digital`,
+        so reconciled timestamps that already live in the archive get
+        sourced from the archive (immune to live-source drift).
+      - As an output, any newly-merged timestamps not already in the
+        archive get appended to it via `promote_to_archive()` (keep-
+        first dedupe). Once a row lands in the archive, the next
+        ingest_all() run will source it from there forever.
     """
-    result = IngestRunResult(history_path=history_path)
+    result = IngestRunResult(history_path=history_path, archive_path=archive_path)
 
     # 1. Per-source ingest. Order doesn't matter for correctness anymore —
     #    each ingest writes to its own file. Iterate ALL_SOURCES purely for
@@ -200,11 +217,7 @@ def ingest_all(
 
     # 3. Read the digital reference file. This is NOT a per-source CSV in
     #    data/sources/ — it's the checked-in canonical file produced by
-    #    scripts/import_digital_data.py. The legacy hand-traced CSV used to
-    #    feed the reconciler too, but it was removed in 2026-04 because its
-    #    samples didn't reliably match dec2024_to_now's auto-traced frame
-    #    and were creating systemic ~6 µrad offsets. dec2024_to_now covers
-    #    the same Jul-Nov 2025 range with one consistent y-frame.
+    #    scripts/import_digital_data.py.
     if DIGITAL_CSV.exists():
         try:
             digital = _read_canonical_csv(DIGITAL_CSV)
@@ -213,12 +226,24 @@ def ingest_all(
         except Exception as e:
             print(f"WARNING: could not load digital CSV: {e}")
 
-    # 4. Reconcile and write the merged history.
+    # 4. Read the append-only archive. On first run after a fresh checkout
+    #    this is empty; subsequent runs see whatever rows have already been
+    #    promoted from prior reconciles.
+    archive_df = load_archive(archive_path)
+    if len(archive_df) > 0:
+        sources_for_reconcile[ARCHIVE_SOURCE_NAME] = archive_df
+
+    # 5. Reconcile and write the merged history.
     merged, reconcile_report = reconcile_sources(sources_for_reconcile)
     result.reconcile = reconcile_report
 
     history_path.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(history_path, index=False)
+
+    # 6. Promote any new merged rows into the archive (keep-first dedupe).
+    #    The archive grows monotonically. The next ingest_all() will see
+    #    the just-promoted rows in step 4 and source them from there.
+    result.archive = promote_to_archive(merged, archive_path)
 
     return result
 

@@ -22,6 +22,16 @@ LAST_GOOD_CALIBRATION = DATA_DIR / "last_good_calibration.json"
 # anchors everything else to it.
 DIGITAL_CSV = DATA_DIR / "uwd_digital_az300.csv"
 
+# Append-only canonical archive of every reconciled observation. Each
+# ingest_all() run promotes new merged-view timestamps into this file
+# with keep-first dedupe — once a row is in the archive, it never
+# changes. The archive then feeds back into reconcile.reconcile_sources
+# as a high-priority source so the merged view sources historical
+# timestamps from the frozen archive instead of the (potentially
+# drifting) live per-source CSVs. See `archive.py` for the full
+# rationale.
+ARCHIVE_CSV = DATA_DIR / "archive.csv"
+
 # Per-source raw storage. Each ingest source writes its raw traced rows to
 # its own CSV here. The merged tilt_history.csv is then *derived* from these
 # files via reconcile.reconcile_sources(). Storing raw inputs separately
@@ -89,6 +99,7 @@ ALL_SOURCES: tuple[TiltSource, ...] = (
 # this tuple wins.
 SOURCE_PRIORITY: tuple[str, ...] = (
     "digital",
+    "archive",
     "two_day",
     "week",
     "month",
@@ -114,6 +125,7 @@ SOURCE_PRIORITY: tuple[str, ...] = (
 # sources are reported as unaligned (their raw values are still merged in).
 ALIGNMENT_ORDER: tuple[str, ...] = (
     "digital",
+    "archive",
     "dec2024_to_now",
     "three_month",
     "month",
@@ -135,6 +147,11 @@ TILT_SOURCE_NAME: dict[TiltSource, str] = {
 # Identifier for the digital reference source, kept as a constant so callers
 # don't have to remember the spelling.
 DIGITAL_SOURCE_NAME = "digital"
+
+# Identifier for the append-only archive source. Same kind of constant as
+# DIGITAL_SOURCE_NAME — used by archive.py and ingest.pipeline so the spelling
+# only lives in one place.
+ARCHIVE_SOURCE_NAME = "archive"
 
 
 def source_csv_path(source_name: str) -> Path:
