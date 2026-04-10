@@ -45,18 +45,27 @@ def build_figure(
     *,
     all_peaks_df: Optional[pd.DataFrame] = None,
     title: str = "",
+    show_current_episode: bool = True,
 ) -> go.Figure:
     """Render the full prediction chart.
 
     Args:
-        tilt_df:       Full tilt history (`[Date, Tilt (microradians)]`).
-        fit_peaks_df:  Peaks that fed the trendline fit — drawn as bright X.
-        prediction:    A `Prediction` from `model.predict`. Any field may be
-                       None when the underlying fit didn't converge.
-        all_peaks_df:  Optional. All detected peaks, a superset of
-                       `fit_peaks_df`. Peaks NOT in the fit window are drawn
-                       as dimmed X markers so the user sees what was excluded.
-        title:         Plot title. Pass empty when Streamlit provides its own.
+        tilt_df:              Full tilt history (`[Date, Tilt (microradians)]`).
+        fit_peaks_df:         Peaks that fed the trendline fit — drawn as bright X.
+        prediction:           A `Prediction` from `model.predict`. Any field may
+                              be None when the underlying fit didn't converge.
+        all_peaks_df:         Optional. All detected peaks, a superset of
+                              `fit_peaks_df`. Peaks NOT in the fit window are
+                              drawn as dimmed X markers so the user sees what
+                              was excluded.
+        title:                Plot title. Pass empty when Streamlit provides
+                              its own.
+        show_current_episode: When False, suppress the exponential
+                              "current episode" curve and its confidence band.
+                              The Streamlit layer flips this off once an
+                              eruption is actively underway — at that point
+                              the exp fit is modelling the inflation phase
+                              that just ended, so it would only mislead.
     """
     fig = go.Figure()
 
@@ -138,7 +147,7 @@ def build_figure(
         )
 
     # ── 3b. exp curve 80% CI ribbon (drawn BEHIND the exp curve) ────────────
-    if prediction.exp_band is not None:
+    if show_current_episode and prediction.exp_band is not None:
         _add_band(
             fig,
             band=prediction.exp_band,
@@ -159,7 +168,7 @@ def build_figure(
         )
 
     # ── 4. exponential saturation curve ─────────────────────────────────────
-    if prediction.exp_curve is not None:
+    if show_current_episode and prediction.exp_curve is not None:
         _add_curve(
             fig,
             curve=prediction.exp_curve,

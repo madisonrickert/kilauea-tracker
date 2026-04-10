@@ -735,12 +735,20 @@ elif eruption_state == "overdue":
 # Main chart
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Once an eruption is underway (or we've detected the early-deflation
+# "starting" signal), the exponential "current episode" curve is fitted to
+# the inflation phase that just ended — extending it forward would just
+# project a saturation level the volcano is in the middle of releasing.
+# Hide it so the chart doesn't tell two contradictory stories at once.
+_episode_curve_visible = eruption_state not in ("active", "starting")
+
 fig = build_figure(
     tilt_df,
     recent_peaks,
     prediction,
     all_peaks_df=all_peaks,
     title="",
+    show_current_episode=_episode_curve_visible,
 )
 st.plotly_chart(fig, width="stretch")
 
