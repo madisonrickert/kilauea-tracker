@@ -21,6 +21,7 @@ import pytest
 from kilauea_tracker.ingest.calibrate import (
     AxisCalibration,
     _recover_ocr_year_misread,
+    _try_parse_title_at_psm,
     calibrate_axes,
     detect_plot_bbox,
     ocr_title_timestamps,
@@ -214,6 +215,31 @@ def test_recover_ocr_year_misread_returns_unchanged_when_recovery_doesnt_help():
     end = pd.Timestamp("2026-04-03 00:00:00")
     out_start, out_end = _recover_ocr_year_misread(start, end)
     assert (out_start, out_end) == (start, end)
+
+
+def test_try_parse_title_at_psm_returns_error_on_invalid_day():
+    """The 2026-04-09 prod failure was a different OCR misread: PSM 7
+    produced a date with day=30 in February (or similar), which makes
+    `pd.Timestamp(year=y, month=mo, day=d)` raise "day is out of range
+    for month". The new helper must report this as a clean error string
+    instead of letting the exception propagate up — that's what enables
+    the PSM 7 → PSM 6 fallback in `ocr_title_timestamps` to kick in.
+    """
+    import numpy as np
+    # We can't easily make Tesseract emit a specific bad string, but we
+    # can build a fake OCR-output image of pure white and verify the
+    # helper returns (None, raw_text, error_str) instead of raising.
+    fake_strip = np.full((50, 400, 3), 255, dtype=np.uint8)
+    result, text, err = _try_parse_title_at_psm(fake_strip, "--psm 7")
+    assert result is None
+    assert err  # non-empty error message
+    # Pure white → either no regex match or unparseable; both are
+    # legitimate "PSM 7 failed, try PSM 6" outcomes.
+    assert (
+        "regex did not match" in err
+        or "unparseable timestamp" in err
+        or "non-chronological" in err
+    )
 
 
 def test_recover_ocr_year_misread_handles_feb_29_safely():

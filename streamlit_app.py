@@ -228,13 +228,13 @@ reconcile_report = ingest_result.reconcile
 if st.session_state.last_ingest_at is None:
     st.session_state.last_ingest_at = datetime.now(tz=timezone.utc)
 
-# Surface ingest errors and warnings (per-source AND reconciliation-layer).
-# Errors stay loud (red ❌ banner) — the user needs to know a fetch failed.
-# Warnings are non-fatal (frame-shift corrections, low-confidence anchors,
-# proximity-gate drops, etc.) and live in a collapsed expander rendered as
-# muted bulleted text rather than yellow `st.warning` boxes, so a normal-
-# operations day with a few harmless frame-alignment notices doesn't yell
-# at the user.
+# Surface ingest errors and warnings in a single collapsed "ingest pipeline
+# status" panel. Per-source ingest failures are NOT fatal — the reconcile
+# layer falls back to whichever sources did succeed plus the on-disk archive,
+# so the user always sees a working chart. Treating a single source's
+# transient OCR misread as a top-level red banner is too loud for what is
+# actually a recoverable degraded state. Genuine fatal errors (no data at
+# all) get caught further down where the empty-history check lives.
 ingest_errors = [r for r in reports if r.error]
 ingest_warnings: list[tuple[str, str]] = []
 for r in reports:
@@ -244,18 +244,26 @@ if reconcile_report is not None:
     for w in reconcile_report.warnings:
         ingest_warnings.append(("reconcile", w))
 
-if ingest_errors:
-    for r in ingest_errors:
-        st.error(f"❌ **{r.source_name}**: {r.error}")
-if ingest_warnings:
-    with st.expander(
-        f"ⓘ {len(ingest_warnings)} ingest note(s)", expanded=False
-    ):
+total_notes = len(ingest_errors) + len(ingest_warnings)
+if total_notes > 0:
+    n_err = len(ingest_errors)
+    label_parts = []
+    if n_err:
+        label_parts.append(f"{n_err} error(s)")
+    if ingest_warnings:
+        label_parts.append(f"{len(ingest_warnings)} note(s)")
+    label = "ⓘ Ingest pipeline status — " + ", ".join(label_parts)
+    with st.expander(label, expanded=False):
         st.caption(
             "Non-fatal diagnostics from the ingest + reconcile pipeline. "
-            "Frame-shift corrections and proximity-gate drops are normal; "
-            "they're surfaced here for transparency, not as warnings."
+            "Per-source errors mean ONE USGS PNG fetch failed (transient OCR "
+            "misread, network blip, etc.) — the reconcile layer falls back "
+            "to the other sources and the on-disk archive, so the chart "
+            "above is still using the freshest data we could get. Frame-"
+            "shift corrections and proximity-gate drops are normal."
         )
+        for r in ingest_errors:
+            st.markdown(f"- ❌ **{r.source_name}** — {r.error}")
         for src, w in ingest_warnings:
             st.markdown(f"- **{src}** — {w}")
 

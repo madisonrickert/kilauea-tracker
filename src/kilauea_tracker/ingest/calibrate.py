@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -240,34 +241,60 @@ def ocr_title_timestamps(
         interpolation=cv2.INTER_CUBIC,
     )
 
-    text = pytesseract.image_to_string(upscaled, config="--psm 7")
+    # Try PSM 7 first (single-line, fastest, usually best for the title
+    # strip). Fall through to PSM 6 if PSM 7 fails for *any* reason —
+    # regex mismatch, invalid day-of-month, non-chronological even after
+    # year recovery, etc. PSM 6 is multi-block and has historically read
+    # the title cleanly even when PSM 7 misreads individual digits.
+    psm7_result, psm7_text, psm7_error = _try_parse_title_at_psm(upscaled, "--psm 7")
+    if psm7_result is not None:
+        return psm7_result
+
+    psm6_result, psm6_text, psm6_error = _try_parse_title_at_psm(upscaled, "--psm 6")
+    if psm6_result is not None:
+        return psm6_result
+
+    # Both PSM modes failed. Surface whichever error is more informative —
+    # parsing errors beat regex-mismatch errors because they prove the OCR
+    # at least produced something date-shaped.
+    raise CalibrationError(
+        f"could not extract title timestamps; "
+        f"PSM 7: {psm7_error} (OCR={psm7_text!r}); "
+        f"PSM 6: {psm6_error} (OCR={psm6_text!r})"
+    )
+
+
+def _try_parse_title_at_psm(
+    upscaled_strip: np.ndarray, config: str
+) -> tuple[Optional[tuple[pd.Timestamp, pd.Timestamp]], str, str]:
+    """Run OCR + regex + parse + recover at one PSM config.
+
+    Returns `(result, raw_text, error_message)` where:
+      - `result` is `(start, end)` on success, `None` on any failure
+      - `raw_text` is whatever Tesseract spat out (for diagnostics)
+      - `error_message` is a human-readable description of why it failed
+        (empty string on success)
+
+    Never raises — all failures are reported via the return value so the
+    caller can try a fallback PSM mode without unwinding the stack.
+    """
+    text = pytesseract.image_to_string(upscaled_strip, config=config)
     match = TITLE_TIMESTAMP_RE.search(text)
     if match is None:
-        # Try PSM 6 as a fallback — sometimes the date region is on a separate
-        # line from the tick labels and PSM 7 (single line) can't see it.
-        text = pytesseract.image_to_string(upscaled, config="--psm 6")
-        match = TITLE_TIMESTAMP_RE.search(text)
-
-    if match is None:
-        raise CalibrationError(
-            "could not parse timestamp range from title strip; "
-            f"OCR returned: {text!r}"
-        )
+        return None, text, "regex did not match any timestamp range"
 
     try:
         start = _parse_lenient_timestamp(match.group("start"))
         end = _parse_lenient_timestamp(match.group("end"))
     except (ValueError, TypeError) as e:
-        raise CalibrationError(f"unparseable timestamp in title: {e}") from e
+        return None, text, f"unparseable timestamp: {e}"
 
     start, end = _recover_ocr_year_misread(start, end)
 
     if end <= start:
-        raise CalibrationError(
-            f"title timestamps are not chronological: {start} → {end}"
-        )
+        return None, text, f"non-chronological after year recovery: {start} → {end}"
 
-    return start, end
+    return (start, end), text, ""
 
 
 def _recover_ocr_year_misread(
