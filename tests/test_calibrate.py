@@ -98,7 +98,7 @@ def test_ocr_y_axis_labels_recovers_at_least_three_ticks(fixture_img):
 
 def test_ocr_title_timestamps_extracts_iso_range(fixture_img):
     bbox = detect_plot_bbox(fixture_img)
-    start, end = ocr_title_timestamps(fixture_img, bbox)
+    start, end, psm_used, raw_text = ocr_title_timestamps(fixture_img, bbox)
     assert isinstance(start, pd.Timestamp)
     assert isinstance(end, pd.Timestamp)
     assert start < end
@@ -107,6 +107,9 @@ def test_ocr_title_timestamps_extracts_iso_range(fixture_img):
     assert pd.Timedelta(days=60) < span < pd.Timedelta(days=120), (
         f"title span outside expected 60-120 days: {span}"
     )
+    # PSM diagnostics round-trip for post-hoc debugging.
+    assert psm_used in ("psm7", "psm6")
+    assert raw_text  # non-empty
 
 
 # ─────────────────────────────────────────────────────────────────────────────

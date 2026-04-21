@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from kilauea_tracker.config import SOURCE_PRIORITY
 from kilauea_tracker.model import DATE_COL, TILT_COL
@@ -465,6 +466,44 @@ def test_merged_history_has_canonical_schema():
     assert list(merged.columns) == [DATE_COL, TILT_COL]
     assert merged[DATE_COL].dtype.kind == "M"
     assert merged[TILT_COL].dtype.kind == "f"
+
+
+def test_young_archive_row_is_demoted_below_live_sources():
+    """A recently-archived bad row must lose to a live source at the same
+    bucket. Regression fence around the 2026-04 contamination fix.
+
+    Setup: archive has ONE row a few hours in the past (well inside the
+    14-day demotion window) with a clearly-wrong value. A live `two_day`
+    source has a nearby row with the right value. The merge must pick the
+    live value for that bucket.
+    """
+    recent = pd.Timestamp.now("UTC").tz_localize(None).floor("15min")
+    archive_df = pd.DataFrame(
+        {DATE_COL: [recent - pd.Timedelta(hours=2)], TILT_COL: [-99.0]}
+    )
+    two_day_df = pd.DataFrame(
+        {DATE_COL: [recent - pd.Timedelta(hours=2)], TILT_COL: [5.0]}
+    )
+    merged, _ = reconcile_sources(
+        {"archive": archive_df, "two_day": two_day_df}, proximity_minutes=0
+    )
+    # Live two_day wins — its row, not the phantom archive value.
+    assert len(merged) == 1
+    assert merged[TILT_COL].iloc[0] == pytest.approx(5.0)
+
+
+def test_old_archive_row_retains_priority_over_live_sources():
+    """Archive rows older than the demotion window keep their priority-2
+    slot — that's the whole point of the archive as a historical anchor.
+    """
+    old = pd.Timestamp("2024-01-01 00:00:00")
+    archive_df = pd.DataFrame({DATE_COL: [old], TILT_COL: [9.0]})
+    two_day_df = pd.DataFrame({DATE_COL: [old], TILT_COL: [14.0]})
+    merged, _ = reconcile_sources(
+        {"archive": archive_df, "two_day": two_day_df}, proximity_minutes=0
+    )
+    assert len(merged) == 1
+    assert merged[TILT_COL].iloc[0] == pytest.approx(9.0)
 
 
 def test_merged_history_is_sorted_chronologically():

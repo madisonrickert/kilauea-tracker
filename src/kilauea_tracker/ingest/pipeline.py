@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -65,6 +66,18 @@ from .trace import trace_curve
 # Where the per-source `Last-Modified` headers are persisted.
 LAST_MODIFIED_FILE = LAST_GOOD_CALIBRATION.parent / "last_modified.json"
 
+# Where structured per-run diagnostic reports are written. One JSON file per
+# ingest_all() invocation; the GitHub Actions workflow commits them alongside
+# the CSV updates so prod diagnoses don't depend on stdout that vanishes when
+# the workflow run is retired. See _write_run_report below.
+RUN_REPORTS_DIR = LAST_GOOD_CALIBRATION.parent / "run_reports"
+
+# How many run report files to keep on disk. Older ones are pruned by
+# `_prune_old_run_reports` on every write. 90 is roughly one quarter of
+# daily cron runs; enough to investigate a slow-burn issue but not so many
+# that the repo bloats.
+MAX_RUN_REPORTS = 90
+
 
 @dataclass
 class IngestReport:
@@ -73,7 +86,9 @@ class IngestReport:
     source: Optional[TiltSource]                # None for the digital source
     source_name: str                            # canonical name in SOURCE_PRIORITY
     fetched: bool = False                       # True iff a fresh PNG arrived
-    rows_traced: int = 0                        # rows produced by trace_curve
+    rows_traced: int = 0                        # rows produced by trace_curve (after outlier filter)
+    rows_raw: int = 0                           # raw samples from the HSV mask before filtering
+    rows_outlier_dropped: int = 0               # rows the rolling-median filter removed
     rows_appended: int = 0                      # net new rows in the per-source CSV
     last_modified: Optional[str] = None
     calibration: Optional[AxisCalibration] = None
@@ -85,6 +100,16 @@ class IngestReport:
     frame_overlap_buckets: int = 0
     warnings: list[str] = field(default_factory=list)
     error: Optional[str] = None
+    # PSM mode that succeeded on the title OCR ("psm7" or "psm6"), plus the
+    # raw title text Tesseract returned. Useful for post-hoc diagnosis when
+    # a calibration produces wrong timestamps.
+    title_psm_used: Optional[str] = None
+    title_raw_text: Optional[str] = None
+    # Rows dropped by the per-row outlier filter, each as (timestamp, value,
+    # local_median). Kept terse; full detail goes to the JSON run report.
+    dropped_outlier_samples: list[tuple[pd.Timestamp, float, float]] = field(
+        default_factory=list
+    )
 
 
 @dataclass
@@ -96,6 +121,9 @@ class IngestRunResult:
     history_path: Optional[Path] = None         # where the merged CSV was written
     archive: Optional[ArchivePromotionReport] = None
     archive_path: Optional[Path] = None         # where the archive CSV was written
+    run_report_path: Optional[Path] = None       # where the diagnostic JSON was written
+    run_started_at_utc: Optional[datetime] = None
+    run_finished_at_utc: Optional[datetime] = None
 
 
 def ingest(
@@ -152,6 +180,8 @@ def ingest(
         return report
 
     report.calibration = calibration
+    report.title_psm_used = calibration.title_psm_used or None
+    report.title_raw_text = calibration.title_raw_text or None
 
     try:
         traced = trace_curve(img, calibration)
@@ -160,6 +190,16 @@ def ingest(
         return report
 
     report.rows_traced = len(traced)
+    trace_report = traced.attrs.get("trace_report")
+    if trace_report is not None:
+        report.rows_raw = trace_report.rows_raw
+        report.rows_outlier_dropped = trace_report.outliers_dropped
+        report.dropped_outlier_samples = list(trace_report.dropped_rows)
+        if trace_report.outliers_dropped > 0:
+            report.warnings.append(
+                f"dropped {trace_report.outliers_dropped} per-row outlier(s) "
+                f"(|delta| > threshold vs rolling median)"
+            )
 
     # Append to the per-source CSV. `append_history` does intra-source
     # frame alignment + dedupe at 15-min buckets — re-tracing the same
@@ -211,6 +251,7 @@ def ingest_all(
         ingest_all() run will source it from there forever.
     """
     result = IngestRunResult(history_path=history_path, archive_path=archive_path)
+    result.run_started_at_utc = datetime.now(tz=timezone.utc)
 
     # 1. Per-source ingest. Order doesn't matter for correctness anymore —
     #    each ingest writes to its own file. Iterate ALL_SOURCES purely for
@@ -258,10 +299,25 @@ def ingest_all(
     history_path.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(history_path, index=False)
 
-    # 6. Promote any new merged rows into the archive (keep-first dedupe).
-    #    The archive grows monotonically. The next ingest_all() will see
-    #    the just-promoted rows in step 4 and source them from there.
-    result.archive = promote_to_archive(merged, archive_path)
+    # 6. Promote any new merged rows into the archive (keep-first dedupe
+    #    + quorum gate). We pass the reconcile inputs through so
+    #    promote_to_archive can verify that ≥ARCHIVE_QUORUM_MIN_SOURCES
+    #    contributed to each bucket before it becomes permanent — the fix
+    #    for the 2026-04 week-PNG phantom-spike contamination.
+    result.archive = promote_to_archive(
+        merged, archive_path, sources=sources_for_reconcile
+    )
+
+    result.run_finished_at_utc = datetime.now(tz=timezone.utc)
+
+    # 7. Write a structured JSON diagnostic per-run for persistent
+    #    prod observability. Best-effort: a write failure here must never
+    #    fail the pipeline — the CSVs are what the app actually reads.
+    try:
+        result.run_report_path = _write_run_report(result)
+        _prune_old_run_reports(RUN_REPORTS_DIR)
+    except Exception as e:  # pragma: no cover — defensive
+        print(f"WARNING: could not write run report: {e}")
 
     return result
 
@@ -384,6 +440,164 @@ def _cli_main() -> int:
     if result.reconcile is None or result.reconcile.rows_out == 0:
         return 1
     return 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run report — persistent prod diagnostic
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _write_run_report(result: IngestRunResult) -> Path:
+    """Serialize the full IngestRunResult to `data/run_reports/<ts>.json`.
+
+    The committed report is the primary prod observability surface — stdout
+    from the cron evaporates with the workflow run. The JSON is stable
+    enough to grep, diff, and replay for post-hoc diagnosis of bad rows.
+
+    Path format uses a colon-free UTC timestamp so the filename works on
+    any filesystem: `YYYY-MM-DDTHH-MM-SSZ.json`.
+    """
+    RUN_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = result.run_finished_at_utc or datetime.now(tz=timezone.utc)
+    stem = ts.strftime("%Y-%m-%dT%H-%M-%SZ")
+    out_path = RUN_REPORTS_DIR / f"{stem}.json"
+
+    payload: dict = {
+        "run_started_at_utc": _dt_str(result.run_started_at_utc),
+        "run_finished_at_utc": _dt_str(result.run_finished_at_utc),
+        "per_source": [_serialize_source_report(r) for r in result.per_source],
+    }
+    if result.reconcile is not None:
+        payload["reconcile"] = _serialize_reconcile(result.reconcile)
+    if result.archive is not None:
+        a = result.archive
+        payload["archive"] = {
+            "rows_in_archive_before": a.rows_in_archive_before,
+            "rows_in_archive_after": a.rows_in_archive_after,
+            "rows_promoted": a.rows_promoted,
+            "rows_already_archived": a.rows_already_archived,
+            "rows_deferred_by_quorum": a.rows_deferred_by_quorum,
+            "warnings": list(a.warnings),
+        }
+
+    out_path.write_text(json.dumps(payload, indent=2, default=str))
+    return out_path
+
+
+def _serialize_source_report(r: IngestReport) -> dict:
+    payload = {
+        "source_name": r.source_name,
+        "fetched": r.fetched,
+        "rows_raw": r.rows_raw,
+        "rows_outlier_dropped": r.rows_outlier_dropped,
+        "rows_traced": r.rows_traced,
+        "rows_appended": r.rows_appended,
+        "frame_offset_microrad": r.frame_offset_microrad,
+        "frame_overlap_buckets": r.frame_overlap_buckets,
+        "last_modified": r.last_modified,
+        "title_psm_used": r.title_psm_used,
+        "title_raw_text": r.title_raw_text,
+        "warnings": list(r.warnings),
+        "error": r.error,
+    }
+    if r.calibration is not None:
+        c = r.calibration
+        payload["calibration"] = {
+            "plot_bbox": list(c.plot_bbox),
+            "y_slope": c.y_slope,
+            "y_intercept": c.y_intercept,
+            "x_start_utc": _dt_str(c.x_start),
+            "x_end_utc": _dt_str(c.x_end),
+            "y_labels_found": [[int(py), float(v)] for py, v in c.y_labels_found],
+            "y_max_residual_microrad": c.fit_residual_per_axis.get(
+                "y_max_residual_microrad"
+            ),
+        }
+    if r.dropped_outlier_samples:
+        payload["dropped_outlier_samples"] = [
+            {"date_utc": _dt_str(ts), "tilt": tilt, "local_median": med}
+            for ts, tilt, med in r.dropped_outlier_samples
+        ]
+    return payload
+
+
+def _serialize_reconcile(rep: ReconcileReport) -> dict:
+    return {
+        "rows_out": rep.rows_out,
+        "sources": [
+            {
+                "name": s.name,
+                "rows_in": s.rows_in,
+                "offset_microrad": s.offset_microrad,
+                "overlap_buckets": s.overlap_buckets,
+                "is_anchor": s.is_anchor,
+                "note": s.note,
+                "rows_proximity_dropped": s.rows_proximity_dropped,
+                "piecewise_residuals": dict(s.piecewise_residuals),
+            }
+            for s in rep.sources
+        ],
+        "conflicts_top": [
+            {
+                "bucket_utc": _dt_str(c.bucket),
+                "winning_source": c.winning_source,
+                "losing_source": c.losing_source,
+                "winning_tilt": c.winning_tilt,
+                "losing_tilt": c.losing_tilt,
+                "delta": c.delta,
+            }
+            for c in sorted(
+                rep.conflicts, key=lambda c: abs(c.delta), reverse=True
+            )[:20]
+        ],
+        "conflicts_total": len(rep.conflicts),
+        "warnings": list(rep.warnings),
+    }
+
+
+def _dt_str(value) -> Optional[str]:
+    """ISO-8601 serialization for datetime-like values.
+
+    Handles both pd.Timestamp (nanosecond-precision) and stdlib datetime
+    without going through `.to_pydatetime()`, which drops nanoseconds and
+    emits a UserWarning for any timestamp that has them. Nanoseconds don't
+    survive round-tripping to ISO anyway (Python's datetime is microsecond
+    resolution), but we can format a pandas Timestamp directly at
+    microsecond precision without the warning.
+    """
+    if value is None:
+        return None
+    if isinstance(value, pd.Timestamp):
+        fmt = "%Y-%m-%dT%H:%M:%S.%f"
+        if value.tzinfo is None:
+            return value.strftime(fmt)
+        return value.tz_convert("UTC").strftime(fmt) + "Z"
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.strftime("%Y-%m-%dT%H:%M:%S")
+        return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return str(value)
+
+
+def _prune_old_run_reports(
+    reports_dir: Path, *, keep: int = MAX_RUN_REPORTS
+) -> None:
+    """Delete the oldest reports when more than `keep` files are present.
+
+    Keeps the directory bounded so the repo doesn't bloat over time while
+    still preserving enough history for quarterly investigations.
+    """
+    if not reports_dir.exists():
+        return
+    files = sorted(reports_dir.glob("*.json"))
+    excess = len(files) - keep
+    if excess <= 0:
+        return
+    for old in files[:excess]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

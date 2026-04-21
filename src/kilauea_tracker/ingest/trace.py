@@ -15,10 +15,13 @@ shows the same kind of mid-drop noise).
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 import cv2
 import numpy as np
 import pandas as pd
 
+from ..config import TRACE_OUTLIER_MIN_SAMPLES, TRACE_OUTLIER_THRESHOLD_MICRORAD
 from ..model import DATE_COL, TILT_COL
 from .calibrate import AxisCalibration
 from .exceptions import TraceError
@@ -59,6 +62,22 @@ MIN_COLUMN_COVERAGE = 0.5
 LEGEND_EXCLUSION_PLOT_RELATIVE = (0, 0, 145, 45)
 
 
+@dataclass
+class TraceReport:
+    """Diagnostics from a `trace_curve` call.
+
+    Attached to the traced DataFrame via `DataFrame.attrs["trace_report"]`
+    so callers can surface the numbers without the pure-data columns
+    needing a source-tag column.
+    """
+
+    rows_raw: int = 0
+    rows_after_outlier_filter: int = 0
+    outliers_dropped: int = 0
+    dropped_rows: list[tuple[pd.Timestamp, float, float]] = field(default_factory=list)
+    """Each entry is `(timestamp, raw_tilt, local_median)` for one dropped row."""
+
+
 def trace_curve(img: np.ndarray, calib: AxisCalibration) -> pd.DataFrame:
     """Extract the blue (Az 300°) tilt curve from a calibrated image.
 
@@ -68,7 +87,8 @@ def trace_curve(img: np.ndarray, calib: AxisCalibration) -> pd.DataFrame:
 
     Returns:
         A DataFrame `[Date, Tilt (microradians)]` sorted by Date with one row
-        per plot column where the curve was detected.
+        per plot column where the curve was detected. Diagnostics about the
+        outlier filter are attached on `df.attrs["trace_report"]`.
 
     Raises:
         TraceError: if the curve mask is empty or covers too few columns to
@@ -130,4 +150,67 @@ def trace_curve(img: np.ndarray, calib: AxisCalibration) -> pd.DataFrame:
 
     df = pd.DataFrame(rows, columns=[DATE_COL, TILT_COL])
     df = df.sort_values(DATE_COL).reset_index(drop=True)
+
+    # Drop per-row outliers produced by non-curve blue pixels (gridlines,
+    # tick-label bleed, JPEG hue drift near the Az-30° green curve). The
+    # 2026-04 archive contamination was caused by rows like these slipping
+    # through into the archive on days the higher-priority sources hadn't
+    # yet produced overlapping buckets. Real eruption transitions drop
+    # gradually across many columns, so they stay close to their rolling
+    # median; phantom spikes sit ~10 µrad off it.
+    df, report = _filter_rolling_median_outliers(df)
+    df.attrs["trace_report"] = report
     return df
+
+
+def _filter_rolling_median_outliers(
+    df: pd.DataFrame,
+) -> tuple[pd.DataFrame, TraceReport]:
+    """Drop rows whose tilt deviates from a centred rolling median by more
+    than `TRACE_OUTLIER_THRESHOLD_MICRORAD`.
+
+    The filter is centred (not trailing) so a spike doesn't shift the
+    reference on the rows immediately after it. A 5-sample window balances
+    sensitivity (wide enough to resist one-off noise) against locality
+    (narrow enough that real eruption transitions don't look like outliers
+    relative to their own neighbours).
+
+    Skips the filter entirely for very short inputs where the rolling
+    median is dominated by its own padding.
+    """
+    report = TraceReport(rows_raw=len(df), rows_after_outlier_filter=len(df))
+    if len(df) < TRACE_OUTLIER_MIN_SAMPLES:
+        return df, report
+
+    tilt = df[TILT_COL].to_numpy()
+    # Centered rolling median with a 5-sample window. At the edges pandas'
+    # min_periods=1 keeps the window active with whatever samples exist,
+    # which is the right behaviour for a USGS plot where the first/last
+    # few columns often carry real curve data.
+    rolling = (
+        pd.Series(tilt)
+        .rolling(window=5, center=True, min_periods=3)
+        .median()
+        .to_numpy()
+    )
+    delta = np.abs(tilt - rolling)
+    keep_mask = delta <= TRACE_OUTLIER_THRESHOLD_MICRORAD
+    # Preserve rows where the rolling median couldn't be computed (only
+    # happens at the extreme edges when min_periods isn't met).
+    keep_mask = keep_mask | np.isnan(rolling)
+
+    n_dropped = int((~keep_mask).sum())
+    if n_dropped == 0:
+        return df, report
+
+    dropped_rows = df.loc[~keep_mask]
+    report.dropped_rows = [
+        (row[DATE_COL], float(row[TILT_COL]), float(rolling[idx]))
+        for idx, (_, row) in enumerate(df.iterrows())
+        if not keep_mask[idx]
+    ]
+    report.outliers_dropped = n_dropped
+    report.rows_after_outlier_filter = len(df) - n_dropped
+
+    filtered = df.loc[keep_mask].reset_index(drop=True)
+    return filtered, report

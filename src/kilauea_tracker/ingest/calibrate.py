@@ -76,6 +76,11 @@ class AxisCalibration:
     x_end: pd.Timestamp                     # datetime at plot_bbox right edge
     y_labels_found: list[tuple[int, float]] = field(default_factory=list)
     fit_residual_per_axis: dict[str, float] = field(default_factory=dict)
+    # Title OCR diagnostics — which PSM mode succeeded ("psm7" or "psm6"),
+    # and the raw text Tesseract returned for that mode. Empty strings
+    # when the caller didn't capture the title (legacy paths).
+    title_psm_used: str = ""
+    title_raw_text: str = ""
 
     def pixel_to_microradians(self, py: float) -> float:
         return float(self.y_slope * float(py) + self.y_intercept)
@@ -216,7 +221,7 @@ def ocr_y_axis_labels(
 def ocr_title_timestamps(
     img: np.ndarray,
     plot_bbox: tuple[int, int, int, int],
-) -> tuple[pd.Timestamp, pd.Timestamp]:
+) -> tuple[pd.Timestamp, pd.Timestamp, str, str]:
     """Extract the (start, end) ISO timestamps from the title line below the plot.
 
     The USGS plots embed the full date range as text:
@@ -225,6 +230,10 @@ def ocr_title_timestamps(
     OCRing this with PSM 7 produces a near-perfect string that a regex
     cleanly recovers. The only common error is "to" → "t0", which the
     regex tolerates.
+
+    Returns `(start, end, psm_used, raw_text)` — the last two fields are
+    diagnostic-only so the ingest pipeline can log which PSM mode won and
+    exactly what Tesseract spat out.
     """
     h, w = img.shape[:2]
     _, _, _, y1 = plot_bbox
@@ -248,11 +257,11 @@ def ocr_title_timestamps(
     # the title cleanly even when PSM 7 misreads individual digits.
     psm7_result, psm7_text, psm7_error = _try_parse_title_at_psm(upscaled, "--psm 7")
     if psm7_result is not None:
-        return psm7_result
+        return psm7_result[0], psm7_result[1], "psm7", psm7_text
 
     psm6_result, psm6_text, psm6_error = _try_parse_title_at_psm(upscaled, "--psm 6")
     if psm6_result is not None:
-        return psm6_result
+        return psm6_result[0], psm6_result[1], "psm6", psm6_text
 
     # Both PSM modes failed. Surface whichever error is more informative —
     # parsing errors beat regex-mismatch errors because they prove the OCR
@@ -427,7 +436,7 @@ def calibrate_axes(img: np.ndarray) -> AxisCalibration:
     y_resid_max = float(np.abs(y_residuals).max())
 
     # ── x-axis ──────────────────────────────────────────────────────────────
-    x_start, x_end = ocr_title_timestamps(img, plot_bbox)
+    x_start, x_end, psm_used, title_raw = ocr_title_timestamps(img, plot_bbox)
 
     return AxisCalibration(
         plot_bbox=plot_bbox,
@@ -437,4 +446,6 @@ def calibrate_axes(img: np.ndarray) -> AxisCalibration:
         x_end=x_end,
         y_labels_found=y_labels,
         fit_residual_per_axis={"y_max_residual_microrad": y_resid_max},
+        title_psm_used=psm_used,
+        title_raw_text=title_raw,
     )

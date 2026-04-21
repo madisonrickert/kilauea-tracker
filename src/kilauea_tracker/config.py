@@ -193,3 +193,50 @@ INGEST_CACHE_TTL_SECONDS = 15 * 60
 
 # Display timezone — v1.0 labels Pacific/Honolulu Time on the x-axis (line 329).
 DISPLAY_TIMEZONE = "Pacific/Honolulu"
+
+
+# ─── Ingest validation knobs (added after the 2026-04 archive contamination) ───
+#
+# A bad `week` PNG trace in April 2026 produced recurring phantom rows ~10 µrad
+# below the real curve. Those rows got promoted into the append-only archive
+# (keep-first, immutable) and then won every future reconcile contest. The
+# three knobs below are the three layers of defense now in place.
+
+# Per-row outlier rejection applied inside `trace.trace_curve`. After the HSV
+# mask + column-median step produces the raw rows, we compute a rolling
+# 5-neighbour median and drop any row whose tilt deviates from it by more
+# than this many µrad. The phantom spikes sit ~10 µrad below the curve; real
+# eruption transitions drop gradually over hours and stay well within 4 µrad
+# of the local median. 4.0 µrad is a comfortable middle ground.
+TRACE_OUTLIER_THRESHOLD_MICRORAD = 4.0
+
+# Below this sample count we skip the outlier filter entirely — we don't
+# have enough neighbours to trust the rolling median.
+TRACE_OUTLIER_MIN_SAMPLES = 10
+
+# Quorum gate applied inside `archive.promote_to_archive`. A 15-min bucket
+# can only be promoted into the archive when at least this many aligned
+# sources in the reconcile input contributed rows to that bucket. A single
+# flaky source can no longer poison the archive — a second source must
+# agree before the row becomes permanent.
+#
+# Exception: buckets that already have an adjacent archived neighbour within
+# ARCHIVE_QUORUM_NEIGHBOUR_MINUTES and whose value is within
+# ARCHIVE_QUORUM_NEIGHBOUR_THRESHOLD_MICRORAD of that neighbour skip the
+# quorum requirement — continuity with known-good archive state is evidence
+# enough.
+ARCHIVE_QUORUM_MIN_SOURCES = 2
+ARCHIVE_QUORUM_NEIGHBOUR_MINUTES = 30
+ARCHIVE_QUORUM_NEIGHBOUR_THRESHOLD_MICRORAD = 3.0
+
+# Archive priority demotion. In `reconcile._merge_by_priority`, archive rows
+# younger than this many days are demoted below the live PNG sources so
+# that a higher-quality live source can override a recently-archived bad
+# row. Older archive rows keep their priority-2 slot unchanged — they are
+# the load-bearing historical anchor the archive was designed to be.
+#
+# 14 days lets the daily cron run ~14 opportunities to replace a bad row
+# before it becomes frozen, which is comfortably more than the 1-2 day
+# window over which sibling sources typically catch up to a just-archived
+# bucket.
+ARCHIVE_MAX_AGE_FOR_PRIORITY_DEMOTION_DAYS = 14

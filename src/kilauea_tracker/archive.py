@@ -56,10 +56,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
-from .config import ARCHIVE_CSV
+from .config import (
+    ARCHIVE_CSV,
+    ARCHIVE_QUORUM_MIN_SOURCES,
+    ARCHIVE_QUORUM_NEIGHBOUR_MINUTES,
+    ARCHIVE_QUORUM_NEIGHBOUR_THRESHOLD_MICRORAD,
+)
 from .model import DATE_COL, TILT_COL
 
 # Bucket granularity for keep-first dedupe. Same as cache.DEDUPE_BUCKET so
@@ -77,6 +83,11 @@ class ArchivePromotionReport:
     rows_in_archive_after: int = 0
     rows_promoted: int = 0
     rows_already_archived: int = 0
+    # Rows that were otherwise promotable but were deferred by the quorum
+    # gate — too few source contributors AND no matching archived neighbour.
+    # These rows remain eligible on future runs when a second source has
+    # caught up to the bucket.
+    rows_deferred_by_quorum: int = 0
     warnings: list[str] = field(default_factory=list)
 
 
@@ -99,24 +110,39 @@ def load_archive(path: Path = ARCHIVE_CSV) -> pd.DataFrame:
 def promote_to_archive(
     merged_df: pd.DataFrame,
     path: Path = ARCHIVE_CSV,
+    *,
+    sources: Optional[dict[str, pd.DataFrame]] = None,
 ) -> ArchivePromotionReport:
-    """Append rows from `merged_df` to the archive with keep-first dedupe.
+    """Append rows from `merged_df` to the archive with keep-first dedupe
+    and an optional multi-source quorum gate.
 
     Args:
         merged_df: A reconciled tilt history (the output of
             `reconcile.reconcile_sources()`). Schema must be
             `[Date, Tilt (microradians)]`.
         path:      Where to write. Defaults to `config.ARCHIVE_CSV`.
+        sources:   Optional — the raw per-source DataFrames that fed the
+            reconcile (same dict shape as `reconcile_sources` received).
+            When provided, each candidate row must be corroborated by at
+            least `ARCHIVE_QUORUM_MIN_SOURCES` contributing sources (at the
+            same 15-min bucket) OR sit close enough to an already-archived
+            neighbour to piggyback on its provenance. When omitted (the
+            legacy call path kept for backward compatibility), no quorum
+            gate is applied — all non-duplicate rows are promoted.
 
     Returns:
-        An `ArchivePromotionReport` with before/after row counts and the
-        number of new rows that were promoted.
+        An `ArchivePromotionReport` with before/after row counts, how many
+        rows were promoted, how many were deferred by the quorum gate, and
+        any free-text warnings.
 
     Behavior:
       - If `merged_df` is empty, no-op.
-      - For each 15-min bucket in `merged_df`, check whether it already
-        exists in the archive. If yes, **leave the archive's value
-        untouched** (keep-first). If no, append the merged_df row.
+      - For each 15-min bucket in `merged_df` not already in the archive:
+        apply the quorum gate (if `sources` supplied). Promote if it passes,
+        defer otherwise. The `archive` source itself (present because the
+        reconciler re-consumes its own archive as a source) never counts
+        toward the source quorum — self-corroboration would defeat the
+        purpose of the gate.
       - Sort the result by Date and write back to disk.
     """
     report = ArchivePromotionReport()
@@ -146,13 +172,22 @@ def promote_to_archive(
     if len(existing) > 0:
         existing_buckets = existing[DATE_COL].dt.round(ARCHIVE_BUCKET)
         already_archived_mask = incoming_dedup["_bucket"].isin(set(existing_buckets))
-        new_rows = incoming_dedup[~already_archived_mask]
+        candidate_rows = incoming_dedup[~already_archived_mask]
         report.rows_already_archived = int(already_archived_mask.sum())
     else:
-        new_rows = incoming_dedup
+        candidate_rows = incoming_dedup
         report.rows_already_archived = 0
 
-    new_rows = new_rows.drop(columns=["_bucket"])
+    # Apply the quorum gate BEFORE stripping `_bucket`; the gate needs it.
+    if sources is not None and len(candidate_rows) > 0:
+        candidate_rows, n_deferred, warn = _apply_quorum_gate(
+            candidate_rows, sources=sources, existing=existing
+        )
+        report.rows_deferred_by_quorum = n_deferred
+        if warn:
+            report.warnings.append(warn)
+
+    new_rows = candidate_rows.drop(columns=["_bucket"])
     report.rows_promoted = len(new_rows)
 
     if len(new_rows) == 0:
@@ -167,6 +202,84 @@ def promote_to_archive(
     path.parent.mkdir(parents=True, exist_ok=True)
     combined.to_csv(path, index=False)
     return report
+
+
+def _apply_quorum_gate(
+    candidate_rows: pd.DataFrame,
+    *,
+    sources: dict[str, pd.DataFrame],
+    existing: pd.DataFrame,
+) -> tuple[pd.DataFrame, int, str]:
+    """Keep only rows that either:
+      (a) received contributions from `ARCHIVE_QUORUM_MIN_SOURCES` different
+          sources at the same 15-min bucket, OR
+      (b) sit within `ARCHIVE_QUORUM_NEIGHBOUR_MINUTES` of an existing
+          archive row and within
+          `ARCHIVE_QUORUM_NEIGHBOUR_THRESHOLD_MICRORAD` of its value.
+
+    Returns `(kept_rows, n_deferred, warning_message_or_empty)`.
+
+    The `archive` source itself is excluded from the source count — it would
+    otherwise vacuously corroborate every bucket that the reconciler had
+    already re-consumed from the archive, defeating the whole point of the
+    gate.
+    """
+    # Source-count per bucket (excluding the archive source — see docstring).
+    contributions: dict[pd.Timestamp, int] = {}
+    for source_name, df in sources.items():
+        if source_name == "archive" or df is None or len(df) == 0:
+            continue
+        if DATE_COL not in df.columns:
+            continue
+        buckets = pd.to_datetime(df[DATE_COL]).dt.round(ARCHIVE_BUCKET)
+        for b in buckets.dropna().unique():
+            contributions[b] = contributions.get(b, 0) + 1
+
+    # Prepare a sorted neighbour lookup against existing archive rows.
+    if len(existing) > 0:
+        e = existing[[DATE_COL, TILT_COL]].copy()
+        e[DATE_COL] = pd.to_datetime(e[DATE_COL]).astype("datetime64[ns]")
+        e = e.sort_values(DATE_COL).reset_index(drop=True)
+    else:
+        e = existing
+
+    candidates = candidate_rows.sort_values(DATE_COL).reset_index(drop=True).copy()
+    candidates[DATE_COL] = pd.to_datetime(candidates[DATE_COL]).astype("datetime64[ns]")
+
+    if len(e) > 0:
+        nearest = pd.merge_asof(
+            candidates[[DATE_COL, TILT_COL, "_bucket"]],
+            e.rename(columns={DATE_COL: "_neighbor_date", TILT_COL: "_neighbor_tilt"}),
+            left_on=DATE_COL,
+            right_on="_neighbor_date",
+            direction="nearest",
+        )
+        time_to_neighbor = (nearest[DATE_COL] - nearest["_neighbor_date"]).abs()
+        value_delta = (nearest[TILT_COL] - nearest["_neighbor_tilt"]).abs()
+        proximity_radius = pd.Timedelta(minutes=ARCHIVE_QUORUM_NEIGHBOUR_MINUTES)
+        has_trusted_neighbor = (
+            (time_to_neighbor <= proximity_radius)
+            & (value_delta <= ARCHIVE_QUORUM_NEIGHBOUR_THRESHOLD_MICRORAD)
+        ).to_numpy()
+    else:
+        has_trusted_neighbor = [False] * len(candidates)
+
+    source_counts = candidates["_bucket"].map(contributions).fillna(0).astype(int)
+    passes_quorum = source_counts >= ARCHIVE_QUORUM_MIN_SOURCES
+    keep_mask = passes_quorum.to_numpy() | has_trusted_neighbor
+
+    kept = candidates[keep_mask].reset_index(drop=True)
+    n_deferred = int((~keep_mask).sum())
+    warn = ""
+    if n_deferred > 0:
+        warn = (
+            f"archive quorum gate deferred {n_deferred} row(s) — fewer than "
+            f"{ARCHIVE_QUORUM_MIN_SOURCES} sources contributed and no "
+            f"trusted archive neighbour within "
+            f"{ARCHIVE_QUORUM_NEIGHBOUR_MINUTES} min / "
+            f"{ARCHIVE_QUORUM_NEIGHBOUR_THRESHOLD_MICRORAD} µrad"
+        )
+    return kept, n_deferred, warn
 
 
 # ─────────────────────────────────────────────────────────────────────────────

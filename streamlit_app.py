@@ -39,6 +39,7 @@ if str(_SRC) not in sys.path:
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from kilauea_tracker.cache import load_history
 from kilauea_tracker.config import (
@@ -926,6 +927,51 @@ fig = build_figure(
 )
 st.plotly_chart(fig, width="stretch")
 
+# Hover-to-clipboard: press ⌘C / Ctrl+C while hovering a datapoint on the
+# chart to copy "YYYY-MM-DD HH:MM | X.XX µrad" to the clipboard. Injected
+# as a zero-height components.v1.html block so it can reach up through the
+# Streamlit iframe sandbox and bind to the parent document's Plotly
+# instance. The polling loop handles the race where Plotly mounts a moment
+# after the component; the 10-second timeout keeps this quiet on static
+# page loads where the chart never renders.
+components.html(
+    """
+    <script>
+    (function() {
+      const parentDoc = window.parent.document;
+      let current = null;
+      const bind = (gd) => {
+        if (!gd || gd._copyBound) return;
+        gd._copyBound = true;
+        gd.on('plotly_hover', (ev) => {
+          if (!ev || !ev.points || !ev.points.length) return;
+          const p = ev.points[0];
+          const t = typeof p.x === 'string' ? p.x.slice(0, 16).replace('T', ' ') : p.x;
+          const y = typeof p.y === 'number' ? p.y.toFixed(2) : p.y;
+          current = t + ' | ' + y + ' \u00b5rad';
+        });
+        gd.on('plotly_unhover', () => { current = null; });
+      };
+      const onKey = (ev) => {
+        if (!current) return;
+        if (!(ev.metaKey || ev.ctrlKey) || ev.key !== 'c') return;
+        // Don't intercept copies originating from a text selection.
+        const sel = window.parent.getSelection && window.parent.getSelection();
+        if (sel && sel.toString().length > 0) return;
+        navigator.clipboard && navigator.clipboard.writeText(current);
+      };
+      parentDoc.addEventListener('keydown', onKey);
+      const iv = setInterval(() => {
+        parentDoc.querySelectorAll('.js-plotly-plot').forEach(bind);
+      }, 400);
+      setTimeout(() => clearInterval(iv), 10000);
+    })();
+    </script>
+    """,
+    height=0,
+)
+st.caption("Tip: hover a point on the chart and press ⌘C / Ctrl+C to copy it.")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # USGS Kīlauea summit webcams
@@ -1267,6 +1313,64 @@ with st.expander("🛰 USGS source plots"):
         "~6 µrad offsets in the Jul-Aug 2025 region. `dec2024_to_now` "
         "covers the same range with one consistent y-frame."
     )
+
+
+with st.expander("📜 Recent refresh runs"):
+    st.caption(
+        "Structured diagnostic reports written by the ingest pipeline on "
+        "every cron-triggered refresh. Each file captures the OCR'd title "
+        "text and PSM mode per source, the calibration, frame-alignment "
+        "offsets, per-row outliers that were filtered, reconciliation "
+        "offsets, archive promotion counts, and any warnings. The full "
+        "history is committed to `data/run_reports/` (capped at the last "
+        "90 runs)."
+    )
+    _RUN_REPORTS_DIR = Path(HISTORY_CSV).resolve().parent / "run_reports"
+    if not _RUN_REPORTS_DIR.exists():
+        st.info(
+            "No run reports yet — the first report will be written on the "
+            "next ingest pipeline run."
+        )
+    else:
+        _report_files = sorted(
+            _RUN_REPORTS_DIR.glob("*.json"), reverse=True
+        )[:7]
+        if not _report_files:
+            st.info("No run reports yet.")
+        for _rp in _report_files:
+            with st.expander(f"`{_rp.name}`"):
+                try:
+                    import json as _json
+
+                    _doc = _json.loads(_rp.read_text())
+                except Exception as e:
+                    st.caption(f"⚠️ could not parse: {e}")
+                    continue
+                _rows = []
+                for _src in _doc.get("per_source", []):
+                    _rows.append(
+                        {
+                            "source": _src["source_name"],
+                            "fetched": _src.get("fetched"),
+                            "rows_traced": _src.get("rows_traced"),
+                            "outliers": _src.get("rows_outlier_dropped", 0),
+                            "frame_offset": round(
+                                _src.get("frame_offset_microrad") or 0.0, 3
+                            ),
+                            "psm": _src.get("title_psm_used"),
+                            "error": bool(_src.get("error")),
+                        }
+                    )
+                if _rows:
+                    st.dataframe(pd.DataFrame(_rows), hide_index=True)
+                _arc = _doc.get("archive", {})
+                if _arc:
+                    st.caption(
+                        f"archive: before {_arc.get('rows_in_archive_before')} → "
+                        f"after {_arc.get('rows_in_archive_after')} "
+                        f"(promoted {_arc.get('rows_promoted')}, "
+                        f"deferred by quorum {_arc.get('rows_deferred_by_quorum')})"
+                    )
 
 
 with st.expander("ℹ️ How does this work?"):

@@ -90,6 +90,10 @@ jobs:
           #   - data/archive.csv       (Part 2's append-only canonical
           #     archive — must accumulate across runs, dropping these
           #     would reset history to whatever was last committed)
+          #   - data/run_reports/*.json (structured diagnostics written by
+          #     ingest.pipeline._write_run_report — committed so prod
+          #     observations outlive the GitHub Actions log retention
+          #     window; _prune_old_run_reports keeps the directory bounded)
           # The `data/raw/uwd_digital/UWD_*.csv` files are gitignored, so
           # `git add data/` will skip them automatically.
           git add data/

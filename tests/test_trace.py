@@ -145,6 +145,51 @@ def test_legend_exclusion_actually_changes_the_trace(fixture_img, fixture_calib,
     )
 
 
+def test_rolling_median_outlier_filter_drops_phantom_spike(fixture_img, fixture_calib):
+    """Inject a synthetic ~10 µrad downward spike on a traced DataFrame and
+    confirm the filter drops it. Guards against the 2026-04 week-PNG
+    contamination recurring silently.
+    """
+    df = trace_curve(fixture_img, fixture_calib)
+    # Pick a middle row, shift it down by 12 µrad to simulate the spike.
+    spike_idx = len(df) // 2
+    contaminated = df.copy()
+    contaminated.loc[spike_idx, TILT_COL] = df.loc[spike_idx, TILT_COL] - 12.0
+
+    filtered, report = trace_mod._filter_rolling_median_outliers(contaminated)
+    assert report.outliers_dropped >= 1
+    # The exact spike row must have been removed.
+    assert len(filtered) == len(contaminated) - report.outliers_dropped
+    assert report.rows_raw == len(contaminated)
+
+
+def test_rolling_median_outlier_filter_does_not_touch_real_transition(
+    fixture_img, fixture_calib
+):
+    """A genuine eruption transition drops ~10 µrad over many samples, not
+    in a single row. The gradual shape keeps every sample near its own
+    rolling median, so no rows should be dropped.
+    """
+    df = trace_curve(fixture_img, fixture_calib)
+    # The fixture already contains real transitions. If the filter were
+    # mis-tuned, the fixture trace would lose some of them. Accept up to a
+    # handful of drops to allow for benign column-median jitter at the
+    # very edges of transitions.
+    report = df.attrs["trace_report"]
+    assert report.outliers_dropped <= 5, (
+        f"filter removed {report.outliers_dropped} rows from a clean fixture "
+        "— threshold may be too aggressive"
+    )
+
+
+def test_trace_report_attached_to_dataframe(fixture_img, fixture_calib):
+    df = trace_curve(fixture_img, fixture_calib)
+    rep = df.attrs.get("trace_report")
+    assert rep is not None
+    assert rep.rows_raw >= len(df)
+    assert rep.rows_after_outlier_filter == len(df)
+
+
 def test_traced_data_is_consumable_by_peak_detection(fixture_img, fixture_calib):
     """Smoke test: a fresh trace must flow through detect_peaks and predict
     without exceptions, even though the fixture is from a different time

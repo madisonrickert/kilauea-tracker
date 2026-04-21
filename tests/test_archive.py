@@ -318,6 +318,97 @@ def test_archive_immune_to_per_source_drift_across_multiple_runs(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. Quorum gate — the 2026-04 contamination fix
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_quorum_gate_defers_single_source_buckets(tmp_archive: Path):
+    """A bucket that's present in only ONE source with no nearby archive
+    neighbour must be deferred — exactly the failure mode that let the
+    week-PNG phantom spikes poison the archive.
+    """
+    merged = _df(["2026-06-01 00:00:00"], [9.0])
+    sources = {"week": merged}  # only one source contributes
+
+    report = promote_to_archive(merged, tmp_archive, sources=sources)
+
+    assert report.rows_promoted == 0
+    assert report.rows_deferred_by_quorum == 1
+    assert not tmp_archive.exists()
+
+
+def test_quorum_gate_admits_multi_source_buckets(tmp_archive: Path):
+    """When ≥2 sources contribute to the same 15-min bucket, the row is
+    corroborated and the gate lets it through. This is the common healthy
+    case (week + month + two_day frequently all cover recent buckets).
+    """
+    merged = _df(["2026-06-01 00:00:00"], [9.0])
+    sources = {
+        "week": _df(["2026-06-01 00:00:00"], [9.0]),
+        "month": _df(["2026-06-01 00:05:00"], [9.1]),
+    }
+    report = promote_to_archive(merged, tmp_archive, sources=sources)
+    assert report.rows_promoted == 1
+    assert report.rows_deferred_by_quorum == 0
+
+
+def test_quorum_gate_admits_rows_with_trusted_archive_neighbour(tmp_archive: Path):
+    """A single-source row that sits close in time AND value to an already-
+    archived row rides in on the neighbour's provenance. This keeps the
+    gate from blocking the normal forward march of single-source recent
+    rows once the archive has a continuous history.
+    """
+    # Seed archive with a good row.
+    promote_to_archive(_df(["2026-06-01 00:00:00"], [9.0]), tmp_archive)
+
+    # New single-source row, 10 min later, 0.5 µrad higher → within gates.
+    new = _df(["2026-06-01 00:10:00"], [9.5])
+    sources = {"week": new}
+    report = promote_to_archive(new, tmp_archive, sources=sources)
+    assert report.rows_promoted == 1
+    assert report.rows_deferred_by_quorum == 0
+
+
+def test_quorum_gate_defers_single_source_row_that_disagrees_with_neighbour(
+    tmp_archive: Path,
+):
+    """A single-source row that's close in time to an archived neighbour
+    but wildly different in value is exactly the contamination pattern —
+    defer it until a second source confirms.
+    """
+    promote_to_archive(_df(["2026-06-01 00:00:00"], [9.0]), tmp_archive)
+
+    # Single-source row 10 min later with a -10 µrad spike — classic
+    # phantom. Neighbour is close in time but way off in value → gate
+    # defers.
+    new = _df(["2026-06-01 00:10:00"], [-1.0])
+    sources = {"week": new}
+    report = promote_to_archive(new, tmp_archive, sources=sources)
+    assert report.rows_promoted == 0
+    assert report.rows_deferred_by_quorum == 1
+
+
+def test_quorum_gate_ignores_archive_source_in_count(tmp_archive: Path):
+    """The archive feeds itself back into reconcile as a source. The gate
+    must NOT count that self-contribution toward quorum — otherwise every
+    already-archived bucket would vacuously 're-corroborate' itself and
+    the gate is inert.
+    """
+    # Seed archive.
+    promote_to_archive(_df(["2026-06-01 00:00:00"], [9.0]), tmp_archive)
+
+    # New bucket; only sources are archive (from last run) + week (one live).
+    # Counts: archive excluded, week = 1 source → below quorum, and the
+    # new bucket has no nearby archive neighbour (archive's only row is at
+    # 00:00, new row is at 01:00 — 60 min away).
+    new = _df(["2026-06-01 01:00:00"], [9.2])
+    archive_df = load_archive(tmp_archive)
+    sources = {"archive": archive_df, "week": new}
+    report = promote_to_archive(new, tmp_archive, sources=sources)
+    assert report.rows_deferred_by_quorum == 1
+
+
 def test_archive_schema_stability_after_multiple_promotes(tmp_archive: Path):
     """Promote a few rounds and verify the on-disk archive only has
     [Date, Tilt (microradians)] — no leaked _bucket, _source, etc.

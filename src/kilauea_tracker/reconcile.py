@@ -69,7 +69,12 @@ from typing import Optional
 
 import pandas as pd
 
-from .config import ALIGNMENT_ORDER, SOURCE_PRIORITY
+from .config import (
+    ALIGNMENT_ORDER,
+    ARCHIVE_MAX_AGE_FOR_PRIORITY_DEMOTION_DAYS,
+    ARCHIVE_SOURCE_NAME,
+    SOURCE_PRIORITY,
+)
 from .model import DATE_COL, TILT_COL
 
 # Bucket size for the per-source y-offset calculation. Coarser than the
@@ -540,18 +545,40 @@ def _merge_by_priority(
     its priority index, sort by (bucket, priority), and drop duplicates per
     bucket keeping the FIRST (= highest-priority) row.
 
+    Archive priority demotion: archive rows whose timestamps fall within
+    `ARCHIVE_MAX_AGE_FOR_PRIORITY_DEMOTION_DAYS` of the current UTC time
+    are temporarily demoted to the lowest priority slot. This lets a live
+    source override a freshly-archived bad row on subsequent cron runs —
+    the archive's keep-first semantics mean a contaminated row is otherwise
+    permanent. Older archive rows keep their priority-2 slot because their
+    value as a frozen historical anchor outweighs any risk of stale drift.
+
     Conflicts — buckets where two aligned sources disagree by more than
     `CONFLICT_THRESHOLD_MICRORAD` — are recorded on `report.conflicts` so the
     UI can show actionable provenance instead of just a count.
     """
     priority_index = {name: i for i, name in enumerate(SOURCE_PRIORITY)}
+    lowest_priority = len(SOURCE_PRIORITY)  # one past the end
+    now_utc = pd.Timestamp.now("UTC").tz_localize(None)
+    demotion_cutoff = now_utc - pd.Timedelta(
+        days=ARCHIVE_MAX_AGE_FOR_PRIORITY_DEMOTION_DAYS
+    )
 
     tagged: list[pd.DataFrame] = []
     for name, df in aligned.items():
         d = df[[DATE_COL, TILT_COL]].copy()
         d["_source"] = name
-        d["_priority"] = priority_index[name]
         d["_bucket"] = d[DATE_COL].dt.round(MERGE_BUCKET)
+        base_priority = priority_index[name]
+        if name == ARCHIVE_SOURCE_NAME:
+            # Row-by-row priority: young rows get demoted; old rows keep
+            # their priority-2 slot. This is the only source with
+            # per-row priority variation.
+            is_young = d[DATE_COL] >= demotion_cutoff
+            d["_priority"] = base_priority
+            d.loc[is_young, "_priority"] = lowest_priority
+        else:
+            d["_priority"] = base_priority
         tagged.append(d)
 
     combined = pd.concat(tagged, ignore_index=True)
