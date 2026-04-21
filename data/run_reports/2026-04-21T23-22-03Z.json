@@ -1,0 +1,175 @@
+{
+  "run_started_at_utc": "2026-04-21T23:22:02Z",
+  "run_finished_at_utc": "2026-04-21T23:22:03Z",
+  "per_source": [
+    {
+      "source_name": "three_month",
+      "fetched": false,
+      "rows_raw": 0,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 0,
+      "rows_appended": 0,
+      "frame_offset_microrad": 0.0,
+      "frame_overlap_buckets": 0,
+      "last_modified": "Tue, 21 Apr 2026 20:25:57 GMT",
+      "title_psm_used": null,
+      "title_raw_text": null,
+      "warnings": [],
+      "error": null
+    },
+    {
+      "source_name": "month",
+      "fetched": false,
+      "rows_raw": 0,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 0,
+      "rows_appended": 0,
+      "frame_offset_microrad": 0.0,
+      "frame_overlap_buckets": 0,
+      "last_modified": "Tue, 21 Apr 2026 20:21:19 GMT",
+      "title_psm_used": null,
+      "title_raw_text": null,
+      "warnings": [],
+      "error": null
+    },
+    {
+      "source_name": "week",
+      "fetched": true,
+      "rows_raw": 0,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 0,
+      "rows_appended": 0,
+      "frame_offset_microrad": 0.0,
+      "frame_overlap_buckets": 0,
+      "last_modified": "Tue, 21 Apr 2026 20:22:22 GMT",
+      "title_psm_used": null,
+      "title_raw_text": null,
+      "warnings": [],
+      "error": "calibration failed: y-axis OCR found only 2 label(s) (need \u22653): [(206, -4.0), (243, -6.0)]"
+    },
+    {
+      "source_name": "two_day",
+      "fetched": false,
+      "rows_raw": 0,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 0,
+      "rows_appended": 0,
+      "frame_offset_microrad": 0.0,
+      "frame_overlap_buckets": 0,
+      "last_modified": "Tue, 21 Apr 2026 20:26:32 GMT",
+      "title_psm_used": null,
+      "title_raw_text": null,
+      "warnings": [],
+      "error": null
+    },
+    {
+      "source_name": "dec2024_to_now",
+      "fetched": false,
+      "rows_raw": 0,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 0,
+      "rows_appended": 0,
+      "frame_offset_microrad": 0.0,
+      "frame_overlap_buckets": 0,
+      "last_modified": "Tue, 21 Apr 2026 20:26:42 GMT",
+      "title_psm_used": null,
+      "title_raw_text": null,
+      "warnings": [],
+      "error": null
+    }
+  ],
+  "reconcile": {
+    "rows_out": 16178,
+    "sources": [
+      {
+        "name": "digital",
+        "rows_in": 8640,
+        "offset_microrad": 0.0,
+        "overlap_buckets": 0,
+        "is_anchor": true,
+        "note": null,
+        "rows_proximity_dropped": 0,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "archive",
+        "rows_in": 16128,
+        "offset_microrad": 0.0,
+        "overlap_buckets": 4322,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 8640,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "dec2024_to_now",
+        "rows_in": 10649,
+        "offset_microrad": -4.757090839419643,
+        "overlap_buckets": 4470,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 10648,
+        "piecewise_residuals": {
+          "digital": -0.9619463121647628,
+          "archive": 0.0,
+          "month": -0.6855540036512373,
+          "week": 0.21704313286972265,
+          "two_day": -0.013026212160740513
+        }
+      },
+      {
+        "name": "three_month",
+        "rows_in": 7255,
+        "offset_microrad": 8.429796216256456,
+        "overlap_buckets": 2158,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 7253,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "month",
+        "rows_in": 3762,
+        "offset_microrad": 10.303631165335691,
+        "overlap_buckets": 1006,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 3762,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "week",
+        "rows_in": 1683,
+        "offset_microrad": 9.883593290627925,
+        "overlap_buckets": 447,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 1640,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "two_day",
+        "rows_in": 1195,
+        "offset_microrad": 14.866741207348216,
+        "overlap_buckets": 298,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 1191,
+        "piecewise_residuals": {}
+      }
+    ],
+    "conflicts_top": [],
+    "conflicts_total": 0,
+    "warnings": []
+  },
+  "archive": {
+    "rows_in_archive_before": 16128,
+    "rows_in_archive_after": 16167,
+    "rows_promoted": 39,
+    "rows_already_archived": 16128,
+    "rows_deferred_by_quorum": 11,
+    "warnings": [
+      "archive quorum gate deferred 11 row(s) \u2014 fewer than 2 sources contributed and no trusted archive neighbour within 30 min / 3.0 \u00b5rad"
+    ]
+  }
+}

@@ -1,0 +1,365 @@
+{
+  "run_started_at_utc": "2026-04-21T23:13:57Z",
+  "run_finished_at_utc": "2026-04-21T23:14:00Z",
+  "per_source": [
+    {
+      "source_name": "three_month",
+      "fetched": true,
+      "rows_raw": 711,
+      "rows_outlier_dropped": 1,
+      "rows_traced": 710,
+      "rows_appended": 710,
+      "frame_offset_microrad": 0.0,
+      "frame_overlap_buckets": 0,
+      "last_modified": "Tue, 21 Apr 2026 20:25:57 GMT",
+      "title_psm_used": "psm7",
+      "title_raw_text": "\u2014 ~~ ~ Pacific'Honolul Time (2026-01-21 10:25:56 to 2026-04-21 10:25:56) aan\n",
+      "warnings": [
+        "dropped 1 per-row outlier(s) (|delta| > threshold vs rolling median)",
+        "no temporal overlap between 710 new rows and the existing CSV at three_month.csv; appending in raw frame (drift risk \u2014 manual inspection recommended)"
+      ],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.2234971741736599,
+        "y_intercept": 24.265285151567056,
+        "x_start_utc": "2026-01-21T20:25:56",
+        "x_end_utc": "2026-04-21T20:25:56",
+        "y_labels_found": [
+          [
+            64,
+            10.0
+          ],
+          [
+            153,
+            -10.0
+          ],
+          [
+            198,
+            -20.0
+          ],
+          [
+            243,
+            -30.0
+          ]
+        ],
+        "y_max_residual_microrad": 0.07021750299708884
+      },
+      "dropped_outlier_samples": [
+        {
+          "date_utc": "2026-01-24T23:12:45",
+          "tilt": 4.262288063024496,
+          "local_median": -7.024319232745331
+        }
+      ]
+    },
+    {
+      "source_name": "month",
+      "fetched": true,
+      "rows_raw": 680,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 680,
+      "rows_appended": 680,
+      "frame_offset_microrad": -1.0947834380900932,
+      "frame_overlap_buckets": 419,
+      "last_modified": "Tue, 21 Apr 2026 20:21:19 GMT",
+      "title_psm_used": "psm6",
+      "title_raw_text": "Osi2s Os'26 Osl29 O4/01 O4/04 O4/07 04/10 04/13 04/16 04/19\nPacific/Honolulu Time (2026-03-22 10:21:18 to 2026-04-21 10:21:18)\n",
+      "warnings": [],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.06861462033599529,
+        "y_intercept": 3.2651905664912784,
+        "x_start_utc": "2026-03-22T20:21:18",
+        "x_end_utc": "2026-04-21T20:21:18",
+        "y_labels_found": [
+          [
+            19,
+            1.0
+          ],
+          [
+            153,
+            -5.0
+          ],
+          [
+            198,
+            -10.0
+          ],
+          [
+            243,
+            -15.0
+          ]
+        ],
+        "y_max_residual_microrad": 2.232846344916001
+      }
+    },
+    {
+      "source_name": "week",
+      "fetched": true,
+      "rows_raw": 0,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 0,
+      "rows_appended": 0,
+      "frame_offset_microrad": 0.0,
+      "frame_overlap_buckets": 0,
+      "last_modified": "Tue, 21 Apr 2026 20:22:22 GMT",
+      "title_psm_used": null,
+      "title_raw_text": null,
+      "warnings": [],
+      "error": "calibration failed: y-axis OCR found only 2 label(s) (need \u22653): [(206, -4.0), (243, -6.0)]"
+    },
+    {
+      "source_name": "two_day",
+      "fetched": true,
+      "rows_raw": 749,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 749,
+      "rows_appended": 192,
+      "frame_offset_microrad": -6.2785804774240725,
+      "frame_overlap_buckets": 160,
+      "last_modified": "Tue, 21 Apr 2026 20:26:32 GMT",
+      "title_psm_used": "psm7",
+      "title_raw_text": "\u201d Pacific/Honolul Time (2026-04-19 10:26:32 to 2026-04-21 10:26:32) ~\n",
+      "warnings": [
+        "large intra-source frame shift of -6.279 \u00b5rad; USGS may have rescaled this PNG's y-axis aggressively. The shift was absorbed but eyeballing the source plot is recommended."
+      ],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.020122176645599704,
+        "y_intercept": 2.384909247751,
+        "x_start_utc": "2026-04-19T20:26:32",
+        "x_end_utc": "2026-04-21T20:26:32",
+        "y_labels_found": [
+          [
+            44,
+            1.5
+          ],
+          [
+            94,
+            0.5
+          ],
+          [
+            143,
+            -0.5
+          ],
+          [
+            168,
+            -1.0
+          ],
+          [
+            243,
+            -2.5
+          ]
+        ],
+        "y_max_residual_microrad": 0.0074379874302423765
+      }
+    },
+    {
+      "source_name": "dec2024_to_now",
+      "fetched": true,
+      "rows_raw": 732,
+      "rows_outlier_dropped": 10,
+      "rows_traced": 722,
+      "rows_appended": 722,
+      "frame_offset_microrad": 0.3125000000000142,
+      "frame_overlap_buckets": 158,
+      "last_modified": "Tue, 21 Apr 2026 20:26:42 GMT",
+      "title_psm_used": "psm6",
+      "title_raw_text": "van-2U0zo Mar-20co May-2U02> JUFZUcS sep-c2Uczo Nov-2025 van-2026 Mar-2026\nPacific/Honolulu Time (2024-12-22 00:00:00 to 2026-04-21 10:26:38)\n",
+      "warnings": [
+        "dropped 10 per-row outlier(s) (|delta| > threshold vs rolling median)"
+      ],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.6249999999999999,
+        "y_intercept": 91.87499999999996,
+        "x_start_utc": "2024-12-22T10:00:00",
+        "x_end_utc": "2026-04-21T20:26:38",
+        "y_labels_found": [
+          [
+            179,
+            -20.0
+          ],
+          [
+            211,
+            -40.0
+          ],
+          [
+            243,
+            -60.0
+          ]
+        ],
+        "y_max_residual_microrad": 2.842170943040401e-14
+      },
+      "dropped_outlier_samples": [
+        {
+          "date_utc": "2025-06-05T21:23:22",
+          "tilt": -1.8750000000000284,
+          "local_median": 2.1874999999999716
+        },
+        {
+          "date_utc": "2025-06-12T08:31:19",
+          "tilt": -2.5000000000000284,
+          "local_median": 1.8749999999999716
+        },
+        {
+          "date_utc": "2025-08-06T22:39:38",
+          "tilt": -8.125000000000028,
+          "local_median": -4.062500000000028
+        },
+        {
+          "date_utc": "2025-08-23T18:00:18",
+          "tilt": -5.625000000000028,
+          "local_median": -1.5625000000000284
+        },
+        {
+          "date_utc": "2025-11-09T23:06:25",
+          "tilt": -15.000000000000028,
+          "local_median": -10.625000000000028
+        },
+        {
+          "date_utc": "2025-11-26T02:56:17",
+          "tilt": -12.187500000000028,
+          "local_median": -6.250000000000028
+        },
+        {
+          "date_utc": "2025-12-07T02:39:47",
+          "tilt": -26.56250000000003,
+          "local_median": -20.31250000000003
+        },
+        {
+          "date_utc": "2025-12-24T13:31:14",
+          "tilt": -20.93750000000003,
+          "local_median": -16.87500000000003
+        },
+        {
+          "date_utc": "2026-02-16T05:07:11",
+          "tilt": -30.000000000000014,
+          "local_median": -24.68750000000003
+        },
+        {
+          "date_utc": "2026-03-10T20:04:59",
+          "tilt": -33.750000000000014,
+          "local_median": -28.750000000000014
+        }
+      ]
+    }
+  ],
+  "reconcile": {
+    "rows_out": 16215,
+    "sources": [
+      {
+        "name": "digital",
+        "rows_in": 8640,
+        "offset_microrad": 0.0,
+        "overlap_buckets": 0,
+        "is_anchor": true,
+        "note": null,
+        "rows_proximity_dropped": 0,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "archive",
+        "rows_in": 15329,
+        "offset_microrad": 0.0,
+        "overlap_buckets": 4322,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 8640,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "dec2024_to_now",
+        "rows_in": 10649,
+        "offset_microrad": -4.754129452471613,
+        "overlap_buckets": 4395,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 10648,
+        "piecewise_residuals": {
+          "digital": -0.9649076991127928,
+          "archive": 0.0,
+          "month": -0.8651549318749865,
+          "week": -0.0006039184456696489,
+          "two_day": -0.12743952154036542
+        }
+      },
+      {
+        "name": "three_month",
+        "rows_in": 7255,
+        "offset_microrad": 8.388003164375334,
+        "overlap_buckets": 2051,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 7254,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "month",
+        "rows_in": 3762,
+        "offset_microrad": 10.12699162405997,
+        "overlap_buckets": 999,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 3762,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "week",
+        "rows_in": 1683,
+        "offset_microrad": 9.66890762626056,
+        "overlap_buckets": 447,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 1681,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "two_day",
+        "rows_in": 1195,
+        "offset_microrad": 14.755289284916621,
+        "overlap_buckets": 298,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 313,
+        "piecewise_residuals": {}
+      }
+    ],
+    "conflicts_top": [],
+    "conflicts_total": 0,
+    "warnings": []
+  },
+  "archive": {
+    "rows_in_archive_before": 15329,
+    "rows_in_archive_after": 16188,
+    "rows_promoted": 859,
+    "rows_already_archived": 15329,
+    "rows_deferred_by_quorum": 27,
+    "warnings": [
+      "archive quorum gate deferred 27 row(s) \u2014 fewer than 2 sources contributed and no trusted archive neighbour within 30 min / 3.0 \u00b5rad"
+    ]
+  }
+}
