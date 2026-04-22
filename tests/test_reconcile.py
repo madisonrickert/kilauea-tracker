@@ -416,6 +416,41 @@ def test_pathological_a_resets_to_identity_with_scalar_b():
     assert np.isfinite(month.b)
 
 
+def test_huber_pair_fit_robust_to_outlier():
+    """Pairwise fits use Huber-robust regression so a small fraction of
+    gross-outlier samples doesn't swing the recovered slope.
+
+    OLS on the same data would be dragged several % off the true slope
+    by the outliers; Huber should stay within 1-2% of truth.
+    """
+    from kilauea_tracker.reconcile import _compute_pairwise_fits, ReconcileReport
+
+    n = PAIRWISE_MIN_OVERLAP_BUCKETS * 4
+    rng = np.random.default_rng(seed=42)
+    truth = _series("2025-03-01", n=n, base=0.0, amplitude=10.0)
+    source = _apply_linear(truth, 1.0, 0.0).copy()
+
+    # Inject 3% of samples as ±30 µrad gross outliers.
+    n_outliers = max(3, int(n * 0.03))
+    outlier_idx = rng.choice(n, size=n_outliers, replace=False)
+    source.loc[outlier_idx, TILT_COL] += rng.choice([-30.0, 30.0], size=n_outliers)
+
+    report = ReconcileReport()
+    fits = _compute_pairwise_fits(
+        {"digital": truth, "dec2024_to_now": source}, report
+    )
+    assert len(fits) == 1
+    fit = fits[0]
+    # True relationship: source = 1.0 · digital + 0.0 (+ outliers).
+    # Huber should land near (1.0, 0.0).
+    assert abs(fit.alpha - 1.0) < 0.02, (
+        f"Huber α={fit.alpha} should be within 2% of 1.0 despite outliers"
+    )
+    assert abs(fit.beta) < 1.0, (
+        f"Huber β={fit.beta} should be near 0 despite outliers"
+    )
+
+
 def test_pathological_reset_uses_dec2024_to_now_when_digital_absent_in_overlap():
     """When the pin is `digital` but the pathological source doesn't
     temporally overlap digital, the reset's scalar offset comes from

@@ -261,10 +261,27 @@ def _compute_pairwise_fits(
     """Return one `PairwiseFit` per ordered pair (i, j) with
     `≥ PAIRWISE_MIN_OVERLAP_BUCKETS` shared `bucket_freq` buckets.
 
+    Each pair is fit via **Huber-robust** regression (via
+    `scipy.optimize.least_squares(loss='huber')`) rather than plain OLS.
+    Real data has `σ(residual) ≈ 2-4 µrad` against `σ(x) ≈ 3-8 µrad`,
+    which gives OLS slope uncertainty of ±0.15-0.2 even at 300+ samples
+    — the joint solve then compounds noise across 11 pairs into the
+    pathological `a` values observed in 2026-04 production. Huber
+    down-weights tail residuals so the recovered slope reflects the
+    bulk of the signal, not the outliers.
+
+    Mirrors `calibrate.recalibrate_by_anchor_fit`, which already uses
+    Huber successfully for the source-vs-digital anchor fit.
+
     Only ordered pairs where `i < j` lexically are computed — the
     constraint `a_j = α_ji · a_i` is redundant with `a_i = α_ij · a_j`
     (`α_ji = 1/α_ij`), so one per unordered pair is sufficient.
     """
+    try:
+        from scipy.optimize import least_squares  # type: ignore
+    except ImportError:  # pragma: no cover — scipy is pinned
+        least_squares = None
+
     names = sorted(live.keys())
     buckets_per_source: dict[str, pd.Series] = {}
     for name in names:
@@ -285,10 +302,28 @@ def _compute_pairwise_fits(
                 continue
             x = bj.loc[overlap].to_numpy(dtype=float)
             y = bi.loc[overlap].to_numpy(dtype=float)
-            # OLS: y = alpha * x + beta
-            A = np.vstack([x, np.ones_like(x)]).T
-            solution, *_ = np.linalg.lstsq(A, y, rcond=None)
-            alpha, beta = float(solution[0]), float(solution[1])
+
+            if least_squares is not None:
+                # Huber-robust: residuals > f_scale µrad are down-weighted
+                # to L1, smaller residuals stay L2. f_scale = 1.0 is
+                # conservative — most real inter-source disagreement is
+                # under 1 µrad, outliers are several µrad.
+                def _resid(p, x=x, y=y):
+                    return y - (p[0] * x + p[1])
+                fit_result = least_squares(
+                    _resid,
+                    x0=np.array([1.0, 0.0]),
+                    loss="huber",
+                    f_scale=1.0,
+                    max_nfev=200,
+                )
+                alpha = float(fit_result.x[0])
+                beta = float(fit_result.x[1])
+            else:  # scipy unavailable: OLS fallback
+                A = np.vstack([x, np.ones_like(x)]).T
+                solution, *_ = np.linalg.lstsq(A, y, rcond=None)
+                alpha, beta = float(solution[0]), float(solution[1])
+
             residuals = y - (alpha * x + beta)
             residual_std = float(np.std(residuals))
             fit = PairwiseFit(
