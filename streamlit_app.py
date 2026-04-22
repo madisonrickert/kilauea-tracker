@@ -29,13 +29,19 @@ from pathlib import Path
 # pip-installed. Streamlit Cloud's build cache sometimes serves a stale
 # installed copy of the project — the streamlit_app.py file at the repo root
 # gets hot-reloaded on every push, but the installed kilauea_tracker package
-# can lag, leading to an ImportError when streamlit_app.py references a name
-# that was added to the package after the cached install. Inserting src/ at
-# the front of sys.path means imports always resolve against the source tree
-# in the live checkout, regardless of whether the package was reinstalled.
+# can lag, leading to an ImportError (or TypeError when a new keyword
+# argument is added) when streamlit_app.py references a name that was added
+# to the package after the cached install. Inserting src/ at the front of
+# sys.path means imports always resolve against the source tree in the live
+# checkout, regardless of whether the package was reinstalled — but ONLY if
+# the stale version hasn't already been imported into sys.modules. So we
+# also evict any previously-imported kilauea_tracker submodules so the next
+# `from kilauea_tracker...` statement re-resolves against the fresh src.
 _SRC = Path(__file__).resolve().parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+for _m in [k for k in list(sys.modules) if k == "kilauea_tracker" or k.startswith("kilauea_tracker.")]:
+    del sys.modules[_m]
 
 import numpy as np
 import pandas as pd
