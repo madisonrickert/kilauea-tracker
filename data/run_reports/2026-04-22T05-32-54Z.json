@@ -1,0 +1,387 @@
+{
+  "run_started_at_utc": "2026-04-22T05:32:40Z",
+  "run_finished_at_utc": "2026-04-22T05:32:54Z",
+  "per_source": [
+    {
+      "source_name": "three_month",
+      "fetched": true,
+      "rows_raw": 707,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 707,
+      "rows_appended": 707,
+      "frame_offset_microrad": -1.0971299311629616,
+      "frame_overlap_buckets": 691,
+      "last_modified": "Wed, 22 Apr 2026 05:25:43 GMT",
+      "title_psm_used": "psm7",
+      "title_raw_text": "\u201css i _ Pacific/Honolul Time (2026-01-21 19:25:42 to 2026-04-21 19:25:42) ~\n",
+      "warnings": [],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.22355105007213597,
+        "y_intercept": 23.845462044082293,
+        "x_start_utc": "2026-01-22T05:25:42.000000",
+        "x_end_utc": "2026-04-22T05:25:42.000000",
+        "y_labels_found": [
+          [
+            44,
+            15.0
+          ],
+          [
+            69,
+            10.0
+          ],
+          [
+            143,
+            -5.0
+          ],
+          [
+            168,
+            -10.0
+          ],
+          [
+            193,
+            -15.0
+          ],
+          [
+            218,
+            -20.0
+          ],
+          [
+            243,
+            -25.0
+          ]
+        ],
+        "y_max_residual_microrad": 0.07358248259011901
+      }
+    },
+    {
+      "source_name": "month",
+      "fetched": true,
+      "rows_raw": 0,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 0,
+      "rows_appended": 0,
+      "frame_offset_microrad": 0.0,
+      "frame_overlap_buckets": 0,
+      "last_modified": "Wed, 22 Apr 2026 05:31:04 GMT",
+      "title_psm_used": null,
+      "title_raw_text": null,
+      "warnings": [],
+      "error": "calibration failed: y-axis linear fit residual too large: max=2.273 \u00b5rad (limit 0.5 \u00b5rad, = 32.8 px at this plot's scale). Labels: [(1.0, 88.0), (-5.0, 88.0), (-10.0, 91.0), (-15.0, 91.0)]"
+    },
+    {
+      "source_name": "week",
+      "fetched": true,
+      "rows_raw": 743,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 743,
+      "rows_appended": 666,
+      "frame_offset_microrad": 0.7266632150455914,
+      "frame_overlap_buckets": 561,
+      "last_modified": "Wed, 22 Apr 2026 05:15:36 GMT",
+      "title_psm_used": "psm7",
+      "title_raw_text": "~ ~ Pacific/Honolul Time (2026-04-14 19:15:35 to 2026-04-21 19:15:35) a\n",
+      "warnings": [],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.05342089834236967,
+        "y_intercept": 6.988703441912344,
+        "x_start_utc": "2026-04-15T05:15:35.000000",
+        "x_end_utc": "2026-04-22T05:15:35.000000",
+        "y_labels_found": [
+          [
+            168,
+            -2.0
+          ],
+          [
+            206,
+            -4.0
+          ],
+          [
+            243,
+            -6.0
+          ]
+        ],
+        "y_max_residual_microrad": 0.016001616615808345
+      }
+    },
+    {
+      "source_name": "two_day",
+      "fetched": true,
+      "rows_raw": 736,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 736,
+      "rows_appended": 192,
+      "frame_offset_microrad": -6.930839861536217,
+      "frame_overlap_buckets": 180,
+      "last_modified": "Wed, 22 Apr 2026 05:31:22 GMT",
+      "title_psm_used": "psm6",
+      "title_raw_text": "Q0:00 06:00 12:00 18:00 Q0:00 06:00 12:00 18:00\nPacific/Honolulu Time (2026-04-19 19:31:22 to 2026-04-21 19:31:22)\n",
+      "warnings": [
+        "large intra-source frame shift of -6.931 \u00b5rad; USGS may have rescaled this PNG's y-axis aggressively. The shift was absorbed but eyeballing the source plot is recommended."
+      ],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.016108684893306212,
+        "y_intercept": 1.525365027521622,
+        "x_start_utc": "2026-04-20T05:31:22.000000",
+        "x_end_utc": "2026-04-22T05:31:22.000000",
+        "y_labels_found": [
+          [
+            19,
+            1.0
+          ],
+          [
+            75,
+            0.5
+          ],
+          [
+            131,
+            -0.5
+          ],
+          [
+            159,
+            -1.0
+          ],
+          [
+            215,
+            -2.0
+          ],
+          [
+            243,
+            -2.5
+          ]
+        ],
+        "y_max_residual_microrad": 0.219300014548804
+      }
+    },
+    {
+      "source_name": "dec2024_to_now",
+      "fetched": true,
+      "rows_raw": 683,
+      "rows_outlier_dropped": 6,
+      "rows_traced": 677,
+      "rows_appended": 677,
+      "frame_offset_microrad": 0.3125000000000284,
+      "frame_overlap_buckets": 165,
+      "last_modified": "Wed, 22 Apr 2026 05:25:54 GMT",
+      "title_psm_used": "psm6",
+      "title_raw_text": "Jvan-2U0co Mar-202o May-202o JuFZcUco sep-cUco Nov-2U02> Jvan-2U026 Mar-2026\nPacific/Honolulu Time (2024-12-22 00:00:00 to 2026-04-21 19:25:50)\n",
+      "warnings": [
+        "dropped 6 per-row outlier(s) (|delta| > threshold vs rolling median)",
+        "anchor cross-check flags dec2024_to_now: digital = 1.3759 \u00b7 png + +5.305  (|a-1|=37.6%, |b|=5.30 \u00b5rad, residual_std=3.76 \u00b5rad over 2786 buckets)"
+      ],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.6249999999999997,
+        "y_intercept": 91.87499999999994,
+        "x_start_utc": "2024-12-22T10:00:00.000000",
+        "x_end_utc": "2026-04-22T05:25:50.000000",
+        "y_labels_found": [
+          [
+            179,
+            -20.0
+          ],
+          [
+            211,
+            -40.0
+          ],
+          [
+            243,
+            -60.0
+          ]
+        ],
+        "y_max_residual_microrad": 2.842170943040401e-14
+      },
+      "dropped_outlier_samples": [
+        {
+          "date_utc": "2024-12-23T01:31:30.745672",
+          "tilt": 45.312499999999964,
+          "local_median": 39.99999999999997
+        },
+        {
+          "date_utc": "2025-03-24T22:06:16.631158",
+          "tilt": 7.499999999999986,
+          "local_median": 2.812499999999986
+        },
+        {
+          "date_utc": "2025-06-12T11:42:18.348868",
+          "tilt": -1.875,
+          "local_median": 2.187499999999986
+        },
+        {
+          "date_utc": "2025-06-20T21:31:58.042609",
+          "tilt": -5.625,
+          "local_median": -1.5625
+        },
+        {
+          "date_utc": "2025-08-23T22:31:41.864181",
+          "tilt": -4.6875,
+          "local_median": -0.6250000000000142
+        },
+        {
+          "date_utc": "2025-12-07T09:08:13.408788",
+          "tilt": -25.0,
+          "local_median": -19.0625
+        }
+      ]
+    }
+  ],
+  "reconcile": {
+    "rows_out": 24575,
+    "sources": [
+      {
+        "name": "dec2024_to_now",
+        "rows_in": 11714,
+        "offset_microrad": 0.10605279285465748,
+        "overlap_buckets": 5,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 0,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "digital",
+        "rows_in": 8640,
+        "offset_microrad": -1.1521776626461566,
+        "overlap_buckets": 1,
+        "is_anchor": true,
+        "note": null,
+        "rows_proximity_dropped": 0,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "month",
+        "rows_in": 3854,
+        "offset_microrad": 7.175583461697146,
+        "overlap_buckets": 4,
+        "is_anchor": false,
+        "note": "month: pairwise fit is pathological \u2014 a=0.3533 (|a-1|=64.7% > 50%)",
+        "rows_proximity_dropped": 0,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "three_month",
+        "rows_in": 7411,
+        "offset_microrad": 12.289198620173485,
+        "overlap_buckets": 4,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 0,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "two_day",
+        "rows_in": 1232,
+        "offset_microrad": 20.68804055284384,
+        "overlap_buckets": 4,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 0,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "week",
+        "rows_in": 1788,
+        "offset_microrad": 10.631520122030004,
+        "overlap_buckets": 4,
+        "is_anchor": false,
+        "note": "week: pairwise fit is pathological \u2014 a=0.4613 (|a-1|=53.9% > 50%)",
+        "rows_proximity_dropped": 0,
+        "piecewise_residuals": {}
+      }
+    ],
+    "conflicts_top": [],
+    "conflicts_total": 0,
+    "warnings": [
+      "month: pairwise fit is pathological \u2014 a=0.3533 (|a-1|=64.7% > 50%)",
+      "week: pairwise fit is pathological \u2014 a=0.4613 (|a-1|=53.9% > 50%)"
+    ]
+  },
+  "archive": {
+    "rows_in_archive_before": 16291,
+    "rows_in_archive_after": 17663,
+    "rows_promoted": 1372,
+    "rows_already_archived": 16291,
+    "rows_deferred_by_quorum": 6912,
+    "warnings": [
+      "archive quorum gate deferred 6912 row(s) \u2014 fewer than 2 sources contributed and no trusted archive neighbour within 30 min / 3.0 \u00b5rad"
+    ]
+  },
+  "anchor_fits": [
+    {
+      "source_name": "three_month",
+      "ran": false,
+      "overlap_buckets": 0,
+      "a": 1.0,
+      "b": 0.0,
+      "residual_std_microrad": 0.0,
+      "warning": null,
+      "note": "overlap too small (0 buckets, need \u226550)"
+    },
+    {
+      "source_name": "month",
+      "ran": false,
+      "overlap_buckets": 0,
+      "a": 1.0,
+      "b": 0.0,
+      "residual_std_microrad": 0.0,
+      "warning": null,
+      "note": "overlap too small (0 buckets, need \u226550)"
+    },
+    {
+      "source_name": "week",
+      "ran": false,
+      "overlap_buckets": 0,
+      "a": 1.0,
+      "b": 0.0,
+      "residual_std_microrad": 0.0,
+      "warning": null,
+      "note": "overlap too small (0 buckets, need \u226550)"
+    },
+    {
+      "source_name": "two_day",
+      "ran": false,
+      "overlap_buckets": 0,
+      "a": 1.0,
+      "b": 0.0,
+      "residual_std_microrad": 0.0,
+      "warning": null,
+      "note": "overlap too small (0 buckets, need \u226550)"
+    },
+    {
+      "source_name": "dec2024_to_now",
+      "ran": true,
+      "overlap_buckets": 2786,
+      "a": 1.3758615879439031,
+      "b": 5.304637579002661,
+      "residual_std_microrad": 3.762270325978626,
+      "warning": "anchor cross-check flags dec2024_to_now: digital = 1.3759 \u00b7 png + +5.305  (|a-1|=37.6%, |b|=5.30 \u00b5rad, residual_std=3.76 \u00b5rad over 2786 buckets)",
+      "note": null
+    }
+  ]
+}
