@@ -51,7 +51,6 @@ if str(_SRC) not in sys.path:
 import numpy as np
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 from kilauea_tracker.cache import load_history
 from kilauea_tracker.config import (
@@ -1012,17 +1011,20 @@ chart_selection = st.plotly_chart(
 )
 
 # Hover-to-clipboard: press ⌘C / Ctrl+C while hovering a datapoint on the
-# chart to copy "YYYY-MM-DD HH:MM | X.XX µrad" to the clipboard. Injected
-# as a zero-height components.v1.html block so it can reach up through the
-# Streamlit iframe sandbox and bind to the parent document's Plotly
-# instance. The polling loop handles the race where Plotly mounts a moment
-# after the component; the 10-second timeout keeps this quiet on static
-# page loads where the chart never renders.
-components.html(
+# chart to copy "YYYY-MM-DD HH:MM | X.XX µrad" to the clipboard. Uses
+# st.html(unsafe_allow_javascript=True) which renders the <script> inline
+# in the main Streamlit document — not in a sandboxed iframe — so the JS
+# reaches Plotly's `.js-plotly-plot` node directly via `document`. We
+# migrated here from st.components.v1.html because that API was deprecated
+# in Streamlit 1.56; st.iframe can't replace it for JS injection (null-
+# origin iframes can't touch the parent DOM), but st.html can.
+# The polling loop handles the race where Plotly mounts a moment after
+# the component; the 10-second timeout keeps this quiet on static page
+# loads where the chart never renders.
+st.html(
     """
     <script>
     (function() {
-      const parentDoc = window.parent.document;
       let current = null;
       const bind = (gd) => {
         if (!gd || gd._copyBound) return;
@@ -1040,19 +1042,19 @@ components.html(
         if (!current) return;
         if (!(ev.metaKey || ev.ctrlKey) || ev.key !== 'c') return;
         // Don't intercept copies originating from a text selection.
-        const sel = window.parent.getSelection && window.parent.getSelection();
+        const sel = window.getSelection && window.getSelection();
         if (sel && sel.toString().length > 0) return;
         navigator.clipboard && navigator.clipboard.writeText(current);
       };
-      parentDoc.addEventListener('keydown', onKey);
+      document.addEventListener('keydown', onKey);
       const iv = setInterval(() => {
-        parentDoc.querySelectorAll('.js-plotly-plot').forEach(bind);
+        document.querySelectorAll('.js-plotly-plot').forEach(bind);
       }, 400);
       setTimeout(() => clearInterval(iv), 10000);
     })();
     </script>
     """,
-    height=0,
+    unsafe_allow_javascript=True,
 )
 st.caption(
     "Tip: hover a point and press ⌘C / Ctrl+C to copy it. "
