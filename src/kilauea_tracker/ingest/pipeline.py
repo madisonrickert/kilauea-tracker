@@ -32,6 +32,7 @@ Usage from the Streamlit app:
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,6 +69,8 @@ from .calibrate import (
 from .exceptions import CalibrationError, FetchError, IngestError, TraceError
 from .fetch import fetch_tilt_png
 from .trace import trace_curve
+
+logger = logging.getLogger(__name__)
 
 # Where the per-source `Last-Modified` headers are persisted.
 LAST_MODIFIED_FILE = LAST_GOOD_CALIBRATION.parent / "last_modified.json"
@@ -158,6 +161,7 @@ def ingest(
         fetch_result = fetch_tilt_png(url, cached_last_modified)
     except FetchError as e:
         report.error = f"fetch failed for {source.name}: {e}"
+        logger.error("fetch failed for %s: %s", source.name, e)
         return report
 
     report.last_modified = fetch_result.last_modified
@@ -176,6 +180,7 @@ def ingest(
             raise IngestError("cv2.imdecode returned None")
     except Exception as e:
         report.error = f"could not decode {source.name} PNG: {e}"
+        logger.error("PNG decode failed for %s: %s", source.name, e)
         return report
 
     try:
@@ -187,6 +192,7 @@ def ingest(
         # warnings expander, which is the duplication the user reported
         # in 2026-04.
         report.error = f"calibration failed: {e}"
+        logger.error("calibration failed for %s: %s", source.name, e)
         return report
 
     report.calibration = calibration
@@ -197,6 +203,7 @@ def ingest(
         traced = trace_curve(img, calibration)
     except TraceError as e:
         report.error = f"trace failed for {source.name}: {e}"
+        logger.error("trace failed for %s: %s", source.name, e)
         return report
 
     report.rows_traced = len(traced)
@@ -209,6 +216,10 @@ def ingest(
             report.warnings.append(
                 f"dropped {trace_report.outliers_dropped} per-row outlier(s) "
                 f"(|delta| > threshold vs rolling median)"
+            )
+            logger.warning(
+                "%s: dropped %d per-row outliers (rolling-median gate)",
+                source.name, trace_report.outliers_dropped,
             )
 
     # Append to the per-source CSV. `append_history` does intra-source
@@ -245,6 +256,7 @@ def ingest(
         )
     except Exception as e:  # pragma: no cover — defensive
         report.warnings.append(f"could not write quality CSV: {e}")
+        logger.warning("%s: could not write quality CSV: %s", source.name, e)
 
     return report
 

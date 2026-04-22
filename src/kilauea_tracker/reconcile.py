@@ -64,11 +64,14 @@ shrinks abruptly.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 from .config import (
     ARCHIVE_SOURCE_NAME,
@@ -229,6 +232,7 @@ def reconcile_sources(
             report.warnings.append(
                 "no live sources present; merged history is archive-only"
             )
+            logger.warning("reconcile: no live sources present; merged history is archive-only")
             return archive_df.sort_values(DATE_COL).reset_index(drop=True), report
         return _empty_history_df(), report
 
@@ -525,6 +529,7 @@ def _solve_pairwise_calibration(
             )
             record.note = msg
             report.warnings.append(msg)
+            logger.warning("reconcile pathological a: %s", msg)
         elif abs(b) > PAIRWISE_MAX_B_MICRORAD:
             msg = (
                 f"{name}: pairwise fit produces large intercept — "
@@ -532,6 +537,7 @@ def _solve_pairwise_calibration(
             )
             record.note = msg
             report.warnings.append(msg)
+            logger.warning("reconcile large-intercept: %s", msg)
 
         alignments[name] = record
         report.sources.append(record)

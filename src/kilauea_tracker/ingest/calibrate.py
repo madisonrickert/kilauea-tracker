@@ -29,6 +29,7 @@ across captures.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -69,6 +70,8 @@ MIN_Y_LABELS_REQUIRED = 3
 
 # Tesseract confidence floor; the values come back as ints in [0, 100].
 MIN_OCR_CONFIDENCE = 70
+
+logger = logging.getLogger(__name__)
 
 # Title strip search regex. Tolerates the common Tesseract slip "to" → "t0".
 TITLE_TIMESTAMP_RE = re.compile(
@@ -585,6 +588,10 @@ def calibrate_axes(
                 # scale stays stable across runs.
                 a_y = slope_history_median
                 slope_fallback_used = True
+                logger.warning(
+                    "calibrate %s: y-slope drift %.1f%% exceeds tolerance — falling back to history median %.4f",
+                    source_name, drift_pct, slope_history_median,
+                )
 
     # ── x-axis ──────────────────────────────────────────────────────────────
     x_start, x_end, psm_used, title_raw = ocr_title_timestamps(img, plot_bbox)

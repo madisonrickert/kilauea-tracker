@@ -20,10 +20,24 @@ the cheap pure-function math.
 from __future__ import annotations
 
 import io
+import logging
 import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Emit pipeline warnings/errors to stderr so Streamlit Cloud's log viewer
+# captures them. The in-UI IngestReport mechanism surfaces failures to the
+# user browsing the app; this layer makes "did this fail overnight?" a
+# grep-able question in the Cloud admin console. Kept at WARNING so only
+# actionable signals flow through — INFO-level traffic (normal fetch /
+# trace counts) would drown out the important bits.
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    stream=sys.stderr,
+    force=False,
+)
 
 # Make `src/kilauea_tracker/` importable WITHOUT relying on the package
 # being pip-installed. Inserting src/ at the front of sys.path means imports
@@ -1499,15 +1513,31 @@ with st.expander("🔬 Transcription quality inspector"):
         "csv": layer_csv,
     }
 
+    _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+    def _is_valid_png(b: bytes | None) -> bool:
+        """True iff b starts with the PNG file-signature magic bytes.
+
+        Streamlit's st.image() passes bytes through PIL.Image.open which
+        raises UnidentifiedImageError on anything non-PNG (HTML error
+        pages, 304-with-body, empty responses). Validate before rendering
+        to show a readable caption instead of crashing the whole page.
+        """
+        return isinstance(b, (bytes, bytearray)) and b.startswith(_PNG_MAGIC)
+
     @st.cache_data(ttl=INGEST_CACHE_TTL_SECONDS, show_spinner=False)
     def _fetch_png_bytes(url: str) -> bytes | None:
-        """Fetch a USGS PNG and return the raw bytes. None on failure."""
+        """Fetch a USGS PNG and return the raw bytes. None on failure or
+        on any non-PNG response body."""
         from kilauea_tracker.ingest.fetch import fetch_tilt_png
         try:
             result = fetch_tilt_png(url, None)
-            return result.body
         except Exception:
             return None
+        body = result.body
+        if not _is_valid_png(body):
+            return None
+        return body
 
     def _build_overlay_png(
         raw_bytes: bytes,
@@ -1908,7 +1938,10 @@ with st.expander("🔬 Transcription quality inspector"):
             st.markdown(f"**{r.source_name}** — calibration failed")
             if r.error:
                 st.caption(f"❌ {r.error}")
-            st.image(raw, width="stretch", output_format="PNG")
+            try:
+                st.image(raw, width="stretch", output_format="PNG")
+            except Exception as e:
+                st.caption(f"(PNG render failed: {e})")
             st.markdown("---")
             continue
         overlay_bytes, stats = _build_overlay_png(
@@ -1945,14 +1978,17 @@ with st.expander("🔬 Transcription quality inspector"):
             caption_bits.append(csv_bit)
         st.markdown(" · ".join(caption_bits))
 
-        if overlay_bytes is not None:
-            st.image(
-                overlay_bytes,
-                width="stretch",
-                output_format="PNG",
-            )
+        if overlay_bytes is not None and _is_valid_png(overlay_bytes):
+            try:
+                st.image(
+                    overlay_bytes,
+                    width="stretch",
+                    output_format="PNG",
+                )
+            except Exception as e:
+                st.caption(f"(overlay render failed: {e})")
         else:
-            st.caption("(overlay unavailable — cv2/PIL missing)")
+            st.caption("(overlay unavailable — cv2/PIL missing or bad bytes)")
 
         # Debug metadata — the numbers the rest of the pipeline trusts
         # for this PNG. First place to check when overlays disagree.

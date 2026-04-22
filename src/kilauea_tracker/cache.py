@@ -55,6 +55,7 @@ Dedupe strategy in `append_history`:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -63,6 +64,8 @@ import pandas as pd
 
 from .config import HISTORY_CSV
 from .model import DATE_COL, TILT_COL
+
+logger = logging.getLogger(__name__)
 
 # How fine the dedupe key is rounded. Smaller = more rows preserved, larger =
 # more aggressive merging.
@@ -225,12 +228,20 @@ def append_history(
                 f"{n_overlap} overlap bucket(s) — low confidence; new rows "
                 f"applied anyway since the alternative is no anchor at all"
             )
+            logger.warning(
+                "cache %s: low-confidence frame offset %+.3f from %d overlap buckets",
+                path.name, offset, n_overlap,
+            )
         if abs(offset) >= LARGE_FRAME_OFFSET_MICRORAD:
             report.warnings.append(
                 f"large intra-source frame shift of {offset:+.3f} µrad; "
                 f"USGS may have rescaled this PNG's y-axis aggressively. "
                 f"The shift was absorbed but eyeballing the source plot "
                 f"is recommended."
+            )
+            logger.warning(
+                "cache %s: large intra-source frame shift %+.3f µrad — USGS rebaseline?",
+                path.name, offset,
             )
     elif len(existing) > 0:
         # Both sides have rows but no temporal overlap. We can't anchor
@@ -243,6 +254,10 @@ def append_history(
             f"no temporal overlap between {len(new_rows)} new rows and the "
             f"existing CSV at {path.name}; appending in raw frame (drift "
             f"risk — manual inspection recommended)"
+        )
+        logger.warning(
+            "cache %s: no temporal overlap between %d new rows and existing CSV — appending in raw frame (drift risk)",
+            path.name, len(new_rows),
         )
 
     # Tag rows by source so we can compute conflicts after the merge.
