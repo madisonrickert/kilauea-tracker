@@ -2051,6 +2051,51 @@ with st.expander("🔬 Transcription quality inspector"):
         # Debug metadata — the numbers the rest of the pipeline trusts
         # for this PNG. First place to check when overlays disagree.
         with st.expander(f"🔧 {r.source_name} calibration diagnostics", expanded=False):
+            # X-axis tick cross-check: run OCR on the tick-label row and
+            # compare each parsed tick's pixel position against the
+            # time-range linear interpolation. ±1-pixel errors are OCR
+            # center-of-glyph noise; anything larger is a real x-axis
+            # calibration problem.
+            try:
+                import cv2 as _cv2
+                import numpy as _np
+                from kilauea_tracker.ingest.calibrate import (
+                    ocr_x_axis_ticks as _ocr_x_ticks,
+                )
+                _arr = _np.frombuffer(raw, dtype=_np.uint8)
+                _img_for_ticks = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
+                _ticks = _ocr_x_ticks(
+                    _img_for_ticks, cal.plot_bbox, r.source_name,
+                    x_start_utc=cal.x_start, x_end_utc=cal.x_end,
+                )
+                _span_s = (cal.x_end - cal.x_start).total_seconds()
+                _px_span = max(1.0, float(cal.plot_bbox[2] - cal.plot_bbox[0]))
+                _sec_per_px = _span_s / _px_span
+                _errs = []
+                for _px_cx, _dt in _ticks:
+                    _pred = cal.x_start + pd.Timedelta(
+                        seconds=(_px_cx - cal.plot_bbox[0]) / _px_span * _span_s
+                    )
+                    _errs.append(abs((_dt - _pred).total_seconds()))
+                if _errs:
+                    _median_err = sorted(_errs)[len(_errs) // 2]
+                    _max_err = max(_errs)
+                    _max_err_px = _max_err / max(1e-9, _sec_per_px)
+                    _median_err_px = _median_err / max(1e-9, _sec_per_px)
+                    _status = "✓ consistent" if _max_err_px <= 2.0 else "⚠ drift"
+                    _xcheck_caption = (
+                        f"x-axis tick cross-check: {_status}  \n"
+                        f"  {len(_ticks)} ticks parsed · "
+                        f"median err `{_median_err_px:.2f}` px "
+                        f"(`{_median_err/60:.1f}` min) · "
+                        f"max err `{_max_err_px:.2f}` px "
+                        f"(`{_max_err/60:.1f}` min)"
+                    )
+                else:
+                    _xcheck_caption = "x-axis tick cross-check: no ticks parsed"
+            except Exception as _e:  # pragma: no cover — defensive
+                _xcheck_caption = f"x-axis tick cross-check unavailable: {_e}"
+
             dbg_cols = st.columns(2)
             with dbg_cols[0]:
                 st.markdown("**Time axis**")
@@ -2060,7 +2105,8 @@ with st.expander("🔬 Transcription quality inspector"):
                     f"window: `{x_span_hrs:.1f}` hrs  \n"
                     f"time-range OCR PSM: `{cal.title_psm_used or '—'}`  \n"
                     f"time-range OCR text (from strip below plot):  \n"
-                    f"`{(cal.title_raw_text or '').strip() or '(empty)'}`"
+                    f"`{(cal.title_raw_text or '').strip() or '(empty)'}`  \n"
+                    f"{_xcheck_caption}"
                 )
             with dbg_cols[1]:
                 st.markdown("**Y axis**")

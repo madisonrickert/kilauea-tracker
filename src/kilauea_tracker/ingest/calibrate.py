@@ -82,6 +82,31 @@ TITLE_TIMESTAMP_RE = re.compile(
     r"\s*\)"
 )
 
+# X-axis tick label regexes per source. USGS uses a different format on
+# each plot — rolling sources with shorter windows show `MM/DD` or
+# `HH:MM`, and the long dec2024_to_now plot shows `MMM-YYYY`.
+# Validating each detected tick against these tells us whether the
+# time-range OCR's linear interpolation between x_start and x_end
+# lands on the same pixel where USGS drew the tick's label.
+_MMDD_RE = re.compile(r"^(?P<m>\d{2})[/\-.](?P<d>\d{2})$")
+_HHMM_RE = re.compile(r"^(?P<h>\d{2})[:.](?P<mi>\d{2})$")
+_MONTH_ABBREV_RE = re.compile(
+    r"^(?P<mon>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+    r"[-\s](?P<y>\d{4})$",
+    re.IGNORECASE,
+)
+_MONTH_ABBREV_NUM = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+X_TICK_FORMAT: dict[str, str] = {
+    "two_day": "HH:MM",
+    "week": "MM/DD",
+    "month": "MM/DD",
+    "three_month": "MM/DD",
+    "dec2024_to_now": "MMM-YYYY",
+}
+
 
 @dataclass
 class AxisCalibration:
@@ -315,6 +340,60 @@ def ocr_y_axis_labels_with_conf(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _preprocess_for_ocr(crop: np.ndarray, upscale: int = 6) -> np.ndarray:
+    """Upscale + binarize a text crop for Tesseract.
+
+    Tesseract on small anti-aliased USGS glyphs (often 10-12 px tall)
+    benefits from 6× bicubic upscale plus a per-crop Otsu binarization
+    that removes anti-alias gradient greys. Skips binarization if the
+    crop is already near-binary (most glyphs < 30 px tall after upscale
+    would over-binarize and lose thin strokes).
+    """
+    if crop is None or crop.size == 0:
+        return crop
+    big = cv2.resize(
+        crop, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC
+    )
+    gray = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY) if big.ndim == 3 else big
+    _, binary = cv2.threshold(
+        gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+    return binary
+
+
+def _detect_text_rows_below(
+    img: np.ndarray,
+    plot_bbox: tuple[int, int, int, int],
+    dark_threshold: int = 120,
+    min_dark_pixels: int = 10,
+    min_row_gap: int = 3,
+) -> list[tuple[int, int]]:
+    """Find contiguous horizontal bands of dark pixels in the strip
+    below the plot bbox. Returns `[(y_top, y_bot), ...]` in absolute
+    image coords. USGS plots consistently have two rows: x-axis tick
+    labels (first/upper) and the `Pacific/Honolulu Time (...)` string
+    (second/lower).
+    """
+    h = img.shape[0]
+    _, _, _, y1 = plot_bbox
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    strip = gray[y1 + 1 : h, :]
+    dark_per_row = (strip < dark_threshold).sum(axis=1)
+    rows = np.where(dark_per_row > min_dark_pixels)[0]
+    if len(rows) == 0:
+        return []
+    groups: list[tuple[int, int]] = []
+    start = prev = int(rows[0])
+    for y in rows[1:]:
+        y = int(y)
+        if y - prev > min_row_gap:
+            groups.append((start + y1 + 1, prev + y1 + 1))
+            start = y
+        prev = y
+    groups.append((start + y1 + 1, prev + y1 + 1))
+    return groups
+
+
 def ocr_title_timestamps(
     img: np.ndarray,
     plot_bbox: tuple[int, int, int, int],
@@ -339,24 +418,26 @@ def ocr_title_timestamps(
     exactly what Tesseract spat out.
     """
     h, w = img.shape[:2]
-    _, _, _, y1 = plot_bbox
 
-    title_strip = img[y1 + 5 : h, 0:w]
-    if title_strip.size == 0:
+    # Prefer a tight crop on just the time-range text row (second text
+    # band below the plot). Falls back to the full strip when row
+    # detection can't isolate two bands (e.g. damaged PNG).
+    text_rows = _detect_text_rows_below(img, plot_bbox)
+    if len(text_rows) >= 2:
+        # Time-range line is always the LOWER band.
+        top, bot = text_rows[-1]
+        pad = 3
+        trange_crop = img[max(0, top - pad) : min(h, bot + pad + 1), 0:w]
+    else:
+        trange_crop = img[plot_bbox[3] + 5 : h, 0:w]
+    if trange_crop.size == 0:
         raise CalibrationError("title strip is empty — plot bbox extends to image bottom")
 
-    upscaled = cv2.resize(
-        title_strip,
-        None,
-        fx=3,
-        fy=3,
-        interpolation=cv2.INTER_CUBIC,
-    )
+    preprocessed = _preprocess_for_ocr(trange_crop, upscale=6)
 
     # Rolling sources have a fixed-duration window → start.time() must
     # equal end.time(). dec2024_to_now doesn't (start is typically
-    # midnight on some fixed date; end is "now"). Use this to reject
-    # mis-read candidates.
+    # midnight on some fixed date; end is "now").
     requires_time_match = source_name in {
         "two_day", "week", "month", "three_month",
     }
@@ -364,46 +445,53 @@ def ocr_title_timestamps(
     def _time_of_day_consistent(start: pd.Timestamp, end: pd.Timestamp) -> bool:
         return start.time() == end.time()
 
-    # Try BOTH PSM modes. Prefer PSM 7 when it produces an internally-
-    # consistent result (fastest, lowest noise). If PSM 7 is parseable
-    # but internally inconsistent (rolling source with HH:MM:SS
-    # mismatch), check whether PSM 6 gives a consistent result — that's
-    # the one to keep. Only accept an inconsistent result as a
-    # last-resort fallback, and log a warning when we do.
-    psm7_result, psm7_text, psm7_error = _try_parse_title_at_psm(upscaled, "--psm 7")
-    psm6_result, psm6_text, psm6_error = _try_parse_title_at_psm(upscaled, "--psm 6")
+    # Try FOUR PSM modes on the time-range crop. Each has a different
+    # tradeoff:
+    #   PSM 7  — single text line, fastest, best for one-liner input
+    #   PSM 6  — uniform text block, best when the crop spans 2 rows
+    #   PSM 4  — single column of variable-size text
+    #   PSM 13 — raw line, bypasses Tesseract's preprocessing heuristics
+    # Collect every parseable candidate and prefer the one that's
+    # internally consistent (start.time() == end.time()) on rolling
+    # sources. Ties broken by PSM priority order.
+    psms = ("7", "6", "4", "13")
+    all_candidates: list[tuple[str, tuple[pd.Timestamp, pd.Timestamp], str, str]] = []
+    errors: dict[str, str] = {}
+    for psm in psms:
+        result, text, err = _try_parse_title_at_psm(preprocessed, f"--psm {psm}")
+        if result is not None:
+            all_candidates.append((f"psm{psm}", result, text, err))
+        else:
+            errors[f"psm{psm}"] = f"{err} (OCR={text!r})"
 
-    candidates: list[tuple[str, tuple[pd.Timestamp, pd.Timestamp], str]] = []
-    if psm7_result is not None:
-        candidates.append(("psm7", psm7_result, psm7_text))
-    if psm6_result is not None:
-        candidates.append(("psm6", psm6_result, psm6_text))
+    if not all_candidates:
+        err_summary = "; ".join(f"PSM{psm}: {msg}" for psm, msg in errors.items())
+        raise CalibrationError(f"could not extract title timestamps; {err_summary}")
 
-    if not candidates:
-        raise CalibrationError(
-            f"could not extract title timestamps; "
-            f"PSM 7: {psm7_error} (OCR={psm7_text!r}); "
-            f"PSM 6: {psm6_error} (OCR={psm6_text!r})"
-        )
-
-    # Score each: 0 = consistent, 1 = inconsistent (only matters for
-    # rolling sources).
     scored = []
-    for psm, (start, end), raw in candidates:
+    for psm, (start, end), raw, _ in all_candidates:
         score = 0
         if requires_time_match and not _time_of_day_consistent(start, end):
             score = 1
         scored.append((score, psm, start, end, raw))
 
-    # Sort by (score, psm_order) so PSM 7 wins ties.
-    psm_priority = {"psm7": 0, "psm6": 1}
+    psm_priority = {"psm7": 0, "psm6": 1, "psm4": 2, "psm13": 3}
     scored.sort(key=lambda t: (t[0], psm_priority.get(t[1], 99)))
     best_score, best_psm, best_start, best_end, best_raw = scored[0]
 
+    # Verify the OCR'd text actually mentions the expected timezone —
+    # protects against a silent regression if USGS ever rewrites the
+    # label in a different timezone (the `tz_convert` call downstream
+    # would otherwise shift every timestamp by ±10h without complaint).
+    if "honolulu" not in best_raw.lower() and "hawaii" not in best_raw.lower():
+        logger.warning(
+            "calibrate %s: time-range OCR did not contain a recognizable "
+            "Honolulu/Hawaii timezone marker — if USGS changed the label's "
+            "timezone, all downstream timestamps may be off. Raw: %r",
+            source_name, best_raw,
+        )
+
     if best_score > 0:
-        # Even the best candidate has a HH:MM:SS mismatch. Log and
-        # accept — the trace is still approximately correct and the
-        # span-tolerance guard downstream will catch egregious errors.
         logger.warning(
             "calibrate %s: time-range OCR produced inconsistent "
             "start.time()=%s != end.time()=%s on best candidate "
@@ -413,6 +501,189 @@ def ocr_title_timestamps(
         )
 
     return best_start, best_end, best_psm, best_raw
+
+
+def ocr_x_axis_ticks(
+    img: np.ndarray,
+    plot_bbox: tuple[int, int, int, int],
+    source_name: Optional[str],
+    x_start_utc: Optional[pd.Timestamp] = None,
+    x_end_utc: Optional[pd.Timestamp] = None,
+) -> list[tuple[int, pd.Timestamp]]:
+    """Cross-check: OCR the x-axis tick row and parse each hit against
+    the source's expected label format. Returns `[(pixel_x_center_utc,
+    parsed_datetime_utc), ...]` — one entry per recognized label.
+
+    Pass the time-range's `x_start_utc` and `x_end_utc` so we can map
+    each tick's pixel position to a predicted UTC and use that as the
+    disambiguation reference for `HH:MM` / `MM/DD` labels (whose
+    calendar date isn't on the label itself). This makes each OCR'd
+    tick INDEPENDENTLY parseable against the linear interpolation the
+    main calibration uses — a genuine cross-check.
+
+    Returns an empty list if tick row can't be isolated or no labels
+    match the expected format. Never raises — cross-checks are
+    advisory, not gating.
+    """
+    if source_name not in X_TICK_FORMAT:
+        return []
+    fmt = X_TICK_FORMAT[source_name]
+
+    text_rows = _detect_text_rows_below(img, plot_bbox)
+    if not text_rows:
+        return []
+    top, bot = text_rows[0]  # upper band = x-axis ticks
+    pad = 3
+    h, w = img.shape[:2]
+    tick_crop = img[max(0, top - pad) : min(h, bot + pad + 1), 0:w]
+    if tick_crop.size == 0:
+        return []
+
+    preprocessed = _preprocess_for_ocr(tick_crop, upscale=6)
+
+    # PSM 11 (sparse text) finds labels positioned anywhere on the
+    # strip; PSM 4 (single column of variable-size text) handles the
+    # horizontally-separated tick layout equally well. Combine.
+    hits: list[tuple[int, str]] = []  # (pixel_x_center_in_original, text)
+    for psm in ("11", "4"):
+        whitelist = (
+            "0123456789:/-"
+            if fmt != "MMM-YYYY"
+            else "0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                 "abcdefghijklmnopqrstuvwxyz"
+        )
+        try:
+            data = pytesseract.image_to_data(
+                preprocessed,
+                config=f"--psm {psm} -c tessedit_char_whitelist={whitelist}",
+                output_type=pytesseract.Output.DICT,
+            )
+        except Exception:
+            continue
+        upscale = 6
+        for i in range(len(data["text"])):
+            t = data["text"][i].strip()
+            if not t:
+                continue
+            try:
+                conf = float(data["conf"][i])
+            except (ValueError, TypeError):
+                conf = -1.0
+            if conf < MIN_OCR_CONFIDENCE:
+                continue
+            cx_upscaled = data["left"][i] + data["width"][i] / 2.0
+            cx_original = int(round(cx_upscaled / upscale))
+            hits.append((cx_original, t))
+
+    # Deduplicate by pixel_x within ±3 px (PSM 11 + PSM 4 often double-
+    # count the same label). Keep first occurrence.
+    hits.sort()
+    deduped: list[tuple[int, str]] = []
+    for cx, t in hits:
+        if deduped and abs(cx - deduped[-1][0]) < 4:
+            continue
+        deduped.append((cx, t))
+
+    x0, _, x1, _ = plot_bbox
+    px_span = max(1.0, float(x1 - x0))
+    span_seconds = (
+        (x_end_utc - x_start_utc).total_seconds()
+        if (x_start_utc is not None and x_end_utc is not None)
+        else 0
+    )
+    parsed: list[tuple[int, pd.Timestamp]] = []
+    for cx, t in deduped:
+        # Per-tick predicted UTC = linear interpolation between
+        # x_start_utc and x_end_utc at this pixel. Used as the
+        # disambiguation reference so HH:MM ticks resolve to the right
+        # calendar date.
+        if x_start_utc is not None and span_seconds > 0:
+            frac = (cx - x0) / px_span
+            predicted_utc = x_start_utc + pd.Timedelta(
+                seconds=frac * span_seconds
+            )
+        else:
+            predicted_utc = pd.Timestamp.now("UTC").tz_localize(None)
+        dt = _parse_x_tick_label(t, fmt, predicted_utc)
+        if dt is not None:
+            parsed.append((cx, dt))
+    return parsed
+
+
+def _parse_x_tick_label(
+    text: str, fmt: str, reference_utc: pd.Timestamp
+) -> Optional[pd.Timestamp]:
+    """Parse an OCR'd tick label (`04/13`, `12:00`, `Jan-2025`, ...) into
+    a UTC Timestamp, using `reference_utc` (UTC-naive) to fill in
+    missing fields. USGS tick labels are in Pacific/Honolulu (HST, a
+    fixed UTC-10) — this function returns UTC after applying that
+    offset so results compare apples-to-apples against the time-range
+    OCR's UTC output. `MMM-YYYY` labels are calendar markers with no
+    time-of-day component; we leave them at midnight (HST = UTC either
+    way for the integer-month comparison we use them for).
+    """
+    if fmt == "MM/DD":
+        m = _MMDD_RE.match(text)
+        if not m:
+            return None
+        mon, day = int(m.group("m")), int(m.group("d"))
+        if not (1 <= mon <= 12 and 1 <= day <= 31):
+            return None
+        year = reference_utc.year
+        try:
+            hst_midnight = pd.Timestamp(year=year, month=mon, day=day)
+        except (ValueError, OverflowError):
+            return None
+        # Convert HST midnight (UTC-10) to UTC.
+        utc = hst_midnight + pd.Timedelta(hours=10)
+        # If the tick is implausibly far in the future relative to
+        # reference, it belongs to the prior year (USGS rolling windows
+        # can straddle new year).
+        if utc > reference_utc + pd.Timedelta(days=30):
+            try:
+                hst_midnight = pd.Timestamp(year=year - 1, month=mon, day=day)
+                utc = hst_midnight + pd.Timedelta(hours=10)
+            except (ValueError, OverflowError):
+                return None
+        return utc
+    if fmt == "HH:MM":
+        m = _HHMM_RE.match(text)
+        if not m:
+            return None
+        hh, mm = int(m.group("h")), int(m.group("mi"))
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            return None
+        # Tick is in HST. Pick the date whose HST-to-UTC conversion
+        # lands closest to the pixel's predicted UTC. Search ±3 days
+        # so we cover two_day's 48h window (ticks near the far edge
+        # can be 2 days away from any single anchor date). The
+        # cross-check then measures the remaining delta.
+        hst_ref = reference_utc - pd.Timedelta(hours=10)
+        hst_candidate = hst_ref.normalize() + pd.Timedelta(hours=hh, minutes=mm)
+        best = None
+        best_delta = None
+        for offset in range(-3, 4):
+            c_hst = hst_candidate + pd.Timedelta(days=offset)
+            c_utc = c_hst + pd.Timedelta(hours=10)
+            delta = abs((c_utc - reference_utc).total_seconds())
+            if best_delta is None or delta < best_delta:
+                best, best_delta = c_utc, delta
+        return best
+    if fmt == "MMM-YYYY":
+        m = _MONTH_ABBREV_RE.match(text)
+        if not m:
+            return None
+        mon = _MONTH_ABBREV_NUM.get(m.group("mon").lower())
+        y = int(m.group("y"))
+        if mon is None or not (2020 <= y <= 2099):
+            return None
+        try:
+            # Month-start in HST ≈ month-start in UTC (10h offset is
+            # negligible for month-level cross-check).
+            return pd.Timestamp(year=y, month=mon, day=1)
+        except (ValueError, OverflowError):
+            return None
+    return None
 
 
 def _try_parse_title_at_psm(
