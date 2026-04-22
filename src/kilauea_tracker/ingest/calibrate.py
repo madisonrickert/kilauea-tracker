@@ -318,15 +318,21 @@ def ocr_y_axis_labels_with_conf(
 def ocr_title_timestamps(
     img: np.ndarray,
     plot_bbox: tuple[int, int, int, int],
+    *,
+    source_name: Optional[str] = None,
 ) -> tuple[pd.Timestamp, pd.Timestamp, str, str]:
     """Extract the (start, end) ISO timestamps from the title line below the plot.
 
     The USGS plots embed the full date range as text:
         "Pacific/Honolulu Time (2026-01-08 15:42:31 to 2026-04-08 15:42:31)"
 
-    OCRing this with PSM 7 produces a near-perfect string that a regex
-    cleanly recovers. The only common error is "to" → "t0", which the
-    regex tolerates.
+    For rolling sources (two_day/week/month/three_month) the window is a
+    fixed duration, so USGS always prints the same HH:MM:SS at both
+    endpoints. We use that invariant to detect and reject OCR misreads
+    (e.g. month on 2026-04-22 read start=12:03:33 end=12:08:33 — a
+    3↔8 digit confusion); when a candidate result fails the time-of-day
+    consistency check we fall through to the other PSM mode and score
+    the best remaining result.
 
     Returns `(start, end, psm_used, raw_text)` — the last two fields are
     diagnostic-only so the ingest pipeline can log which PSM mode won and
@@ -347,27 +353,66 @@ def ocr_title_timestamps(
         interpolation=cv2.INTER_CUBIC,
     )
 
-    # Try PSM 7 first (single-line, fastest, usually best for the title
-    # strip). Fall through to PSM 6 if PSM 7 fails for *any* reason —
-    # regex mismatch, invalid day-of-month, non-chronological even after
-    # year recovery, etc. PSM 6 is multi-block and has historically read
-    # the title cleanly even when PSM 7 misreads individual digits.
+    # Rolling sources have a fixed-duration window → start.time() must
+    # equal end.time(). dec2024_to_now doesn't (start is typically
+    # midnight on some fixed date; end is "now"). Use this to reject
+    # mis-read candidates.
+    requires_time_match = source_name in {
+        "two_day", "week", "month", "three_month",
+    }
+
+    def _time_of_day_consistent(start: pd.Timestamp, end: pd.Timestamp) -> bool:
+        return start.time() == end.time()
+
+    # Try BOTH PSM modes. Prefer PSM 7 when it produces an internally-
+    # consistent result (fastest, lowest noise). If PSM 7 is parseable
+    # but internally inconsistent (rolling source with HH:MM:SS
+    # mismatch), check whether PSM 6 gives a consistent result — that's
+    # the one to keep. Only accept an inconsistent result as a
+    # last-resort fallback, and log a warning when we do.
     psm7_result, psm7_text, psm7_error = _try_parse_title_at_psm(upscaled, "--psm 7")
-    if psm7_result is not None:
-        return psm7_result[0], psm7_result[1], "psm7", psm7_text
-
     psm6_result, psm6_text, psm6_error = _try_parse_title_at_psm(upscaled, "--psm 6")
-    if psm6_result is not None:
-        return psm6_result[0], psm6_result[1], "psm6", psm6_text
 
-    # Both PSM modes failed. Surface whichever error is more informative —
-    # parsing errors beat regex-mismatch errors because they prove the OCR
-    # at least produced something date-shaped.
-    raise CalibrationError(
-        f"could not extract title timestamps; "
-        f"PSM 7: {psm7_error} (OCR={psm7_text!r}); "
-        f"PSM 6: {psm6_error} (OCR={psm6_text!r})"
-    )
+    candidates: list[tuple[str, tuple[pd.Timestamp, pd.Timestamp], str]] = []
+    if psm7_result is not None:
+        candidates.append(("psm7", psm7_result, psm7_text))
+    if psm6_result is not None:
+        candidates.append(("psm6", psm6_result, psm6_text))
+
+    if not candidates:
+        raise CalibrationError(
+            f"could not extract title timestamps; "
+            f"PSM 7: {psm7_error} (OCR={psm7_text!r}); "
+            f"PSM 6: {psm6_error} (OCR={psm6_text!r})"
+        )
+
+    # Score each: 0 = consistent, 1 = inconsistent (only matters for
+    # rolling sources).
+    scored = []
+    for psm, (start, end), raw in candidates:
+        score = 0
+        if requires_time_match and not _time_of_day_consistent(start, end):
+            score = 1
+        scored.append((score, psm, start, end, raw))
+
+    # Sort by (score, psm_order) so PSM 7 wins ties.
+    psm_priority = {"psm7": 0, "psm6": 1}
+    scored.sort(key=lambda t: (t[0], psm_priority.get(t[1], 99)))
+    best_score, best_psm, best_start, best_end, best_raw = scored[0]
+
+    if best_score > 0:
+        # Even the best candidate has a HH:MM:SS mismatch. Log and
+        # accept — the trace is still approximately correct and the
+        # span-tolerance guard downstream will catch egregious errors.
+        logger.warning(
+            "calibrate %s: time-range OCR produced inconsistent "
+            "start.time()=%s != end.time()=%s on best candidate "
+            "(%s); accepting anyway. Raw text: %r",
+            source_name, best_start.time(), best_end.time(),
+            best_psm, best_raw,
+        )
+
+    return best_start, best_end, best_psm, best_raw
 
 
 def _try_parse_title_at_psm(
@@ -624,7 +669,9 @@ def calibrate_axes(
                     )
 
     # ── x-axis ──────────────────────────────────────────────────────────────
-    x_start, x_end, psm_used, title_raw = ocr_title_timestamps(img, plot_bbox)
+    x_start, x_end, psm_used, title_raw = ocr_title_timestamps(
+        img, plot_bbox, source_name=source_name,
+    )
 
     # Phase 1b: sanity-check the x-window span against the advertised window
     # length. USGS plots each have a fixed duration (two_day=48 h, week=7 d,
