@@ -240,3 +240,86 @@ ARCHIVE_QUORUM_NEIGHBOUR_THRESHOLD_MICRORAD = 3.0
 # window over which sibling sources typically catch up to a just-archived
 # bucket.
 ARCHIVE_MAX_AGE_FOR_PRIORITY_DEMOTION_DAYS = 14
+
+
+# ─── Phase 1 (2026-04 alignment rewrite): transcription quality guards ─────────
+#
+# The v3 alignment plan (see `.claude/plans/foamy-yawning-horizon.md`)
+# diagnoses the whack-a-mole step discontinuities as primarily y-calibration
+# errors at ingest time, with a long tail from per-column tracing artifacts.
+# These knobs gate the transcription pipeline so a bad OCR / bad pixel cluster
+# can no longer silently propagate through per-source CSVs into the merge.
+
+# Phase 1a. Reject a y-axis calibration whose linear fit residual exceeds
+# this many µrad. The current `np.polyfit` on OCR'd y-labels already
+# computes a residual but the code never acts on it, so a single mis-OCR'd
+# label (e.g. "-5" read as "-4") tilts the fit and every traced value is
+# then biased by a tilt-dependent amount.
+#
+# Why µrad (not pixels): µrad per pixel varies ~20× across sources
+# (`two_day` is ~0.01 µrad/px, `dec2024_to_now` is ~0.6 µrad/px), so a
+# pixel-based threshold either lets slop through on dense sources or
+# spuriously rejects high-resolution ones. A µrad threshold is directly
+# meaningful in data space: 0.5 µrad of label-fit bias translates to the
+# same amount of per-sample bias regardless of source resolution, and
+# the inter-source noise floor itself is ~0.5-1 µrad, so anything at or
+# below this can't materially move merged output.
+#
+# Healthy clean-fixture residuals (observed on committed fixtures): 3-month
+# ≈ 0.07 µrad, 2-day ≈ 0.18 µrad, week ≈ 0.01 µrad, month ≈ 0 µrad.
+# Live failure mode observed on 2026-04-21 `month` capture: ~6.5 µrad
+# residual caused by OCR misreading "0" as "1" on one tick — this threshold
+# cleanly catches it while tolerating every clean fixture.
+Y_CALIBRATION_MAX_RESIDUAL_MICRORAD = 0.5
+
+# Phase 1a. If a freshly-computed y-slope deviates from the rolling median
+# of the last N successful runs by more than this fraction, warn and fall
+# back to the last-known-good slope. USGS occasionally shifts the y-range
+# but does not change the per-pixel scale between consecutive captures, so
+# a sudden slope change is a near-certain OCR bug.
+Y_SLOPE_HISTORY_LENGTH = 20
+Y_SLOPE_REGRESSION_TOLERANCE_PERCENT = 3.0
+
+# Phase 1b. Expected total time window span per source (hours). The title
+# OCR produces `(x_start, x_end)` and we sanity-check the resulting span
+# against the advertised window. A title minute/hour misread that slips
+# past the regex would otherwise time-shift every sample silently.
+# `dec2024_to_now` uses a monotonically-growing window with no fixed
+# length; it is range-checked separately (must be ≥ 30 days, ≤ 5 years).
+X_WINDOW_EXPECTED_HOURS: dict[str, float] = {
+    "two_day": 48.0,
+    "week": 168.0,
+    "month": 720.0,
+    "three_month": 2160.0,
+}
+X_WINDOW_TOLERANCE_HOURS = 2.0
+
+# Phase 1c. Anchor-referenced calibration cross-check. Fits
+# `digital = a * png + b` via Huber robust regression for any PNG source
+# that temporally overlaps digital (Jan-Jun 2025). If the fit produces
+# a non-identity correction within these tolerances, we WARN and apply
+# the correction to that source's values; beyond these tolerances we
+# apply the correction AND flag it as a transcription failure candidate.
+#
+# As of 2026-04, `dec2024_to_now` is the only live rolling source that
+# still overlaps digital — the other PNGs (two_day/week/month/three_month)
+# have moved past it by ~10 months. The check is effectively dead code
+# for those sources and lives on only for dec2024_to_now.
+ANCHOR_FIT_A_WARNING_FRACTION = 0.03          # |a-1| > 3% → warn
+ANCHOR_FIT_B_WARNING_MICRORAD = 5.0           # |b|   > 5 µrad → warn
+ANCHOR_FIT_TRIM_HOURS = 6                     # trim first/last 6 h of digital overlap
+ANCHOR_FIT_MIN_OVERLAP_BUCKETS = 50           # regression not meaningful below this
+
+# Phase 1d. Kīlauea's fastest real DI transitions on record are ~5 µrad/hour
+# (see `legacy/Tiltmeter Data - Sheet1.csv` eruption-transition slopes).
+# A column-to-column tilt rate exceeding this × 3 is non-physical; the
+# trace has almost certainly landed on a gridline, axis tick, or other
+# artifact. Reject per-column before the rolling-median pass.
+MAX_PHYSICAL_RATE_MICRORAD_PER_HOUR = 15.0
+
+# Phase 1e. The real Az-300 blue curve is typically 1-3 pixels thick in
+# the rendered PNG (varies by window). Any column with more than this
+# many lit pixels is crossing a gridline, axis label, or is in a JPEG
+# artifact cluster. Drop the column and let the downstream rolling-median
+# filter interpolate.
+CURVE_MAX_COLUMN_WIDTH_PIXELS = 8

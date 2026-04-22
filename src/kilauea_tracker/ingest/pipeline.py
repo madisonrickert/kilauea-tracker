@@ -58,7 +58,13 @@ from ..config import (
 )
 from ..model import DATE_COL, TILT_COL
 from ..reconcile import ReconcileReport, reconcile_sources
-from .calibrate import AxisCalibration, calibrate_axes
+from .calibrate import (
+    AnchorFitResult,
+    AxisCalibration,
+    apply_anchor_fit,
+    calibrate_axes,
+    recalibrate_by_anchor_fit,
+)
 from .exceptions import CalibrationError, FetchError, IngestError, TraceError
 from .fetch import fetch_tilt_png
 from .trace import trace_curve
@@ -124,6 +130,10 @@ class IngestRunResult:
     run_report_path: Optional[Path] = None       # where the diagnostic JSON was written
     run_started_at_utc: Optional[datetime] = None
     run_finished_at_utc: Optional[datetime] = None
+    # Phase 1c: per-source anchor cross-check results. Empty unless digital
+    # is present AND at least one rolling source overlaps digital's Jan-Jun
+    # 2025 window (today: dec2024_to_now only).
+    anchor_fits: list[AnchorFitResult] = field(default_factory=list)
 
 
 def ingest(
@@ -169,7 +179,7 @@ def ingest(
         return report
 
     try:
-        calibration = calibrate_axes(img)
+        calibration = calibrate_axes(img, source_name=name)
     except CalibrationError as e:
         # Set the error ONLY — don't also append to warnings, or the
         # Streamlit panel will show the same message both as a red ❌
@@ -222,6 +232,20 @@ def ingest(
     report.warnings.extend(append_result.warnings)
 
     _save_cached_last_modified(source, fetch_result.last_modified)
+
+    # Phase 0a: append a capture-quality row to the per-source quality CSV.
+    # Best-effort: a write failure here must never abort the ingest (the
+    # per-source CSV is what the pipeline actually reads downstream).
+    try:
+        _append_quality_row(
+            source_name=name,
+            sources_dir=sources_dir,
+            report=report,
+            trace_report=trace_report,
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        report.warnings.append(f"could not write quality CSV: {e}")
+
     return report
 
 
@@ -292,6 +316,33 @@ def ingest_all(
     if len(archive_df) > 0:
         sources_for_reconcile[ARCHIVE_SOURCE_NAME] = archive_df
 
+    # 4b. Phase 1c: anchor-referenced calibration cross-check. For every
+    #     PNG source that temporally overlaps `digital` (today: only
+    #     dec2024_to_now), fit `digital = a * png + b` via Huber-robust
+    #     regression and apply the correction IN MEMORY for this reconcile
+    #     pass when the fit deviates from identity. The per-source CSV on
+    #     disk is NOT modified — this gives us a reversible, rerun-stable
+    #     correction layer that can be tuned without touching the raw data.
+    digital_df = sources_for_reconcile.get(DIGITAL_SOURCE_NAME)
+    if digital_df is not None and len(digital_df) > 0:
+        for source_name in list(sources_for_reconcile.keys()):
+            if source_name in (DIGITAL_SOURCE_NAME, ARCHIVE_SOURCE_NAME):
+                continue
+            src_df = sources_for_reconcile[source_name]
+            fit = recalibrate_by_anchor_fit(source_name, src_df, digital_df)
+            result.anchor_fits.append(fit)
+            if fit.warning is not None:
+                # Apply the correction and surface the warning on the
+                # originating source's report (or a free-floating reconcile
+                # warning if we can't match it).
+                sources_for_reconcile[source_name] = apply_anchor_fit(src_df, fit)
+                matched = next(
+                    (r for r in result.per_source if r.source_name == source_name),
+                    None,
+                )
+                if matched is not None:
+                    matched.warnings.append(fit.warning)
+
     # 5. Reconcile and write the merged history.
     merged, reconcile_report = reconcile_sources(sources_for_reconcile)
     result.reconcile = reconcile_report
@@ -337,6 +388,129 @@ def _read_canonical_csv(path: Path) -> pd.DataFrame:
     df = df[[DATE_COL, TILT_COL]].dropna()
     df = df.sort_values(DATE_COL).reset_index(drop=True)
     return df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 0a: Per-source capture-quality CSV
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# Column order is stable across runs so simple CSV tools can diff the files.
+_QUALITY_CSV_COLUMNS = [
+    "run_timestamp_utc",
+    "y_slope",
+    "y_intercept",
+    "y_max_residual_microrad",
+    "y_max_residual_pixels",
+    "y_std_residual_microrad",
+    "y_labels_used",
+    "y_slope_fallback_used",
+    "y_slope_history_median",
+    "x_start_utc",
+    "x_end_utc",
+    "x_span_hours",
+    "title_psm_used",
+    "plot_bbox",
+    "column_coverage",
+    "rows_raw",
+    "rows_after_outlier_filter",
+    "rows_dropped_outlier",
+    "rows_dropped_rate",
+    "columns_dropped_width",
+    "rows_appended",
+    "frame_offset_microrad",
+    "frame_overlap_buckets",
+]
+
+
+def _append_quality_row(
+    *,
+    source_name: str,
+    sources_dir: Optional[Path],
+    report: IngestReport,
+    trace_report,
+) -> None:
+    """Append a single row to `data/sources/<source>_quality.csv`.
+
+    Builds the row from the freshly-computed IngestReport + its attached
+    TraceReport. Best-effort: callers catch and log failures so the ingest
+    pipeline never aborts on a quality-log error.
+    """
+    calib = report.calibration
+    quality_path = (
+        source_csv_path(source_name).with_name(f"{source_name}_quality.csv")
+        if sources_dir is None
+        else sources_dir / f"{source_name}_quality.csv"
+    )
+    quality_path.parent.mkdir(parents=True, exist_ok=True)
+
+    row: dict[str, object] = {
+        "run_timestamp_utc": datetime.now(tz=timezone.utc).isoformat(),
+        "y_slope": getattr(calib, "y_slope", ""),
+        "y_intercept": getattr(calib, "y_intercept", ""),
+        "y_max_residual_microrad": (
+            calib.fit_residual_per_axis.get("y_max_residual_microrad", "")
+            if calib is not None
+            else ""
+        ),
+        "y_max_residual_pixels": (
+            calib.fit_residual_per_axis.get("y_max_residual_pixels", "")
+            if calib is not None
+            else ""
+        ),
+        "y_std_residual_microrad": (
+            calib.fit_residual_per_axis.get("y_std_residual_microrad", "")
+            if calib is not None
+            else ""
+        ),
+        "y_labels_used": len(calib.y_labels_found) if calib is not None else 0,
+        "y_slope_fallback_used": (
+            bool(getattr(calib, "y_slope_fallback_used", False))
+            if calib is not None
+            else False
+        ),
+        "y_slope_history_median": (
+            getattr(calib, "y_slope_history_median", None) or ""
+            if calib is not None
+            else ""
+        ),
+        "x_start_utc": _dt_str(getattr(calib, "x_start", None)) or "",
+        "x_end_utc": _dt_str(getattr(calib, "x_end", None)) or "",
+        "x_span_hours": (
+            round((calib.x_end - calib.x_start).total_seconds() / 3600.0, 4)
+            if calib is not None
+            else ""
+        ),
+        "title_psm_used": (getattr(calib, "title_psm_used", "") or "") if calib is not None else "",
+        "plot_bbox": (
+            "|".join(str(v) for v in calib.plot_bbox) if calib is not None else ""
+        ),
+        "column_coverage": (
+            trace_report.column_coverage if trace_report is not None else ""
+        ),
+        "rows_raw": trace_report.rows_raw if trace_report is not None else "",
+        "rows_after_outlier_filter": (
+            trace_report.rows_after_outlier_filter if trace_report is not None else ""
+        ),
+        "rows_dropped_outlier": (
+            trace_report.outliers_dropped if trace_report is not None else ""
+        ),
+        "rows_dropped_rate": (
+            trace_report.rows_dropped_rate if trace_report is not None else ""
+        ),
+        "columns_dropped_width": (
+            trace_report.columns_dropped_width if trace_report is not None else ""
+        ),
+        "rows_appended": report.rows_appended,
+        "frame_offset_microrad": report.frame_offset_microrad,
+        "frame_overlap_buckets": report.frame_overlap_buckets,
+    }
+
+    # Write header + row on first write; append thereafter. Using pandas
+    # to serialize handles quoting edge cases automatically.
+    df_row = pd.DataFrame([row], columns=_QUALITY_CSV_COLUMNS)
+    header_needed = not quality_path.exists()
+    df_row.to_csv(quality_path, mode="a", index=False, header=header_needed)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -479,6 +653,22 @@ def _write_run_report(result: IngestRunResult) -> Path:
             "rows_deferred_by_quorum": a.rows_deferred_by_quorum,
             "warnings": list(a.warnings),
         }
+
+    # Phase 1c: serialize anchor cross-check results for post-hoc diagnosis.
+    if result.anchor_fits:
+        payload["anchor_fits"] = [
+            {
+                "source_name": f.source_name,
+                "ran": f.ran,
+                "overlap_buckets": f.overlap_buckets,
+                "a": f.a,
+                "b": f.b,
+                "residual_std_microrad": f.residual_std_microrad,
+                "warning": f.warning,
+                "note": f.note,
+            }
+            for f in result.anchor_fits
+        ]
 
     out_path.write_text(json.dumps(payload, indent=2, default=str))
     return out_path

@@ -21,7 +21,12 @@ import cv2
 import numpy as np
 import pandas as pd
 
-from ..config import TRACE_OUTLIER_MIN_SAMPLES, TRACE_OUTLIER_THRESHOLD_MICRORAD
+from ..config import (
+    CURVE_MAX_COLUMN_WIDTH_PIXELS,
+    MAX_PHYSICAL_RATE_MICRORAD_PER_HOUR,
+    TRACE_OUTLIER_MIN_SAMPLES,
+    TRACE_OUTLIER_THRESHOLD_MICRORAD,
+)
 from ..model import DATE_COL, TILT_COL
 from .calibrate import AxisCalibration
 from .exceptions import TraceError
@@ -76,6 +81,19 @@ class TraceReport:
     outliers_dropped: int = 0
     dropped_rows: list[tuple[pd.Timestamp, float, float]] = field(default_factory=list)
     """Each entry is `(timestamp, raw_tilt, local_median)` for one dropped row."""
+    # Phase 1e: columns rejected because they were wider than the expected
+    # curve thickness (gridline / axis-label crossings). Counted BEFORE
+    # rows are emitted, so they're invisible in `rows_raw`.
+    columns_dropped_width: int = 0
+    # Phase 1d: per-column samples rejected because their tilt slope vs a
+    # time-sorted neighbour exceeded the maximum physical rate. Catches
+    # single-column gridline spikes the rolling-median filter can't isolate
+    # when the artifact spans enough neighbours to drag the window.
+    rows_dropped_rate: int = 0
+    # Phase 0a: fraction of plot columns that ended up contributing a
+    # sample (before filters). Persisted in the capture-quality CSV to let
+    # the post-cutover analysis spot slow drift in trace coverage.
+    column_coverage: float = 0.0
 
 
 def trace_curve(img: np.ndarray, calib: AxisCalibration) -> pd.DataFrame:
@@ -128,9 +146,21 @@ def trace_curve(img: np.ndarray, calib: AxisCalibration) -> pd.DataFrame:
         )
 
     rows: list[tuple[pd.Timestamp, float]] = []
+    columns_dropped_width = 0
     for col_offset in range(n_columns):
         column_mask = mask[:, col_offset]
-        if not column_mask.any():
+        lit_count = int(np.count_nonzero(column_mask))
+        if lit_count == 0:
+            continue
+        # Phase 1e: reject columns wider than a plausible curve thickness.
+        # The real Az-300 blue curve is 1-3 pixels thick; anything ≥ 8
+        # pixels is crossing a gridline, axis-tick label, or a JPEG artifact
+        # cluster. Dropping the column surrenders the sample at that
+        # timestamp; the rolling-median pass downstream can interpolate
+        # across the gap, and re-tracing the same PNG on a later run (the
+        # sliding window usually still contains it) gets another shot.
+        if lit_count > CURVE_MAX_COLUMN_WIDTH_PIXELS:
+            columns_dropped_width += 1
             continue
         # Median row index of lit pixels — robust to mid-transition stripes.
         row_indices = np.where(column_mask)[0]
@@ -151,6 +181,13 @@ def trace_curve(img: np.ndarray, calib: AxisCalibration) -> pd.DataFrame:
     df = pd.DataFrame(rows, columns=[DATE_COL, TILT_COL])
     df = df.sort_values(DATE_COL).reset_index(drop=True)
 
+    # Phase 1d: enforce the physical tilt-rate ceiling. Drops columns whose
+    # tilt differs from a neighbour by more than the instrument can plausibly
+    # change in the intervening time (see `MAX_PHYSICAL_RATE_MICRORAD_PER_HOUR`).
+    # Runs BEFORE the rolling-median filter because a rate-outlier cluster
+    # can drag the rolling window enough to hide an individual offender.
+    df, rate_dropped_rows = _filter_by_max_physical_rate(df)
+
     # Drop per-row outliers produced by non-curve blue pixels (gridlines,
     # tick-label bleed, JPEG hue drift near the Az-30° green curve). The
     # 2026-04 archive contamination was caused by rows like these slipping
@@ -159,8 +196,56 @@ def trace_curve(img: np.ndarray, calib: AxisCalibration) -> pd.DataFrame:
     # gradually across many columns, so they stay close to their rolling
     # median; phantom spikes sit ~10 µrad off it.
     df, report = _filter_rolling_median_outliers(df)
+    report.columns_dropped_width = columns_dropped_width
+    report.rows_dropped_rate = rate_dropped_rows
+    report.column_coverage = coverage
     df.attrs["trace_report"] = report
     return df
+
+
+def _filter_by_max_physical_rate(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Drop rows whose tilt change vs the previous sample exceeds the
+    configured physical rate ceiling.
+
+    Kīlauea's fastest real DI transitions sit around 5 µrad/hour; the
+    threshold (`MAX_PHYSICAL_RATE_MICRORAD_PER_HOUR`) is set at 3× that to
+    avoid false positives during legitimate eruption transitions. Anything
+    above it is a gridline hit, an axis-label artifact, or a JPEG blue-hue
+    spike — never real.
+
+    Returns `(df_filtered, n_dropped)`.
+    """
+    if len(df) < 2:
+        return df, 0
+    dates = df[DATE_COL].to_numpy()
+    tilts = df[TILT_COL].to_numpy()
+    dt_hours = np.diff(dates).astype("timedelta64[s]").astype(float) / 3600.0
+    # Avoid div-by-zero: adjacent columns in a wide plot can land in the
+    # same second after calibration rounding. Treat 0-hour gaps as 1 min.
+    dt_hours = np.where(dt_hours <= 0, 1.0 / 60.0, dt_hours)
+    rate = np.abs(np.diff(tilts)) / dt_hours
+    # Flag BOTH rows of any pair whose rate is too high; we can't yet tell
+    # which of the two is the outlier, but downstream the rolling-median
+    # pass will judge each surviving row against its wider context.
+    pair_bad = rate > MAX_PHYSICAL_RATE_MICRORAD_PER_HOUR
+    if not pair_bad.any():
+        return df, 0
+
+    # Row i is "bad" if either adjacent pair involving it violates the rate.
+    bad_rows = np.zeros(len(df), dtype=bool)
+    bad_rows[:-1] |= pair_bad
+    bad_rows[1:] |= pair_bad
+    # Don't kill every row — if EVERY row were bad (e.g. a corrupt PNG with
+    # all gridlines), the rolling-median filter would take over downstream.
+    # Limit to removing at most 20% of rows here; above that, the rate
+    # threshold is miscalibrated for the current plot and we defer to
+    # rolling-median instead.
+    if bad_rows.mean() > 0.20:
+        return df, 0
+
+    keep_mask = ~bad_rows
+    n_dropped = int(bad_rows.sum())
+    return df.loc[keep_mask].reset_index(drop=True), n_dropped
 
 
 def _filter_rolling_median_outliers(

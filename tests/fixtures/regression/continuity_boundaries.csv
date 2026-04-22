@@ -1,0 +1,12 @@
+boundary_before_utc,boundary_after_utc,reported_delta_microrad,source_phase,user_report_date,notes
+2026-04-11 23:41:00,2026-04-12 00:47:00,-10.6,v1-patches-era,2026-04-21,original phantom-spike report from archive contamination
+2026-04-17 11:00:00,2026-04-17 12:06:00,15.4,v1-patches-era,2026-04-21,morning handoff step
+2026-04-17 12:21:00,2026-04-17 13:21:00,10.9,v1-patches-era,2026-04-21,afternoon handoff step
+2026-04-19 12:03:00,2026-04-19 13:19:00,,v1-patches-era,2026-04-21,user-flagged; delta not measured
+2026-04-20 12:32:00,2026-04-20 13:36:00,,v1-patches-era,2026-04-21,user-flagged; delta not measured
+2026-04-07 20:17:00,2026-04-07 21:22:00,-6.25,post-archive-clean,2026-04-21,residual after first cleanup round
+2026-04-11 23:41:00,2026-04-12 00:58:00,4.2,post-archive-clean,2026-04-21,residual after archive-age demotion
+2026-03-10 01:11:00,2026-03-10 02:14:00,7.9,post-archive-clean,2026-04-21,residual in region where higher-priority reference lacks local coverage
+2026-04-09,,,post-archive-clean,2026-04-21,discontinuity reported; exact bracket times not captured
+2026-04-12,,,post-archive-clean,2026-04-21,discontinuity reported; exact bracket times not captured
+2026-04-18,,,post-archive-clean,2026-04-21,discontinuity reported; exact bracket times not captured
