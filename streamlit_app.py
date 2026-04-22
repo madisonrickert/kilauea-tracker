@@ -2051,50 +2051,66 @@ with st.expander("🔬 Transcription quality inspector"):
         # Debug metadata — the numbers the rest of the pipeline trusts
         # for this PNG. First place to check when overlays disagree.
         with st.expander(f"🔧 {r.source_name} calibration diagnostics", expanded=False):
-            # X-axis tick cross-check: run OCR on the tick-label row and
-            # compare each parsed tick's pixel position against the
-            # time-range linear interpolation. ±1-pixel errors are OCR
-            # center-of-glyph noise; anything larger is a real x-axis
-            # calibration problem.
-            try:
-                import cv2 as _cv2
-                import numpy as _np
-                from kilauea_tracker.ingest.calibrate import (
-                    ocr_x_axis_ticks as _ocr_x_ticks,
-                )
-                _arr = _np.frombuffer(raw, dtype=_np.uint8)
-                _img_for_ticks = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
-                _ticks = _ocr_x_ticks(
-                    _img_for_ticks, cal.plot_bbox, r.source_name,
-                    x_start_utc=cal.x_start, x_end_utc=cal.x_end,
-                )
-                _span_s = (cal.x_end - cal.x_start).total_seconds()
-                _px_span = max(1.0, float(cal.plot_bbox[2] - cal.plot_bbox[0]))
-                _sec_per_px = _span_s / _px_span
-                _errs = []
-                for _px_cx, _dt in _ticks:
-                    _pred = cal.x_start + pd.Timedelta(
-                        seconds=(_px_cx - cal.plot_bbox[0]) / _px_span * _span_s
+            # X-axis tick cross-check results: the calibration pipeline
+            # already ran this and stashed the stats on `cal`. Compute
+            # the approximate minute-scale equivalent from sec-per-pixel
+            # so the caption shows both px and minutes. If the pipeline
+            # hasn't run this for the source (old cached calibration),
+            # fall back to re-running the OCR locally.
+            _xtick_n = getattr(cal, "x_tick_cross_check_count", 0) or 0
+            _xtick_median_px = getattr(cal, "x_tick_cross_check_median_err_px", None)
+            _xtick_max_px = getattr(cal, "x_tick_cross_check_max_err_px", None)
+            if _xtick_n == 0 or _xtick_max_px is None:
+                # Recompute on the fly for calibrations from the
+                # inspector's own re-calibration path (which doesn't
+                # populate these fields yet).
+                try:
+                    import cv2 as _cv2
+                    import numpy as _np
+                    from kilauea_tracker.ingest.calibrate import (
+                        ocr_x_axis_ticks as _ocr_x_ticks,
                     )
-                    _errs.append(abs((_dt - _pred).total_seconds()))
-                if _errs:
-                    _median_err = sorted(_errs)[len(_errs) // 2]
-                    _max_err = max(_errs)
-                    _max_err_px = _max_err / max(1e-9, _sec_per_px)
-                    _median_err_px = _median_err / max(1e-9, _sec_per_px)
-                    _status = "✓ consistent" if _max_err_px <= 2.0 else "⚠ drift"
-                    _xcheck_caption = (
-                        f"x-axis tick cross-check: {_status}  \n"
-                        f"  {len(_ticks)} ticks parsed · "
-                        f"median err `{_median_err_px:.2f}` px "
-                        f"(`{_median_err/60:.1f}` min) · "
-                        f"max err `{_max_err_px:.2f}` px "
-                        f"(`{_max_err/60:.1f}` min)"
+                    _arr = _np.frombuffer(raw, dtype=_np.uint8)
+                    _img_for_ticks = _cv2.imdecode(_arr, _cv2.IMREAD_COLOR)
+                    _ticks = _ocr_x_ticks(
+                        _img_for_ticks, cal.plot_bbox, r.source_name,
+                        x_start_utc=cal.x_start, x_end_utc=cal.x_end,
                     )
-                else:
-                    _xcheck_caption = "x-axis tick cross-check: no ticks parsed"
-            except Exception as _e:  # pragma: no cover — defensive
-                _xcheck_caption = f"x-axis tick cross-check unavailable: {_e}"
+                    _span_s = (cal.x_end - cal.x_start).total_seconds()
+                    _px_span = max(1.0, float(cal.plot_bbox[2] - cal.plot_bbox[0]))
+                    _sec_per_px_local = _span_s / _px_span if _px_span else 0
+                    _errs_px = []
+                    for _px_cx, _dt in _ticks:
+                        _pred = cal.x_start + pd.Timedelta(
+                            seconds=(_px_cx - cal.plot_bbox[0]) / _px_span * _span_s
+                        )
+                        if _sec_per_px_local:
+                            _errs_px.append(
+                                abs((_dt - _pred).total_seconds()) / _sec_per_px_local
+                            )
+                    if _errs_px:
+                        _errs_px.sort()
+                        _xtick_n = len(_errs_px)
+                        _xtick_median_px = _errs_px[len(_errs_px) // 2]
+                        _xtick_max_px = _errs_px[-1]
+                except Exception:
+                    pass
+
+            _span_s = (cal.x_end - cal.x_start).total_seconds()
+            _px_span = max(1.0, float(cal.plot_bbox[2] - cal.plot_bbox[0]))
+            _sec_per_px = _span_s / _px_span if _px_span else 0
+            if _xtick_n and _xtick_max_px is not None:
+                _status = "✓ consistent" if _xtick_max_px <= 2.0 else "⚠ drift"
+                _xcheck_caption = (
+                    f"x-axis tick cross-check: {_status}  \n"
+                    f"  {_xtick_n} ticks parsed · "
+                    f"median err `{_xtick_median_px:.2f}` px "
+                    f"(`{_xtick_median_px * _sec_per_px / 60:.1f}` min) · "
+                    f"max err `{_xtick_max_px:.2f}` px "
+                    f"(`{_xtick_max_px * _sec_per_px / 60:.1f}` min)"
+                )
+            else:
+                _xcheck_caption = "x-axis tick cross-check: no ticks parsed"
 
             dbg_cols = st.columns(2)
             with dbg_cols[0]:

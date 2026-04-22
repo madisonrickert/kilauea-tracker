@@ -421,6 +421,9 @@ _QUALITY_CSV_COLUMNS = [
     "x_start_utc",
     "x_end_utc",
     "x_span_hours",
+    "x_tick_cross_check_count",
+    "x_tick_cross_check_median_err_px",
+    "x_tick_cross_check_max_err_px",
     "title_psm_used",
     "plot_bbox",
     "column_coverage",
@@ -490,6 +493,19 @@ def _append_quality_row(
         "x_end_utc": _dt_str(getattr(calib, "x_end", None)) or "",
         "x_span_hours": (
             round((calib.x_end - calib.x_start).total_seconds() / 3600.0, 4)
+            if calib is not None
+            else ""
+        ),
+        "x_tick_cross_check_count": (
+            getattr(calib, "x_tick_cross_check_count", 0) if calib is not None else ""
+        ),
+        "x_tick_cross_check_median_err_px": (
+            (getattr(calib, "x_tick_cross_check_median_err_px", None) or "")
+            if calib is not None
+            else ""
+        ),
+        "x_tick_cross_check_max_err_px": (
+            (getattr(calib, "x_tick_cross_check_max_err_px", None) or "")
             if calib is not None
             else ""
         ),

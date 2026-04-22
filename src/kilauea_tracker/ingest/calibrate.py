@@ -136,6 +136,16 @@ class AxisCalibration:
     y_label_confidences: list[float] = field(default_factory=list)
     y_slope_fallback_used: bool = False
     y_slope_history_median: Optional[float] = None
+    # X-axis tick cross-check: OCRs the upper text row (MM/DD, HH:MM,
+    # MMM-YYYY labels depending on source), parses each hit, compares
+    # its UTC to the time-range linear interpolation at the same
+    # pixel. Pure sanity check — does NOT modify x_start/x_end (that
+    # would introduce drift away from the 'Pacific/Honolulu Time (...)'
+    # text we treat as authoritative). Populated even when no ticks
+    # were parsed so run reports can track OCR-accessibility over time.
+    x_tick_cross_check_count: int = 0
+    x_tick_cross_check_median_err_px: Optional[float] = None
+    x_tick_cross_check_max_err_px: Optional[float] = None
 
     def pixel_to_microradians(self, py: float) -> float:
         return float(self.y_slope * float(py) + self.y_intercept)
@@ -990,6 +1000,57 @@ def calibrate_axes(
     if source_name is not None and not slope_fallback_used:
         _append_y_slope_history(source_name, float(a_y))
 
+    # ── X-axis tick cross-check (sanity only; does NOT modify x_start/x_end) ──
+    # Reads the x-axis tick label row (MM/DD, HH:MM, MMM-YYYY per source)
+    # and cross-references each parsed tick's pixel position against the
+    # linear interpolation between x_start and x_end. ±1 px deltas are pure
+    # OCR glyph-center noise; anything > 3 px means the time-range OCR
+    # and the x-axis ticks disagree about where dates fall on the plot,
+    # which usually implies a time-range misread (wrong year, wrong timezone,
+    # transposed digits). We log a warning and store the stats, but leave
+    # the authoritative 'Pacific/Honolulu Time (...)' interpretation intact
+    # to avoid drift — user preference.
+    xtick_count = 0
+    xtick_median_px: Optional[float] = None
+    xtick_max_px: Optional[float] = None
+    if source_name is not None:
+        try:
+            ticks = ocr_x_axis_ticks(
+                img, plot_bbox, source_name,
+                x_start_utc=x_start, x_end_utc=x_end,
+            )
+        except Exception as e:
+            ticks = []
+            logger.warning(
+                "calibrate %s: x-axis tick cross-check errored: %s",
+                source_name, e,
+            )
+        if ticks:
+            x_px0, _, x_px1, _ = plot_bbox
+            px_span = max(1.0, float(x_px1 - x_px0))
+            span_seconds = (x_end - x_start).total_seconds()
+            sec_per_px = span_seconds / px_span if px_span > 0 else 0
+            errs_px = []
+            for cx, dt in ticks:
+                pred = x_start + pd.Timedelta(
+                    seconds=(cx - x_px0) / px_span * span_seconds
+                )
+                err_seconds = abs((dt - pred).total_seconds())
+                err_px = err_seconds / max(1e-9, sec_per_px)
+                errs_px.append(err_px)
+            errs_px.sort()
+            xtick_count = len(ticks)
+            xtick_median_px = float(errs_px[len(errs_px) // 2])
+            xtick_max_px = float(errs_px[-1])
+            if xtick_max_px > 3.0:
+                logger.warning(
+                    "calibrate %s: x-axis tick cross-check disagrees with "
+                    "time-range OCR — %d ticks, median %.2f px, max %.2f px. "
+                    "Keeping time-range values authoritative (no drift), "
+                    "but either the time-range or a tick was mis-read.",
+                    source_name, xtick_count, xtick_median_px, xtick_max_px,
+                )
+
     return AxisCalibration(
         plot_bbox=plot_bbox,
         y_slope=float(a_y),
@@ -1007,6 +1068,9 @@ def calibrate_axes(
         y_label_confidences=[float(c) for c in confs],
         y_slope_fallback_used=slope_fallback_used,
         y_slope_history_median=slope_history_median,
+        x_tick_cross_check_count=xtick_count,
+        x_tick_cross_check_median_err_px=xtick_median_px,
+        x_tick_cross_check_max_err_px=xtick_max_px,
     )
 
 
