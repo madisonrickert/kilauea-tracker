@@ -223,43 +223,88 @@ def ocr_y_axis_labels_with_conf(
     # Whitelist must include `.` because shorter-window plots (week, 2-day) use
     # fractional y-axis labels (1.5, 0.5, -0.5, -1.5, …) — without the period
     # Tesseract drops the decimal and we read "1.5" as "15".
-    data = pytesseract.image_to_data(
-        upscaled,
-        config="--psm 11 -c tessedit_char_whitelist=-.0123456789",
-        output_type=pytesseract.Output.DICT,
-    )
+    #
+    # We run two passes with different page-segmentation modes and union the
+    # results: PSM 11 ("sparse text") was the original single-pass mode but
+    # misses single-digit labels like "0" and values at the extremes of
+    # wide-range axes (dec2024_to_now's +40 / +60 / +80 labels on current
+    # PNGs). PSM 6 ("uniform block of text") catches those but sometimes
+    # produces false positives like misreading a tick spacer as "8.0" or
+    # a plot-interior gridline as "2.0". RANSAC below filters the false
+    # positives by selecting the largest set of points that lies on a single
+    # line within 2px of OCR error, which is easy to satisfy for real ticks
+    # (they're colinear by construction) and hard for OCR noise.
+    def _run_psm(psm: int) -> list[tuple[int, float, float]]:
+        data = pytesseract.image_to_data(
+            upscaled,
+            config=f"--psm {psm} -c tessedit_char_whitelist=-.0123456789",
+            output_type=pytesseract.Output.DICT,
+        )
+        out: list[tuple[int, float, float]] = []
+        for i in range(len(data["text"])):
+            text = data["text"][i].strip()
+            if not text:
+                continue
+            try:
+                value = float(text)
+            except ValueError:
+                continue
+            try:
+                conf = float(data["conf"][i])
+            except (ValueError, TypeError):
+                conf = -1.0
+            if conf < MIN_OCR_CONFIDENCE:
+                continue
+            upscaled_center_y = data["top"][i] + data["height"][i] / 2.0
+            original_y = (upscaled_center_y / OCR_UPSCALE) + strip_top_in_original
+            out.append((int(round(original_y)), value, conf))
+        return out
 
-    found: list[tuple[int, float, float]] = []
-    for i in range(len(data["text"])):
-        text = data["text"][i].strip()
-        if not text:
-            continue
-        try:
-            value = float(text)
-        except ValueError:
-            continue
-        try:
-            conf = float(data["conf"][i])
-        except (ValueError, TypeError):
-            conf = -1.0
-        if conf < MIN_OCR_CONFIDENCE:
-            continue
-
-        # Convert the upscaled bbox center back to original-image coordinates.
-        upscaled_center_y = data["top"][i] + data["height"][i] / 2.0
-        original_y = (upscaled_center_y / OCR_UPSCALE) + strip_top_in_original
-        found.append((int(round(original_y)), value, conf))
-
-    # Deduplicate by value — keep the highest-confidence occurrence.
-    seen: dict[float, tuple[int, float]] = {}
-    for py, val, conf in found:
-        prior = seen.get(val)
+    # Union PSM 6 + PSM 11 hits, dedup by value keeping highest confidence.
+    by_value: dict[float, tuple[int, float]] = {}
+    for py, val, conf in _run_psm(6) + _run_psm(11):
+        prior = by_value.get(val)
         if prior is None or conf > prior[1]:
-            seen[val] = (py, conf)
-    return sorted(
-        [(py, val, conf) for val, (py, conf) in seen.items()],
+            by_value[val] = (py, conf)
+    points = sorted(
+        [(py, val, conf) for val, (py, conf) in by_value.items()],
         key=lambda t: t[0],
     )
+
+    # RANSAC: find the subset that maximally agrees on a single linear fit.
+    # Real y-axis ticks are perfectly colinear; OCR false positives
+    # generally sit off the line. Threshold of 2px is tight enough to
+    # catch misreads but loose enough to absorb antialiasing noise on
+    # the ±1px glyph-center estimate.
+    if len(points) >= 3:
+        best_inliers: list[tuple[int, float, float]] = []
+        for i in range(len(points)):
+            for j in range(i + 1, len(points)):
+                y_i, v_i, _ = points[i]
+                y_j, v_j, _ = points[j]
+                if y_i == y_j:
+                    continue
+                a = (v_j - v_i) / (y_j - y_i)
+                if abs(a) < 1e-9:
+                    continue
+                b = v_i - a * y_i
+                inliers = [
+                    p for p in points
+                    if abs(p[1] - (a * p[0] + b)) / abs(a) <= 2.0
+                ]
+                # Prefer more inliers; tie-break by higher confidence sum
+                # so pairs that agree with high-conf labels win over pairs
+                # that agree with low-conf noise.
+                if len(inliers) > len(best_inliers) or (
+                    len(inliers) == len(best_inliers)
+                    and sum(p[2] for p in inliers)
+                    > sum(p[2] for p in best_inliers)
+                ):
+                    best_inliers = inliers
+        if len(best_inliers) >= 3:
+            points = sorted(best_inliers, key=lambda t: t[0])
+
+    return points
 
 
 # ─────────────────────────────────────────────────────────────────────────────

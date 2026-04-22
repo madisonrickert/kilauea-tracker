@@ -26,6 +26,7 @@ from ..config import (
     MAX_PHYSICAL_RATE_MICRORAD_PER_HOUR,
     TRACE_OUTLIER_MIN_SAMPLES,
     TRACE_OUTLIER_THRESHOLD_MICRORAD,
+    WIDE_COLUMN_THRESHOLD_PIXELS,
 )
 from ..model import DATE_COL, TILT_COL
 from .calibrate import AxisCalibration
@@ -59,12 +60,18 @@ MIN_COLUMN_COVERAGE = 0.5
 # losing those samples is fine because reconciliation fills them in from
 # higher-resolution sources (TWO_DAY/WEEK/MONTH) for any recent dates.
 #
-# Verified against all 5 fixtures in tests/fixtures/: every source has the
-# legend swatch at the SAME pixel position because USGS uses identical plot
-# geometry across windows. plot_bbox is uniformly (75, 20, 826, 245) so this
-# rectangle covers full-image x∈[75,220], y∈[20,65] — i.e. x∈[~50,~220],
-# y∈[~10,~60] in raw image coords, which matches the visible legend box.
-LEGEND_EXCLUSION_PLOT_RELATIVE = (0, 0, 145, 45)
+# Measured directly against all 5 fixtures in tests/fixtures/ by scanning
+# for long horizontal dark pixel runs (legend top/bottom borders) and
+# vertical dark runs (left/right borders). Every source has the legend
+# in the exact same absolute position (81, 26, 239, 64), which is
+# (6, 6, 164, 44) plot-relative given bbox (75, 20, ...).
+#
+# Earlier constant was (0, 0, 145, 45): over-extended 6px past the
+# legend into the top-left plot interior (clipping real curve pixels
+# on three_month) AND under-extended 19px on the right (missing the
+# legend swatch's right edge on some fetches where OCR rendered the
+# swatch a few pixels wider). New zone is tight to the legend rectangle.
+LEGEND_EXCLUSION_PLOT_RELATIVE = (6, 6, 164, 44)
 
 
 @dataclass
@@ -147,6 +154,12 @@ def trace_curve(img: np.ndarray, calib: AxisCalibration) -> pd.DataFrame:
 
     rows: list[tuple[pd.Timestamp, float]] = []
     columns_dropped_width = 0
+    # Track the last emitted row so we can pick trend-consistent endpoints
+    # on wide (near-vertical) columns instead of collapsing to the median.
+    # The median-per-column behavior was observably flattening sharp
+    # eruption drops on three_month/dec2024_to_now (user reported that
+    # the re-traced dots "aren't capturing the sharp downward drop").
+    prev_row_in_crop: float | None = None
     for col_offset in range(n_columns):
         column_mask = mask[:, col_offset]
         lit_count = int(np.count_nonzero(column_mask))
@@ -162,13 +175,29 @@ def trace_curve(img: np.ndarray, calib: AxisCalibration) -> pd.DataFrame:
         if lit_count > CURVE_MAX_COLUMN_WIDTH_PIXELS:
             columns_dropped_width += 1
             continue
-        # Median row index of lit pixels — robust to mid-transition stripes.
         row_indices = np.where(column_mask)[0]
-        median_row_in_crop = float(np.median(row_indices))
+        if lit_count <= WIDE_COLUMN_THRESHOLD_PIXELS or prev_row_in_crop is None:
+            # Narrow column (static or near-static curve) — median row is
+            # robust to anti-aliasing and picks up the exact line position.
+            row_in_crop = float(np.median(row_indices))
+        else:
+            # Wide column — the curve crosses vertically in this
+            # timestep, lighting a tall stripe. Median of that stripe
+            # lands mid-transition (which flattens peaks/troughs),
+            # so instead pick the endpoint FARTHER from the previous
+            # emitted row. That continues the direction of motion and
+            # preserves the real extremum at the end of the transition.
+            top = float(row_indices[0])
+            bot = float(row_indices[-1])
+            row_in_crop = (
+                top if abs(top - prev_row_in_crop) > abs(bot - prev_row_in_crop)
+                else bot
+            )
+        prev_row_in_crop = row_in_crop
 
         # Convert back to full-image pixel coordinates.
         original_pixel_x = float(col_offset + x0)
-        original_pixel_y = median_row_in_crop + y0
+        original_pixel_y = row_in_crop + y0
 
         timestamp = calib.pixel_to_datetime(original_pixel_x)
         microrad = calib.pixel_to_microradians(original_pixel_y)

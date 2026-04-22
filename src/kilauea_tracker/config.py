@@ -339,6 +339,16 @@ MAX_PHYSICAL_RATE_MICRORAD_PER_HOUR = 15.0
 # filter interpolate.
 CURVE_MAX_COLUMN_WIDTH_PIXELS = 8
 
+# Columns lighting up between [WIDE_COLUMN_THRESHOLD_PIXELS, CURVE_MAX_COLUMN_WIDTH_PIXELS]
+# blue pixels get special handling in trace_curve. Stripes this tall are
+# near-vertical transitions (eruption drops, rapid rises) where the curve
+# sweeps through several y-rows in one column's time step. Median-per-
+# column on those stripes lands mid-transition and FLATTENS the true
+# extremum. We instead pick the endpoint that continues the direction of
+# motion from the previous column, which preserves peaks and troughs at
+# the cost of one pixel's worth of timing resolution on that column.
+WIDE_COLUMN_THRESHOLD_PIXELS = 3
+
 
 # ─── Phase 2 (2026-04 alignment rewrite): pairwise self-consistency ────────────
 #

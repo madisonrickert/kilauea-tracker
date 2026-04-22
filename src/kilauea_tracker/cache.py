@@ -58,6 +58,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .config import HISTORY_CSV
@@ -119,20 +120,23 @@ def compute_intra_source_frame_offset(
     existing: pd.DataFrame,
     new_rows: pd.DataFrame,
 ) -> tuple[float, int]:
-    """Median (new − existing) y-delta across the overlap region.
+    """Densest-cluster (new − existing) y-delta across the overlap region.
 
     Both inputs are bucketed to `DEDUPE_BUCKET` and reduced to one row
-    per bucket (latest within the bucket, matching what the dedupe step
-    will do downstream). Buckets present in BOTH frames contribute one
-    delta each; the median across those deltas is the returned offset.
+    per bucket. Buckets present in BOTH frames contribute one delta each;
+    we return the CENTER of the tallest 0.2-µrad histogram bin, refined
+    by taking the median of deltas within ±0.2 µrad of that peak.
 
-    Returns `(0.0, 0)` when there is no overlap — the caller should
-    leave new rows as-is in that case and (probably) log a warning,
-    since appending without an anchor is the failure mode this whole
-    function exists to prevent.
+    Why mode-of-histogram rather than plain median: when the existing
+    CSV already contains parallel-track contamination (two y-levels that
+    alternate bucket-to-bucket), a plain median lands between the two
+    tracks and produces an offset that's WRONG for both — which then
+    re-contaminates the next fetch and amplifies over time. The
+    densest-cluster estimator snaps to whichever track dominates the
+    overlap region, breaking the compounding feedback loop. For the
+    clean unimodal case it's numerically equivalent to the median.
 
-    Median (not mean) so a single wildly-wrong value in the overlap
-    region can't drag the entire frame offset off-true.
+    Returns `(0.0, 0)` when there is no overlap.
     """
     if existing is None or new_rows is None:
         return 0.0, 0
@@ -155,8 +159,25 @@ def compute_intra_source_frame_offset(
     if len(merged) == 0:
         return 0.0, 0
 
-    deltas = merged[f"{TILT_COL}_new"] - merged[f"{TILT_COL}_existing"]
-    return float(deltas.median()), len(merged)
+    deltas = (merged[f"{TILT_COL}_new"] - merged[f"{TILT_COL}_existing"]).to_numpy()
+    if len(deltas) < 5:
+        return float(np.median(deltas)), len(merged)
+
+    lo, hi = float(np.min(deltas)), float(np.max(deltas))
+    span = hi - lo
+    if span < 0.5:
+        # Unimodal enough — median is fine and has less variance than
+        # histogram center.
+        return float(np.median(deltas)), len(merged)
+    bin_width = 0.2
+    edges = np.arange(lo - bin_width, hi + 2 * bin_width, bin_width)
+    counts, _ = np.histogram(deltas, bins=edges)
+    peak_idx = int(np.argmax(counts))
+    peak_center = float(edges[peak_idx] + bin_width / 2.0)
+    in_peak = np.abs(deltas - peak_center) <= bin_width
+    if int(in_peak.sum()) >= 3:
+        return float(np.median(deltas[in_peak])), len(merged)
+    return peak_center, len(merged)
 
 
 def append_history(
