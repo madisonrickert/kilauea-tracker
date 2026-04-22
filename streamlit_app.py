@@ -1673,36 +1673,42 @@ with st.expander("🔬 Transcription quality inspector"):
                 draw.line((px, y0, px, y0 + 6), fill=(255, 140, 0, 220), width=1)
 
         # ── Integer-µrad gridlines (dashed, cyan) ─────────────────────
-        # Step chosen adaptively so lines don't overlap on wide-range
-        # plots (e.g. dec2024_to_now spans ~140 µrad — 1-µrad lines
-        # would pack together illegibly). Range is CLIPPED to the OCR-
-        # labelled extrema, not the bbox extrapolation — the bbox
-        # extends a few pixels past the outermost printed ticks into
-        # axis-margin whitespace where no real data renders, and drawing
-        # gridlines there (e.g. three_month's "-30" when the bottom tick
-        # is actually at "-25") is misleading.
+        # Step is inferred from the OCR'd labels themselves (minimum
+        # adjacent difference == USGS's true tick interval) so our
+        # gridlines match USGS's 1:1. OCR gaps (missing '0' on week,
+        # etc.) show up as integer multiples of the base step, and
+        # `min(diffs)` correctly recovers the base. Falls back to a
+        # span-based heuristic only when OCR returned <2 labels.
+        # Range is clipped to the OCR'd extrema so we don't draw lines
+        # in axis-margin whitespace past the outermost printed ticks.
         if layers.get("ygrid"):
-            label_vals = [v for _, v in (calibration.y_labels_found or [])]
-            if label_vals:
-                lo, hi = float(min(label_vals)), float(max(label_vals))
+            labels_sorted = sorted(
+                (v for _, v in (calibration.y_labels_found or []))
+            )
+            if len(labels_sorted) >= 2:
+                lo, hi = float(labels_sorted[0]), float(labels_sorted[-1])
+                diffs = [
+                    labels_sorted[i + 1] - labels_sorted[i]
+                    for i in range(len(labels_sorted) - 1)
+                ]
+                step = float(min(d for d in diffs if d > 1e-6))
             else:
                 y_top = calibration.pixel_to_microradians(y0)
                 y_bot = calibration.pixel_to_microradians(y1)
                 lo, hi = sorted((y_top, y_bot))
-            span = hi - lo
-            if span < 10:
-                step = 1
-            elif span < 30:
-                step = 2
-            elif span < 60:
-                step = 5
-            elif span < 120:
-                step = 10
-            else:
-                step = 20
-            start = int(np.ceil(lo / step) * step)
-            end = int(np.floor(hi / step) * step)
-            for val in range(start, end + 1, step):
+                span = hi - lo
+                step = 1.0 if span < 10 else 5.0 if span < 60 else 20.0
+
+            # Generate gridline values at `step` increments inside [lo, hi].
+            # Build as a list of floats since step may be fractional (e.g. 0.5
+            # on two_day). Align to `step` so our lines pass through USGS's
+            # printed ticks exactly.
+            start = np.ceil(lo / step) * step
+            end = np.floor(hi / step) * step
+            n_lines = int(round((end - start) / step)) + 1
+            grid_values = [start + i * step for i in range(max(0, n_lines))]
+
+            for val in grid_values:
                 py = val_to_py(val)
                 if not (y0 <= py <= y1):
                     continue
@@ -1713,7 +1719,13 @@ with st.expander("🔬 Transcription quality inspector"):
                         width=1,
                     )
                 if font is not None:
-                    label = f"{val:+d}"
+                    # Format integer steps as "+N"/"-N" and fractional
+                    # steps as "+N.N"/"-N.N" so two_day's "0.5" doesn't
+                    # render as "+0".
+                    if abs(step - round(step)) < 1e-6:
+                        label = f"{int(round(val)):+d}"
+                    else:
+                        label = f"{val:+.1f}"
                     lw = (
                         draw.textlength(label, font=font)
                         if hasattr(draw, "textlength")
