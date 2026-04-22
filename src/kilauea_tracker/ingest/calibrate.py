@@ -45,6 +45,7 @@ from ..config import (
     ANCHOR_FIT_MIN_OVERLAP_BUCKETS,
     ANCHOR_FIT_TRIM_HOURS,
     DATA_DIR,
+    X_END_MAX_AGE_HOURS,
     X_WINDOW_EXPECTED_HOURS,
     X_WINDOW_TOLERANCE_HOURS,
     Y_CALIBRATION_MAX_RESIDUAL_MICRORAD,
@@ -565,6 +566,23 @@ def calibrate_axes(
                     f"dec2024_to_now x-window span out of plausible range: "
                     f"{span_hours:.1f} h"
                 )
+
+        # Phase 1b extension: x_end must be close to "now". A multi-digit
+        # year OCR misread (e.g. 2026 → 2008 observed 2026-04-22) produces
+        # a VALID-span range that nonetheless places the capture in the
+        # wrong era; the existing per-source CSV has no temporal overlap
+        # and the downstream frame-alignment then appends in raw frame,
+        # poisoning the CSV. Reject such captures here.
+        now_utc = pd.Timestamp.now("UTC").tz_localize(None)
+        age_hours = (now_utc - x_end).total_seconds() / 3600.0
+        if abs(age_hours) > X_END_MAX_AGE_HOURS:
+            raise CalibrationError(
+                f"x_end implausibly far from now for {source_name}: "
+                f"x_end={x_end} is {age_hours:.1f} h from now "
+                f"(limit ±{X_END_MAX_AGE_HOURS} h). "
+                f"Likely a multi-digit year OCR misread. PSM={psm_used}, "
+                f"raw={title_raw!r}"
+            )
 
     # Record this run's slope in the rolling history so future runs can
     # check against it. Done only after all guards have passed — a rejected

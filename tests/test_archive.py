@@ -171,16 +171,16 @@ def test_promote_partial_conflict_appends_only_new_buckets(tmp_archive: Path):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_archive_priority_just_below_digital():
-    """The archive must be the second-highest priority source so it wins
-    priority contests against everything except the digital reference.
+def test_archive_is_last_in_source_priority_under_phase_2():
+    """Post-v3 rewrite: archive is a pure gap-filler (contributes only for
+    buckets no live source covers). It sits at the END of SOURCE_PRIORITY
+    and loses every tie with a live source.
     """
     assert ARCHIVE_SOURCE_NAME == "archive"
     assert SOURCE_PRIORITY[0] == "digital"
-    assert SOURCE_PRIORITY[1] == "archive"
-    # Everything else comes after.
+    assert SOURCE_PRIORITY[-1] == "archive"
     assert "two_day" in SOURCE_PRIORITY
-    assert SOURCE_PRIORITY.index("archive") < SOURCE_PRIORITY.index("two_day")
+    assert SOURCE_PRIORITY.index("two_day") < SOURCE_PRIORITY.index("archive")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -188,15 +188,14 @@ def test_archive_priority_just_below_digital():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_archive_wins_priority_contest_over_drifted_per_source(tmp_archive: Path):
-    """End-to-end check that the reconciler sources archived timestamps
-    from the archive, even when a live per-source CSV has a different
-    (drifted) value at the same timestamp.
-
-    Setup: an archive with a known value at T1. A `two_day` per-source
-    CSV with a drifted value at the same T1 (and an extra fresh row at
-    T2). After reconcile, the merged view should match the archive at
-    T1 and the two_day source at T2.
+def test_live_source_wins_over_drifted_archive_under_phase_2(tmp_archive: Path):
+    """Post-v3 rewrite: the live source wins the contested bucket. This is
+    the deliberate inversion from v2 (where archive dominated) — the old
+    keep-first archive would lock in stale values under a scalar-offset
+    reconcile that couldn't correct y-slope errors. Phase 2's pairwise
+    calibration recovers each live source's y-frame fresh on every run,
+    so a drifted archive row is no longer more trustworthy than a
+    recalibrated live trace.
     """
     archive_df = _df(["2026-01-01 00:00:00"], [9.0])
     two_day_df = _df(
@@ -206,18 +205,15 @@ def test_archive_wins_priority_contest_over_drifted_per_source(tmp_archive: Path
     sources = {"archive": archive_df, "two_day": two_day_df}
     merged, report = reconcile_sources(sources, proximity_minutes=0)
 
-    # T1 should match the archive (9.0), not the drifted two_day (9.7).
+    # T1: live (two_day) wins, archive does NOT contribute.
     t1_row = merged[merged[DATE_COL] == pd.Timestamp("2026-01-01 00:00:00")]
     assert len(t1_row) == 1
-    # The exact value depends on whether two_day got aligned against the
-    # archive (it should have — anchor=archive, two_day aligns to it).
-    # After alignment, two_day's frame matches archive's frame, and the
-    # archive wins the priority contest at T1.
-    assert t1_row[TILT_COL].iloc[0] == pytest.approx(9.0)
+    assert t1_row[TILT_COL].iloc[0] == pytest.approx(9.7)
 
-    # T2 should be present (only two_day has it), in the archive's frame.
+    # T2: only two_day has it.
     t2_row = merged[merged[DATE_COL] == pd.Timestamp("2026-01-01 12:00:00")]
     assert len(t2_row) == 1
+    assert t2_row[TILT_COL].iloc[0] == pytest.approx(10.5)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

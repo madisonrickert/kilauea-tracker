@@ -7,29 +7,27 @@ appends any 15-min buckets that aren't already in the archive. Buckets
 already present in the archive are left alone, even if the new merged
 view has a different value for them. **First observation wins, forever.**
 
-The archive then feeds back into `reconcile.reconcile_sources()` as a
-high-priority source (`SOURCE_PRIORITY` slot just below `digital`). Once
-a row is in the archive, the reconciler sources it from the archive in
-all future runs — immune to drift in the live per-source CSVs.
+Post-v3-rewrite role
+--------------------
 
-Why this exists
----------------
+The archive is a PURE GAP-FILLER in the merged view: it contributes to
+`tilt_history.csv` only for buckets where no live source has coverage.
+Typical use: pre-`dec2024_to_now`-window history (anything before late
+Dec 2024) where no rolling PNG can still be re-traced.
 
-Frame alignment in `cache.append_history` (the 2026-04 fix) keeps each
-per-source CSV in a single y-frame forever. But that fix only protects
-the live per-source files going forward. It doesn't help if:
+This is a deliberate downgrade from v2, where archive sat at priority
+slot 2 just below digital and won every future contest against drifting
+live sources. The v3 pairwise-self-consistency calibration recovers
+each live source's y-slope and intercept directly, so a stale archive
+row is no longer more trustworthy than a freshly-recalibrated live
+trace — in fact it's less trustworthy, because the archive was
+populated under the old scalar-offset reconcile that couldn't correct
+y-slope errors.
 
-  - A per-source CSV is wiped and rebuilt from scratch (e.g. an operator
-    re-ingests after an OCR bug fix). The new file's first frame may be
-    different from the old file's first frame.
-  - A future ingest pipeline change inadvertently re-introduces drift in
-    a way the regression tests don't catch.
-
-The archive is the durable belt-and-suspenders: a frozen historical
-record of "what we observed at this timestamp the first time we ever
-observed it." Even if every per-source CSV gets corrupted, the merged
-view still produces the right answer for archived timestamps because
-the archive wins the reconciler's priority contest.
+The archive remains immutable keep-first for promotion: once a row is
+written it is never overwritten, preserving the diagnostic value of
+"what did we first observe at this timestamp." A backup of the pre-v3
+archive lives at `data/archive_v1.csv` as a frozen snapshot.
 
 Why "keep first" instead of "keep best"
 ---------------------------------------

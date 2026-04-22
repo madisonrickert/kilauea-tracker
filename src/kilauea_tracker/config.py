@@ -94,17 +94,22 @@ ALL_SOURCES: tuple[TiltSource, ...] = (
 # legacy entirely; dec2024_to_now covers the same Jul-Nov 2025 range with
 # higher density and a single consistent y-frame.
 #
-# This order is consulted by the *merge* step in reconcile.py: when two
-# sources both contain data for the same 15-min bucket, the one earlier in
-# this tuple wins.
+# Phase 2 note: reconcile.py no longer uses SOURCE_PRIORITY for merge
+# selection — the merge now picks by best effective resolution (product
+# of the source's solved y-slope correction `a_i` and a per-source
+# µrad/pixel fallback). This tuple is retained because it enumerates
+# every valid source name the system supports; tests and helpers still
+# reference it as the canonical source list. Archive moved to the end
+# because it is now a pure gap-filler (contributes only when no live
+# source covers a bucket).
 SOURCE_PRIORITY: tuple[str, ...] = (
     "digital",
-    "archive",
     "two_day",
     "week",
     "month",
     "dec2024_to_now",
     "three_month",
+    "archive",
 )
 
 # Alignment order — DIFFERENT from SOURCE_PRIORITY. Alignment is a topological
@@ -294,6 +299,16 @@ X_WINDOW_EXPECTED_HOURS: dict[str, float] = {
 }
 X_WINDOW_TOLERANCE_HOURS = 2.0
 
+# Phase 1b (extension). The title OCR can return a valid-span range whose
+# ABSOLUTE year is wrong — e.g. today's `two_day` capture was read as
+# `2008-04-20 → 2008-04-22` (48-hour span, passes the window check) when
+# the real title said `2026-04-20 → 2026-04-22`. Multi-digit year
+# misreads slip past the single-digit recovery in `_recover_ocr_year_misread`.
+# Catch them with a recency check: `x_end` must be within this many hours
+# of `now` (in UTC). USGS occasionally runs behind by several hours, so
+# 72 h gives a comfortable margin while still rejecting the 18-year slip.
+X_END_MAX_AGE_HOURS = 72.0
+
 # Phase 1c. Anchor-referenced calibration cross-check. Fits
 # `digital = a * png + b` via Huber robust regression for any PNG source
 # that temporally overlaps digital (Jan-Jun 2025). If the fit produces
@@ -323,3 +338,79 @@ MAX_PHYSICAL_RATE_MICRORAD_PER_HOUR = 15.0
 # artifact cluster. Drop the column and let the downstream rolling-median
 # filter interpolate.
 CURVE_MAX_COLUMN_WIDTH_PIXELS = 8
+
+
+# ─── Phase 2 (2026-04 alignment rewrite): pairwise self-consistency ────────────
+#
+# Replaces the old scalar-offset + piecewise-residual + proximity-gate +
+# archive-age-demotion stack with a single well-specified algorithm:
+#
+#   1. For every pair (i, j) of sources with temporal overlap, compute the
+#      OLS regression  y_i = α_ij · y_j + β_ij  over bucket-aligned pairs.
+#   2. Under the model  y_i(t) = a_i · true(t) + b_i  we have
+#      α_ij = a_i / a_j  and  β_ij = b_i − α_ij · b_j.
+#   3. Pin (a_digital, b_digital) = (1, 0). Solve two least-squares systems
+#      for {a_i} then {b_i}.
+#   4. Apply corrections true_i(t) = (y_i(t) − b_i) / a_i per source.
+#   5. Merge by best effective resolution per bucket, rejecting outliers
+#      via MAD (median absolute deviation) from the per-bucket median.
+#
+# See `src/kilauea_tracker/reconcile.py` for the full algorithm and
+# `.claude/plans/foamy-yawning-horizon.md` for the design rationale.
+
+# Minimum bucket-aligned overlap per pair before its OLS fit is trusted.
+# Below this the pair contributes no constraint — too few points to
+# resolve slope (α_ij) from intercept (β_ij).
+PAIRWISE_MIN_OVERLAP_BUCKETS = 50
+
+# Huber-like cutoff on the cross-source MAD outlier check at merge time.
+# A source's corrected value is dropped from the bucket's merge candidate
+# set when it exceeds  max(MAD_OUTLIER_SIGMA_FLOOR_MICRORAD,
+# MAD_OUTLIER_SIGMA_MULTIPLIER * σ_MAD)  from the bucket's unweighted
+# median.  The floor keeps the check meaningful at buckets where all
+# sources agree (σ_MAD ≈ 0).
+MAD_OUTLIER_SIGMA_MULTIPLIER = 3.0
+MAD_OUTLIER_SIGMA_FLOOR_MICRORAD = 2.0
+
+# Blending zone for K≥2 → K=1 handoffs (the canonical day-90 boundary where
+# three_month ends and only dec2024_to_now covers further back). Inside
+# this many hours of the transition, merge uses a linear taper between the
+# K≥2 consensus and the K=1 source's corrected value so the curve doesn't
+# step. Outside the zone, pure best-effective-resolution wins.
+K1_HANDOFF_BLEND_HOURS = 6.0
+
+# Post-merge continuity audit: flag any adjacent-bucket step exceeding this
+# many µrad into `ReconcileReport.continuity_violations` for post-hoc
+# diagnosis. Not a hard fail — the signal can legitimately step by several
+# µrad during DI transitions — but a surge in violations is an actionable
+# regression signal.
+CONTINUITY_WARNING_THRESHOLD_MICRORAD = 4.0
+
+# Sanity bounds on the joint (a, b) solve. A source whose fit moves it by
+# more than these values is almost certainly suffering a calibration bug
+# Phase 1 should have caught; apply the correction anyway but flag it as
+# a transcription failure candidate.
+PAIRWISE_MAX_A_DEVIATION_FRACTION = 0.50
+PAIRWISE_MAX_B_MICRORAD = 30.0
+
+# Effective-resolution fallback per source (µrad per plot pixel). Used as
+# the merge tie-breaker when two sources both have a corrected value for
+# the same 15-min bucket. Tighter = wins. Values reflect the typical
+# µrad/px ratio of each USGS PNG's y-axis scale (≈ y-range / plot-height):
+#   two_day ≈ 6 µrad / 225 px ≈ 0.027 µrad/px
+#   week    ≈ 20 µrad / 225 px ≈ 0.09 µrad/px
+#   month   ≈ 30 µrad / 225 px ≈ 0.13 µrad/px
+#   three_month ≈ 40 µrad / 225 px ≈ 0.18 µrad/px
+#   dec2024_to_now ≈ 140 µrad / 225 px ≈ 0.62 µrad/px
+# Digital is the authoritative ground-truth CSV — treat its resolution as
+# tight enough to dominate every per-bucket tie when it has coverage.
+# Archive is a derived gap-filler — it loses every tie with a live source.
+EFFECTIVE_RESOLUTION_FALLBACK_MICRORAD_PER_PIXEL: dict[str, float] = {
+    "digital": 0.001,
+    "two_day": 0.027,
+    "week": 0.09,
+    "month": 0.13,
+    "three_month": 0.18,
+    "dec2024_to_now": 0.62,
+    "archive": 1000.0,  # effectively last-place; only wins K=0 gaps
+}

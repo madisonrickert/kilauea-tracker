@@ -1,65 +1,65 @@
-"""Per-source reconciliation: anchor-based alignment + priority merge.
+"""Per-source reconciliation via pairwise self-consistency calibration.
 
-Replaces the old cascading-update logic in `ingest.pipeline`. Under the
-previous architecture each source aligned against the cache-as-of-now and
-then overwrote overlapping buckets via last-write-wins dedupe — order-
-dependent, no provenance, errors compounded as each source's misalignment
-got baked into the cache that later sources then aligned against.
+All five USGS PNG sources (`two_day`, `week`, `month`, `three_month`,
+`dec2024_to_now`) are different time-window renderings of the SAME
+underlying tilt signal (station UWD, Az 300°). `digital` is the same
+signal in authoritative research-release CSV form for Jan-Jun 2025. They
+should agree exactly modulo transcription error (OCR mis-reads of the
+y-axis labels, sub-pixel trace ambiguity, gridline bleed).
 
-This module decouples raw source storage from the merged "view" the model
-consumes. Inputs to reconciliation are the raw per-source DataFrames. The
-output is a single merged tilt history that is a *deterministic* function
-of those inputs and `config.SOURCE_PRIORITY`.
+The v3 alignment rewrite models each source as a linear image of a
+single underlying truth:
 
-Algorithm
----------
+    y_i(t) = a_i · true(t) + b_i + noise_i(t)
 
-Two orderings live in `config.py` and they are deliberately distinct:
+where `a_i` absorbs y-slope calibration error (OCR'd y-axis labels
+yielding a slope off by a few %) and `b_i` absorbs y-intercept error
+(y-range shifts between USGS re-renders). Under this model, for any
+pair (i, j) with temporal overlap we can measure
 
-  - `ALIGNMENT_ORDER` is the *topological* order in which sources are aligned.
-    Each source's y-offset is computed against the union of all already-
-    aligned sources, so the order has to ensure every subsequent source
-    has temporal overlap with at least one prior source. Digital anchors
-    first (Jan-Jun 2025); DEC2024_TO_NOW comes next because it's the only
-    source that overlaps both digital and the recent rolling-window PNGs;
-    legacy follows; the rolling-window PNGs last.
-  - `SOURCE_PRIORITY` is the *quality* order used by the per-bucket merge.
-    When two sources both have data for the same 15-min bucket, the one
-    earlier in `SOURCE_PRIORITY` wins. This is digital → two_day → week →
-    month → legacy → dec2024_to_now → three_month, putting
-    highest-resolution recent data on top.
+    α_ij = a_i / a_j
+    β_ij = b_i - α_ij · b_j
 
-Steps:
+via ordinary least squares on bucket-aligned paired samples. With
+digital pinned to (a=1, b=0) by convention, a single joint least-squares
+solve over all pair measurements recovers every other source's
+calibration factors. Each source is then corrected pointwise via
+    corrected_i(t) = (y_i(t) - b_i) / a_i
+and merged by best effective resolution at 15-min granularity.
 
-1.  Walk sources in `ALIGNMENT_ORDER`. The first one with data becomes the
-    *anchor* — offset 0, defines the global y-frame.
-2.  Each subsequent source computes ONE y-offset against the union of all
-    already-aligned sources, in their overlap region. The offset is the
-    median bucket-level delta at `ALIGNMENT_BUCKET` granularity. If the
-    overlap is too small or the offset is implausibly large, the source is
-    left unaligned and a warning is recorded — its raw values are still
-    included in the merge but will lose per-bucket contests to aligned
-    higher-priority sources.
-3.  After every source has been processed, walk the union of 15-min buckets
-    across all sources. For each bucket, pick the value from the
-    highest-priority source (in `SOURCE_PRIORITY` order) that has data
-    there. The result is the merged tilt history.
+Why this replaces the previous architecture
+-------------------------------------------
 
-Why this fixes the whack-a-mole
--------------------------------
+The predecessor stack — scalar median offset per source, piecewise
+residuals by nearest higher-priority reference, proximity gating,
+archive-age demotion — tried to approximate a time-varying bias with a
+succession of constants and kept producing visible step discontinuities
+at source-handoff boundaries. That's because the actual bias is a
+y-slope error (e.g. the dec2024_to_now PNG traces to values satisfying
+`digital = 1.38 · dec + 5.3`), and a scalar offset can only hide a
+slope error at one tilt level; the error resurfaces everywhere else.
 
-- **Order-independent.** Every source's offset is computed against a *fixed*
-  reference (the union of higher-priority sources), not against a moving
-  cache. Re-running gives the same answer.
-- **Single-pass alignment.** No source's offset depends on its own previous
-  contributions to the cache, so misalignment errors don't compound.
-- **Provenance preserved.** Per-source files on disk are untouched by
-  reconciliation; only the merged view is recomputed. We can always trace
-  any sample in `tilt_history.csv` back to its source by looking up its
-  bucket in the per-source files.
-- **Conflicts become signal.** A bucket where two aligned sources disagree
-  by more than `CONFLICT_THRESHOLD_MICRORAD` is recorded with both values
-  and provenance, so the warning is actionable instead of mysterious.
+The pairwise-fit model recovers the slope correction directly. It is
+order-independent, handles sources that have no direct overlap with
+digital (chain-propagated through intermediate sources), and produces a
+single self-consistent set of calibrations each run.
+
+Merge policy
+------------
+
+For each 15-min bucket, the corrected value from the source with the
+smallest effective resolution (a_i · µrad/px) wins. Archive is a pure
+gap-filler: it contributes only when no live source has a sample in the
+bucket (pre-Dec-2024 historical data). MAD outlier rejection per-bucket
+discards any source whose corrected value exceeds 3·σ_MAD from the
+unweighted median across sources in that bucket; the discard is recorded
+as a transcription-failure candidate for post-hoc investigation.
+
+At K≥2 → K=1 transitions (canonical case: day-90 boundary where
+three_month's window ends and only dec2024_to_now extends further back)
+a ±6h linear blend between the K≥2 consensus and the K=1 corrected
+value prevents a visible step where the set of contributing sources
+shrinks abruptly.
 """
 
 from __future__ import annotations
@@ -67,145 +67,96 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from .config import (
-    ALIGNMENT_ORDER,
-    ARCHIVE_MAX_AGE_FOR_PRIORITY_DEMOTION_DAYS,
     ARCHIVE_SOURCE_NAME,
-    SOURCE_PRIORITY,
+    CONTINUITY_WARNING_THRESHOLD_MICRORAD,
+    DIGITAL_SOURCE_NAME,
+    EFFECTIVE_RESOLUTION_FALLBACK_MICRORAD_PER_PIXEL,
+    K1_HANDOFF_BLEND_HOURS,
+    MAD_OUTLIER_SIGMA_FLOOR_MICRORAD,
+    MAD_OUTLIER_SIGMA_MULTIPLIER,
+    PAIRWISE_MAX_A_DEVIATION_FRACTION,
+    PAIRWISE_MAX_B_MICRORAD,
+    PAIRWISE_MIN_OVERLAP_BUCKETS,
 )
 from .model import DATE_COL, TILT_COL
 
-# Bucket size for the per-source y-offset calculation. Coarser than the
-# 15-min merge bucket so that sparse sources (legacy at ~6h spacing,
-# DEC2024_TO_NOW at ~16h) can find enough overlapping buckets to compute a
-# meaningful median against denser higher-priority sources.
+# Bucket size for pairwise OLS fits. Coarser than the 15-min merge bucket
+# because per-source sampling is variable and coarser buckets yield
+# denser paired measurements with less intra-bucket noise.
 ALIGNMENT_BUCKET = "1h"
 
-# Bucket size for the priority-based merge. The merged tilt history retains
-# one row per 15-min bucket — fine enough to preserve real samples, coarse
-# enough to merge near-duplicate re-traces from the same source.
+# Bucket size for the final merged output. One row per 15-min bin, fine
+# enough to preserve real samples and coarse enough to absorb column-level
+# jitter from re-traced overlapping captures.
 MERGE_BUCKET = "15min"
-
-# Need at least this many overlapping ALIGNMENT_BUCKETs before we trust the
-# computed median offset. Below this we leave the source unaligned and warn.
-MIN_OVERLAP_BUCKETS = 5
-
-# Refuse to apply offsets larger than this. A delta this big is a calibration
-# bug, not y-axis drift, and silently shifting the data by 15+ µrad would
-# mask the real problem.
-MAX_TRUSTED_OFFSET_MICRORAD = 15.0
-
-# A merged bucket where two aligned sources disagree by more than this is
-# flagged as a conflict in the report. The HIGHER-priority source's value is
-# what survives the merge regardless — the conflict is informational.
-CONFLICT_THRESHOLD_MICRORAD = 1.0
-
-# Proximity-gating radius. A low-priority source's sample is dropped from the
-# merge candidate set if any higher-priority source has a sample within this
-# many minutes. The motivation is dec2024_to_now's local y-frame distortion:
-# even after the median offset is applied, individual samples can still be a
-# few µrad off from the trusted reference. When such a sample lands in a
-# 15-min bucket the higher-priority source happens not to cover, it wins the
-# bucket by default and renders as a visible "spike" between adjacent
-# higher-priority samples. The proximity gate drops these would-be spikes
-# without affecting samples in genuine multi-hour gaps where dec2024_to_now
-# is providing real coverage.
-#
-# 60 min was chosen because:
-#   - digital has 30-min spacing, so a dec2024_to_now sample within ±60 min
-#     of a digital sample is always sandwiched between two digital samples
-#     (or right next to one) and adds no information.
-#   - legacy is irregular at ~6h spacing, so the gate doesn't drop
-#     dec2024_to_now samples that are filling real legacy gaps (>1h from
-#     any legacy sample).
-PROXIMITY_GATE_MINUTES = 60
-
-# Per-source overrides for the proximity gate radius. Sources NOT listed
-# here use PROXIMITY_GATE_MINUTES.
-#
-# `dec2024_to_now` gets a much larger 12-hour radius because its traced
-# curve has non-uniform local y-frame distortion: even after the global
-# median offset is applied, individual samples can still sit several µrad
-# off from the trusted reference. Within the digital-overlap range a
-# 60-minute gate is enough (digital has 30-min spacing). But within the
-# legacy-overlap range, legacy is sparse (~14h average spacing), so the
-# 60-min gate doesn't drop the dec2024_to_now samples that fall between
-# legacy samples — they then render as ~5 µrad sawtooth jumps in the
-# chart. A 12-hour gate aligns with legacy's typical spacing and ensures
-# dec2024_to_now only contributes in true multi-hour gaps.
-#
-# In the post-Nov 2025 → Jan 2026 region (no legacy, no digital, no PNG
-# coverage) dec2024_to_now is alone and the gate is a no-op — every
-# dec2024_to_now sample is far from any higher-priority sample, so they
-# all survive. That's the legitimate gap-fill case.
-PROXIMITY_GATE_OVERRIDES_MINUTES: dict[str, int] = {
-    "dec2024_to_now": 12 * 60,
-}
-
-# Sources for which we run a second-pass piecewise realignment after the
-# first-pass single-offset alignment. The piecewise pass computes per-source
-# residual offsets against each higher-priority source individually so that
-# a source with non-uniform local y-frame distortion (today: dec2024_to_now)
-# can be locally re-corrected. The realignment is purely additive on top of
-# the first-pass global offset, so a residual of 0 means "the global offset
-# was already correct in this region." See _piecewise_realign() for details.
-# Sources that get a second-pass piecewise realignment. The user-reported
-# 2026-04 discontinuities across 04-11/04-12, 04-17, 04-18, 04-19 and
-# 03-10 were all source-handoff steps: each PNG's global median offset
-# sits in a slightly different place relative to the anchor, so the
-# merged curve stepped by several µrad whenever the winning source
-# changed at a bucket boundary. The piecewise pass computes per-source
-# residual offsets against every higher-priority source individually and
-# applies the residual of whichever higher-priority source's nearest
-# sample is closest in time — smoothing the handoff into a continuous
-# frame.
-#
-# All rolling-window PNG sources are included because they all exhibit
-# the same behaviour (dec2024_to_now was the first to be caught because
-# its long-window trace was most visibly distorted; the dense short-
-# window sources have the same issue at a smaller scale that still
-# shows up as visible steps at handoff buckets).
-PIECEWISE_REALIGN_SOURCES: frozenset = frozenset({
-    "dec2024_to_now",
-    "three_month",
-    "month",
-    "week",
-    "two_day",
-})
-
-# Internal sentinel for archive rows younger than the priority-demotion
-# cutoff. Split out from ARCHIVE_SOURCE_NAME in reconcile_sources so that
-# proximity gating, piecewise realignment, and the merge step all see a
-# separate logical source with a lowest-priority slot — a freshly-archived
-# contaminated row must lose to any live source that covers the same
-# bucket (that's the whole point of the demotion, broken until 2026-04
-# when the proximity gate was still using archive's un-demoted priority
-# and silently dropping the live-source rows that should have won).
-_ARCHIVE_RECENT_NAME = "__archive_recent"
 
 
 @dataclass
 class SourceAlignment:
-    """How one source was treated during reconciliation."""
+    """Per-source outcome of pairwise self-consistency calibration."""
 
     name: str
-    rows_in: int = 0                  # raw row count of the input DataFrame
-    offset_microrad: Optional[float] = None  # y-offset applied (None = unaligned)
-    overlap_buckets: int = 0          # how many alignment buckets the offset was computed over
-    is_anchor: bool = False           # True for the first source (offset by definition 0)
-    note: Optional[str] = None        # human-readable explanation when offset is None
-    rows_proximity_dropped: int = 0   # rows removed by the proximity gate before merge
+    rows_in: int = 0
+    a: float = 1.0                         # recovered y-slope correction
+    b: float = 0.0                         # recovered y-intercept correction
+    pairs_used: int = 0                    # pair constraints involving this source
+    is_anchor: bool = False                # True for the pinned source (digital)
+    note: Optional[str] = None             # human-readable diagnostic
+    rows_mad_rejected: int = 0             # dropped by per-bucket MAD outlier gate
+    effective_resolution_microrad_per_pixel: float = 0.0
+
+    # Back-compat fields consumed by `ingest.pipeline._serialize_reconcile`
+    # and the legacy CLI print loop. These are populated so the existing
+    # run-report JSON structure keeps working.
+    offset_microrad: Optional[float] = None  # = b for back-compat display
+    overlap_buckets: int = 0
+    rows_proximity_dropped: int = 0  # always 0 — proximity gate was removed
     piecewise_residuals: dict[str, float] = field(default_factory=dict)
-    """Per-higher-priority-source residual offsets applied in the second-
-    pass piecewise realignment. Empty unless the source is in
-    PIECEWISE_REALIGN_SOURCES."""
+
+
+@dataclass
+class PairwiseFit:
+    """One pairwise OLS fit y_i = α_ij · y_j + β_ij over overlapping buckets."""
+
+    source_i: str
+    source_j: str
+    alpha: float
+    beta: float
+    overlap_buckets: int
+    residual_std_microrad: float
+
+
+@dataclass
+class TranscriptionFailure:
+    """A bucket-source where the MAD outlier gate rejected a value."""
+
+    bucket: pd.Timestamp
+    source: str
+    value_corrected: float
+    bucket_median: float
+    delta_microrad: float
+
+
+@dataclass
+class ContinuityViolation:
+    """Adjacent merged buckets stepping by more than the warning threshold."""
+
+    bucket_before: pd.Timestamp
+    bucket_after: pd.Timestamp
+    tilt_before: float
+    tilt_after: float
+    delta_microrad: float
 
 
 @dataclass
 class ReconcileConflict:
-    """Two sources disagree about the same 15-min bucket post-alignment."""
+    """Back-compat shim for `_serialize_reconcile`. The new algorithm records
+    transcription_failures instead of conflicts; this struct exists so the
+    JSON serializer keeps working."""
 
     bucket: pd.Timestamp
     winning_source: str
@@ -219,477 +170,545 @@ class ReconcileConflict:
 class ReconcileReport:
     rows_out: int = 0
     sources: list[SourceAlignment] = field(default_factory=list)
-    conflicts: list[ReconcileConflict] = field(default_factory=list)
+    pairs: list[PairwiseFit] = field(default_factory=list)
+    transcription_failures: list[TranscriptionFailure] = field(default_factory=list)
+    continuity_violations: list[ContinuityViolation] = field(default_factory=list)
+    conflicts: list[ReconcileConflict] = field(default_factory=list)  # always empty
     warnings: list[str] = field(default_factory=list)
 
 
 def reconcile_sources(
     sources: dict[str, pd.DataFrame],
     *,
-    proximity_minutes: int = PROXIMITY_GATE_MINUTES,
+    proximity_minutes: int = 0,  # legacy-signature no-op, preserved so callers don't change
 ) -> tuple[pd.DataFrame, ReconcileReport]:
-    """Merge raw per-source tilt data into a single deterministic history.
+    """Merge raw per-source tilt data via pairwise self-consistency
+    calibration into a single deterministic tilt history.
 
     Args:
-        sources: dict mapping source name (must be a member of
-            `config.SOURCE_PRIORITY`) to a raw, unaligned DataFrame with
-            columns `[Date, Tilt (microradians)]`. Sources may be missing or
-            empty — they're just skipped.
-        proximity_minutes: radius for the proximity gate (see
-            `PROXIMITY_GATE_MINUTES`). Pass 0 to disable proximity gating
-            entirely — useful for tests that intentionally construct
-            overlapping sources to exercise the merge step.
+        sources: dict mapping source name (canonical reconcile name) to a
+            raw DataFrame with columns `[Date, Tilt (microradians)]`. The
+            archive source (if present) is used ONLY for gap-filling buckets
+            where no live source has coverage.
+        proximity_minutes: legacy parameter kept for call-site compatibility;
+            the new algorithm does not use a proximity gate.
 
     Returns:
-        `(merged_history_df, report)`. `merged_history_df` has the same
-        canonical schema as `data/tilt_history.csv`. `report` summarizes
-        what each source contributed and any conflicts that surfaced.
+        `(merged_history_df, report)`. The merged frame follows the
+        `data/tilt_history.csv` schema. The report carries the per-source
+        (a, b) corrections, pairwise fits, MAD outliers, and continuity
+        violations for the JSON run report.
     """
+    del proximity_minutes  # intentionally unused; kept in signature
     report = ReconcileReport()
-    aligned: dict[str, pd.DataFrame] = {}
 
-    for name in ALIGNMENT_ORDER:
-        df_raw = sources.get(name)
-        if df_raw is None or len(df_raw) == 0:
+    # Normalize every input DataFrame and split off the archive.
+    live: dict[str, pd.DataFrame] = {}
+    archive_df: Optional[pd.DataFrame] = None
+    for name, raw in sources.items():
+        if raw is None or len(raw) == 0:
             continue
-
-        # Normalize: copy + select canonical columns + drop NaN.
-        df_in = df_raw[[DATE_COL, TILT_COL]].copy()
-        df_in[DATE_COL] = pd.to_datetime(df_in[DATE_COL])
-        df_in = df_in.dropna().sort_values(DATE_COL).reset_index(drop=True)
-        if len(df_in) == 0:
+        df = raw[[DATE_COL, TILT_COL]].copy()
+        df[DATE_COL] = pd.to_datetime(df[DATE_COL])
+        df = df.dropna().sort_values(DATE_COL).reset_index(drop=True)
+        if len(df) == 0:
             continue
-
-        record = SourceAlignment(name=name, rows_in=len(df_in))
-
-        if not aligned:
-            # First source with data becomes the anchor — defines the y-frame.
-            record.is_anchor = True
-            record.offset_microrad = 0.0
-            aligned[name] = df_in
-            report.sources.append(record)
-            continue
-
-        reference = pd.concat(aligned.values(), ignore_index=True)
-        offset, overlap = _median_bucket_offset(df_in, reference)
-        record.overlap_buckets = overlap
-
-        if offset is None:
-            if overlap < MIN_OVERLAP_BUCKETS:
-                record.note = (
-                    f"insufficient overlap with higher-priority sources "
-                    f"({overlap} buckets, need ≥{MIN_OVERLAP_BUCKETS})"
-                )
-            else:
-                # We have overlap but the median delta exceeded the trust limit.
-                record.note = (
-                    f"refused to apply implausibly large offset "
-                    f"(>{MAX_TRUSTED_OFFSET_MICRORAD} µrad)"
-                )
-            report.warnings.append(
-                f"{name}: not aligned — {record.note}"
-            )
-            aligned[name] = df_in  # include unaligned, will lose priority contests
+        if name == ARCHIVE_SOURCE_NAME:
+            archive_df = df
         else:
-            shifted = df_in.copy()
-            shifted[TILT_COL] = shifted[TILT_COL] - offset
-            aligned[name] = shifted
-            record.offset_microrad = offset
+            live[name] = df
 
-        report.sources.append(record)
-
-    if not aligned:
-        report.rows_out = 0
+    if not live:
+        # Archive-only fallback: write out whatever archive we have.
+        if archive_df is not None and len(archive_df) > 0:
+            report.rows_out = len(archive_df)
+            report.warnings.append(
+                "no live sources present; merged history is archive-only"
+            )
+            return archive_df.sort_values(DATE_COL).reset_index(drop=True), report
         return _empty_history_df(), report
 
-    # Split the archive into "old" (historical anchor, keeps priority 2)
-    # and "recent" (<14 days, demoted to lowest priority). The split
-    # happens BEFORE proximity gating and merge so both stages see the
-    # demotion: young archive rows no longer gate live sources, and a
-    # live source wins priority contests at young-archive buckets.
-    #
-    # Without this split, proximity gating (which uses the un-demoted
-    # SOURCE_PRIORITY) would drop live-source rows within 60 min of any
-    # archive row — including young ones — leaving nothing to override
-    # the just-archived bad rows that the demotion was supposed to
-    # protect against.
-    aligned = _split_archive_by_age(aligned)
+    # 1. Pairwise OLS fits over overlapping buckets.
+    pair_fits = _compute_pairwise_fits(live, report)
 
-    # Second-pass piecewise realignment for sources with non-uniform local
-    # y-frame distortion (see PIECEWISE_REALIGN_SOURCES docstring).
-    for target_name in PIECEWISE_REALIGN_SOURCES:
-        aligned, residuals = _piecewise_realign(aligned, target_name)
-        if residuals:
-            record = next(
-                (s for s in report.sources if s.name == target_name), None
-            )
-            if record is not None:
-                record.piecewise_residuals = residuals
+    # 2. Joint least-squares solve for {a_i, b_i}.
+    alignments = _solve_pairwise_calibration(live, pair_fits, report)
 
-    # Drop low-priority samples that would render as spikes between adjacent
-    # higher-priority samples (see PROXIMITY_GATE_MINUTES docstring).
-    if proximity_minutes > 0:
-        gated, gate_drops = _drop_samples_near_higher_priority(
-            aligned, proximity_minutes=proximity_minutes
-        )
-    else:
-        gated, gate_drops = aligned, {}
-    for source_name, n_dropped in gate_drops.items():
-        record = next(
-            (s for s in report.sources if s.name == source_name), None
-        )
-        if record is not None:
-            record.rows_proximity_dropped = n_dropped
+    # 3. Apply corrections per source.
+    corrected = _apply_ab_corrections(live, alignments)
 
-    merged = _merge_by_priority(gated, report)
+    # 4. Merge by best effective resolution with MAD outlier rejection.
+    merged = _merge_best_resolution(corrected, alignments, report, archive_df)
+
+    # 5. Post-merge continuity audit.
+    _audit_continuity(merged, report)
+
     report.rows_out = len(merged)
     return merged, report
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Internals
+# Pairwise OLS fits
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _median_bucket_offset(
-    new_rows: pd.DataFrame,
-    reference: pd.DataFrame,
+def _compute_pairwise_fits(
+    live: dict[str, pd.DataFrame],
+    report: ReconcileReport,
     *,
     bucket_freq: str = ALIGNMENT_BUCKET,
-) -> tuple[Optional[float], int]:
-    """Compute `median(new - reference)` over their overlapping `bucket_freq`
-    buckets. Returns `(offset, overlap_count)`.
+) -> list[PairwiseFit]:
+    """Return one `PairwiseFit` per ordered pair (i, j) with
+    `≥ PAIRWISE_MIN_OVERLAP_BUCKETS` shared `bucket_freq` buckets.
 
-    `offset` is `None` when the offset can't be trusted: either the overlap
-    is below `MIN_OVERLAP_BUCKETS`, or the absolute offset exceeds
-    `MAX_TRUSTED_OFFSET_MICRORAD`. The overlap count is always returned for
-    diagnostic purposes.
-
-    Why median (not mean): a few buckets near eruption transitions disagree
-    wildly across captures because the curve is moving fast and the
-    column-median pixel can land at very different positions. Mean would
-    chase those outliers; median ignores them.
+    Only ordered pairs where `i < j` lexically are computed — the
+    constraint `a_j = α_ji · a_i` is redundant with `a_i = α_ij · a_j`
+    (`α_ji = 1/α_ij`), so one per unordered pair is sufficient.
     """
-    if len(new_rows) == 0 or len(reference) == 0:
-        return None, 0
-
-    new_buckets = (
-        new_rows[[DATE_COL, TILT_COL]]
-        .assign(_b=lambda d: d[DATE_COL].dt.floor(bucket_freq))
-        .groupby("_b")[TILT_COL]
-        .mean()
-    )
-    ref_buckets = (
-        reference[[DATE_COL, TILT_COL]]
-        .assign(_b=lambda d: d[DATE_COL].dt.floor(bucket_freq))
-        .groupby("_b")[TILT_COL]
-        .mean()
-    )
-    overlap_index = new_buckets.index.intersection(ref_buckets.index)
-    overlap_n = len(overlap_index)
-
-    if overlap_n < MIN_OVERLAP_BUCKETS:
-        return None, overlap_n
-
-    deltas = new_buckets.loc[overlap_index] - ref_buckets.loc[overlap_index]
-    offset = float(deltas.median())
-
-    if abs(offset) > MAX_TRUSTED_OFFSET_MICRORAD:
-        return None, overlap_n
-
-    return offset, overlap_n
-
-
-def _piecewise_realign(
-    aligned: dict[str, pd.DataFrame],
-    target_name: str,
-) -> tuple[dict[str, pd.DataFrame], dict[str, float]]:
-    """Refine `target_name`'s alignment by computing per-source RESIDUAL
-    offsets against each higher-priority source individually, then applying
-    the residual associated with whichever higher-priority source is closest
-    in time to each target row.
-
-    The first-pass alignment loop produces a single global offset for each
-    source — the median delta against the union of higher-priority sources.
-    For most sources that's correct, but for sources with non-uniform local
-    y-frame distortion (today: dec2024_to_now) the global median is biased
-    toward the densest co-existing source's overlap region. Less-dense
-    overlap regions are then left with several µrad of residual error.
-
-    This function computes that residual *per higher-priority source* and
-    applies it as an additional correction. After the second pass:
-
-      - In the digital-overlap range, dec2024_to_now uses the residual
-        relative to digital (≈0 by construction, since digital dominated
-        the first-pass median).
-      - In the legacy-overlap range, dec2024_to_now uses the residual
-        relative to legacy. The saw-tooth artifact at the digital→legacy
-        handoff disappears.
-      - In recent dense-PNG overlap, dec2024_to_now uses the residual
-        relative to whichever PNG source has the closest sample.
-
-    Returns `(new_aligned_dict, residuals_by_source)`. The residuals dict
-    is empty when no usable residuals could be computed (e.g. target has
-    no overlap with any higher-priority source).
-    """
-    if target_name not in aligned or len(aligned[target_name]) == 0:
-        return aligned, {}
-
-    target_df = aligned[target_name]
-    priority_index = _priority_index()
-    target_priority = priority_index.get(target_name, len(priority_index))
-
-    # Compute the residual median delta against each higher-priority source
-    # individually, using the SAME bucket granularity as the first-pass
-    # alignment so the numbers are comparable.
-    per_source_residuals: dict[str, float] = {}
-    for other_name, other_df in aligned.items():
-        if other_name == target_name or len(other_df) == 0:
-            continue
-        other_priority = priority_index.get(other_name, len(priority_index))
-        if other_priority >= target_priority:
-            continue
-        residual, n = _median_bucket_offset(target_df, other_df)
-        if residual is not None and n >= MIN_OVERLAP_BUCKETS:
-            per_source_residuals[other_name] = residual
-
-    if not per_source_residuals:
-        return aligned, {}
-
-    # Build a sorted lookup of (date, source_name) for the higher-priority
-    # sources we have residuals for. Each target row gets the residual of
-    # whichever source's nearest sample is closest in time.
-    rows: list[tuple[pd.Timestamp, str]] = []
-    for src_name in per_source_residuals:
-        for d in aligned[src_name][DATE_COL]:
-            rows.append((pd.Timestamp(d), src_name))
-    if not rows:
-        return aligned, per_source_residuals
-
-    rows.sort(key=lambda r: r[0])
-    nearest_lookup = pd.DataFrame(rows, columns=["_date", "_src"])
-    nearest_lookup["_date"] = pd.to_datetime(nearest_lookup["_date"]).astype(
-        "datetime64[ns]"
-    )
-
-    target_sorted = target_df.sort_values(DATE_COL).reset_index(drop=True).copy()
-    target_sorted[DATE_COL] = target_sorted[DATE_COL].astype("datetime64[ns]")
-
-    nearest = pd.merge_asof(
-        target_sorted[[DATE_COL]].copy(),
-        nearest_lookup,
-        left_on=DATE_COL,
-        right_on="_date",
-        direction="nearest",
-    )
-
-    corrections = nearest["_src"].map(per_source_residuals).fillna(0.0)
-
-    new_target = target_sorted.copy()
-    new_target[TILT_COL] = new_target[TILT_COL] - corrections.values
-
-    new_aligned = dict(aligned)
-    new_aligned[target_name] = new_target
-    return new_aligned, per_source_residuals
-
-
-def _drop_samples_near_higher_priority(
-    aligned: dict[str, pd.DataFrame],
-    *,
-    proximity_minutes: int = PROXIMITY_GATE_MINUTES,
-) -> tuple[dict[str, pd.DataFrame], dict[str, int]]:
-    """Drop low-priority samples that fall within `proximity_minutes` of any
-    higher-priority sample.
-
-    Each source can override the default radius via
-    `PROXIMITY_GATE_OVERRIDES_MINUTES`. Sources that opt for a larger
-    radius are dropped more aggressively when higher-priority sources are
-    nearby — used today for dec2024_to_now whose local y-frame distortion
-    means even a "well aligned" sample can render as a sawtooth between
-    legacy samples that are 2-12 hours away.
-
-    Why this exists: dec2024_to_now's traced curve has non-uniform local
-    y-frame distortion. Even after a global median offset is applied, an
-    individual dec2024_to_now sample can still sit a few µrad off from the
-    trusted reference. When such a sample lands in a 15-min merge bucket
-    that no higher-priority source happens to cover, it wins by default and
-    renders as a visible spike between the adjacent higher-priority samples.
-    Proximity gating drops the spike-makers BEFORE the merge, leaving
-    higher-priority sources to render their natural smooth curves and only
-    letting low-priority sources contribute in genuine multi-hour gaps.
-
-    Returns `(gated_aligned, drops_per_source)`. The dict counts how many
-    rows were dropped from each source so the report can surface it.
-    """
-    priority_index = _priority_index()
-    lowest = len(priority_index)
-
-    result: dict[str, pd.DataFrame] = {}
-    drops: dict[str, int] = {}
-
-    for name, df in aligned.items():
-        my_priority = priority_index.get(name, lowest)
-        # Per-source override takes precedence over the caller-supplied default.
-        my_radius = PROXIMITY_GATE_OVERRIDES_MINUTES.get(name, proximity_minutes)
-        proximity = pd.Timedelta(minutes=my_radius)
-        # Build the union of all higher-priority sources' timestamps. We
-        # only care about the dates here; the tilt values don't matter for
-        # proximity testing.
-        higher_dates = []
-        for other_name, other_df in aligned.items():
-            other_priority = priority_index.get(other_name, lowest)
-            if other_priority < my_priority and len(other_df) > 0:
-                higher_dates.append(other_df[DATE_COL])
-
-        if not higher_dates:
-            # No higher-priority sources to gate against — pass through.
-            result[name] = df
-            continue
-
-        higher = pd.concat(higher_dates, ignore_index=True)
-        # Normalize to nanosecond resolution so merge_asof's dtype check
-        # passes — different sources can carry M8[us] vs M8[ns] depending
-        # on how they were ingested (PNG traces produce ns; the digital
-        # CSV via pandas.read_csv produces us).
-        higher = pd.to_datetime(higher).astype("datetime64[ns]")
-        higher = higher.sort_values().reset_index(drop=True)
-
-        df_sorted = df.sort_values(DATE_COL).reset_index(drop=True).copy()
-        df_sorted[DATE_COL] = df_sorted[DATE_COL].astype("datetime64[ns]")
-        higher_df = pd.DataFrame({"_higher_date": higher})
-
-        # merge_asof finds the nearest higher-priority date for each row in
-        # df_sorted in O(n log m) time. Both inputs must be sorted, which
-        # they are.
-        nearest = pd.merge_asof(
-            df_sorted,
-            higher_df,
-            left_on=DATE_COL,
-            right_on="_higher_date",
-            direction="nearest",
+    names = sorted(live.keys())
+    buckets_per_source: dict[str, pd.Series] = {}
+    for name in names:
+        df = live[name]
+        buckets_per_source[name] = (
+            df.assign(_b=lambda d: d[DATE_COL].dt.floor(bucket_freq))
+            .groupby("_b")[TILT_COL]
+            .mean()
         )
-        time_to_higher = (nearest[DATE_COL] - nearest["_higher_date"]).abs()
-        keep_mask = time_to_higher > proximity
 
-        kept = df_sorted[keep_mask].reset_index(drop=True)
-        result[name] = kept
-        n_dropped = int((~keep_mask).sum())
-        if n_dropped > 0:
-            drops[name] = n_dropped
-
-    return result, drops
-
-
-def _priority_index() -> dict[str, int]:
-    """Build the priority lookup used by proximity gating and the merge.
-
-    Extends `SOURCE_PRIORITY` with the internal `_ARCHIVE_RECENT_NAME`
-    sentinel at the lowest slot — that's the source produced by
-    `_split_archive_by_age` for archive rows inside the demotion window.
-    """
-    base = {name: i for i, name in enumerate(SOURCE_PRIORITY)}
-    base[_ARCHIVE_RECENT_NAME] = len(SOURCE_PRIORITY)
-    return base
-
-
-def _split_archive_by_age(
-    aligned: dict[str, pd.DataFrame],
-) -> dict[str, pd.DataFrame]:
-    """Split the archive source into old (`archive`) + recent
-    (`_ARCHIVE_RECENT_NAME`) DataFrames based on the age cutoff.
-
-    The original archive source is retained for rows older than
-    `ARCHIVE_MAX_AGE_FOR_PRIORITY_DEMOTION_DAYS` — those keep their
-    priority-2 slot as a frozen historical anchor. Rows inside the cutoff
-    are moved to the sentinel key with a lowest-priority slot so that
-    every downstream stage (proximity gating, piecewise realignment,
-    merge) treats them as the lowest-priority source.
-    """
-    if ARCHIVE_SOURCE_NAME not in aligned:
-        return aligned
-    df = aligned[ARCHIVE_SOURCE_NAME]
-    if df is None or len(df) == 0:
-        return aligned
-
-    now_utc = pd.Timestamp.now("UTC").tz_localize(None)
-    cutoff = now_utc - pd.Timedelta(
-        days=ARCHIVE_MAX_AGE_FOR_PRIORITY_DEMOTION_DAYS
-    )
-    is_recent = df[DATE_COL] >= cutoff
-    recent_rows = df[is_recent].reset_index(drop=True)
-    old_rows = df[~is_recent].reset_index(drop=True)
-
-    new_aligned = dict(aligned)
-    new_aligned[ARCHIVE_SOURCE_NAME] = old_rows
-    if len(recent_rows) > 0:
-        new_aligned[_ARCHIVE_RECENT_NAME] = recent_rows
-    return new_aligned
+    fits: list[PairwiseFit] = []
+    for i, name_i in enumerate(names):
+        for name_j in names[i + 1:]:
+            bi = buckets_per_source[name_i]
+            bj = buckets_per_source[name_j]
+            overlap = bi.index.intersection(bj.index)
+            if len(overlap) < PAIRWISE_MIN_OVERLAP_BUCKETS:
+                continue
+            x = bj.loc[overlap].to_numpy(dtype=float)
+            y = bi.loc[overlap].to_numpy(dtype=float)
+            # OLS: y = alpha * x + beta
+            A = np.vstack([x, np.ones_like(x)]).T
+            solution, *_ = np.linalg.lstsq(A, y, rcond=None)
+            alpha, beta = float(solution[0]), float(solution[1])
+            residuals = y - (alpha * x + beta)
+            residual_std = float(np.std(residuals))
+            fit = PairwiseFit(
+                source_i=name_i,
+                source_j=name_j,
+                alpha=alpha,
+                beta=beta,
+                overlap_buckets=len(overlap),
+                residual_std_microrad=residual_std,
+            )
+            fits.append(fit)
+            report.pairs.append(fit)
+    return fits
 
 
-def _merge_by_priority(
-    aligned: dict[str, pd.DataFrame],
+# ─────────────────────────────────────────────────────────────────────────────
+# Joint solve for {a_i, b_i}
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _solve_pairwise_calibration(
+    live: dict[str, pd.DataFrame],
+    fits: list[PairwiseFit],
     report: ReconcileReport,
-) -> pd.DataFrame:
-    """Walk every 15-min bucket in the union of `aligned` sources and pick
-    the value from the highest-priority source that has data there.
+) -> dict[str, SourceAlignment]:
+    """Solve two decoupled linear systems for {a_i} and {b_i} jointly.
 
-    Higher priority = lower index in `_priority_index()`. We tag each row
-    with its priority index, sort by (bucket, priority), and drop
-    duplicates per bucket keeping the FIRST (= highest-priority) row.
+    The a-system uses pair measurements `a_i - α_ij · a_j = 0` plus a
+    pin row `a_pin = 1` (digital if present, else the first source
+    alphabetically).
 
-    The archive is split upstream into `archive` (historical anchor,
-    priority 2) and `_ARCHIVE_RECENT_NAME` (lowest priority) by
-    `_split_archive_by_age`, so nothing in this function needs to special-
-    case archive demotion — both buckets just look up their priority.
+    The b-system uses the same structure with RHS `β_ij` and a pin row
+    `b_pin = 0`:  `b_i - α_ij · b_j = β_ij`.
 
-    Conflicts — buckets where two aligned sources disagree by more than
-    `CONFLICT_THRESHOLD_MICRORAD` — are recorded on `report.conflicts` so
-    the UI can show actionable provenance instead of just a count.
+    Both systems are solved via `np.linalg.lstsq` which tolerates
+    underdetermined cases (returns the minimum-norm solution) — a source
+    with no pair constraint at all ends up at the pinned identity.
     """
-    priority_index = _priority_index()
+    names = sorted(live.keys())
+    idx = {name: i for i, name in enumerate(names)}
+    n = len(names)
 
+    pin_name = DIGITAL_SOURCE_NAME if DIGITAL_SOURCE_NAME in idx else names[0]
+
+    # ── a-system ────────────────────────────────────────────────────────────
+    a_rows: list[list[float]] = []
+    a_rhs: list[float] = []
+    pin_row = [0.0] * n
+    pin_row[idx[pin_name]] = 1.0
+    a_rows.append(pin_row)
+    a_rhs.append(1.0)
+    for f in fits:
+        row = [0.0] * n
+        row[idx[f.source_i]] = 1.0
+        row[idx[f.source_j]] = -f.alpha
+        a_rows.append(row)
+        a_rhs.append(0.0)
+    a_vec, *_ = np.linalg.lstsq(np.array(a_rows), np.array(a_rhs), rcond=None)
+
+    # ── b-system ────────────────────────────────────────────────────────────
+    # Use the same pairwise α from the raw measurements (not the re-derived
+    # a_i/a_j ratio) so measurement error propagates consistently into
+    # both systems.
+    b_rows: list[list[float]] = []
+    b_rhs: list[float] = []
+    pin_row = [0.0] * n
+    pin_row[idx[pin_name]] = 1.0
+    b_rows.append(pin_row)
+    b_rhs.append(0.0)
+    for f in fits:
+        row = [0.0] * n
+        row[idx[f.source_i]] = 1.0
+        row[idx[f.source_j]] = -f.alpha
+        b_rows.append(row)
+        b_rhs.append(f.beta)
+    b_vec, *_ = np.linalg.lstsq(np.array(b_rows), np.array(b_rhs), rcond=None)
+
+    # ── package per-source record ───────────────────────────────────────────
+    alignments: dict[str, SourceAlignment] = {}
+    pair_counts: dict[str, int] = {name: 0 for name in names}
+    for f in fits:
+        pair_counts[f.source_i] += 1
+        pair_counts[f.source_j] += 1
+
+    for name in names:
+        a = float(a_vec[idx[name]])
+        b = float(b_vec[idx[name]])
+        record = SourceAlignment(
+            name=name,
+            rows_in=len(live[name]),
+            a=a,
+            b=b,
+            pairs_used=pair_counts[name],
+            is_anchor=(name == pin_name),
+            effective_resolution_microrad_per_pixel=(
+                abs(a) * EFFECTIVE_RESOLUTION_FALLBACK_MICRORAD_PER_PIXEL.get(name, 1.0)
+            ),
+            offset_microrad=b,
+            overlap_buckets=pair_counts[name],  # proxy for the old field
+        )
+        # Sanity bounds: flag pathological corrections but do NOT refuse to
+        # apply them — the user explicitly wants Phase 2 to expose
+        # calibration bugs rather than hide them behind scalar offsets.
+        if abs(a - 1.0) > PAIRWISE_MAX_A_DEVIATION_FRACTION and not record.is_anchor:
+            msg = (
+                f"{name}: pairwise fit is pathological — "
+                f"a={a:.4f} (|a-1|={abs(a-1)*100:.1f}% > "
+                f"{PAIRWISE_MAX_A_DEVIATION_FRACTION*100:.0f}%)"
+            )
+            record.note = msg
+            report.warnings.append(msg)
+        elif abs(b) > PAIRWISE_MAX_B_MICRORAD and not record.is_anchor:
+            msg = (
+                f"{name}: pairwise fit produces large intercept — "
+                f"b={b:+.2f} µrad (> {PAIRWISE_MAX_B_MICRORAD} µrad)"
+            )
+            record.note = msg
+            report.warnings.append(msg)
+        alignments[name] = record
+        report.sources.append(record)
+    return alignments
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Apply corrections
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _apply_ab_corrections(
+    live: dict[str, pd.DataFrame],
+    alignments: dict[str, SourceAlignment],
+) -> dict[str, pd.DataFrame]:
+    """Return each source's DataFrame with `tilt ← (tilt - b) / a` applied.
+
+    The correction inverts the model `y_i = a_i · true + b_i` to recover
+    `true`. A near-zero `a_i` would indicate a pathological solve; clamp
+    to 1.0 in that case to avoid div-by-zero and let the continuity check
+    surface the problem downstream.
+    """
+    out: dict[str, pd.DataFrame] = {}
+    for name, df in live.items():
+        align = alignments.get(name)
+        if align is None:
+            out[name] = df.copy()
+            continue
+        a = align.a if abs(align.a) > 1e-9 else 1.0
+        corrected = df.copy()
+        corrected[TILT_COL] = (corrected[TILT_COL] - align.b) / a
+        out[name] = corrected
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Merge by best effective resolution
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _merge_best_resolution(
+    corrected: dict[str, pd.DataFrame],
+    alignments: dict[str, SourceAlignment],
+    report: ReconcileReport,
+    archive_df: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    """Walk every 15-min bucket in the union of corrected sources and emit
+    one row per bucket, chosen by best-effective-resolution among sources
+    passing the MAD outlier gate.
+
+    Algorithm (per bucket):
+      1. Collect every live source's corrected value for the bucket.
+      2. Compute unweighted median `m` and MAD `σ = 1.4826 · median(|v-m|)`.
+      3. Drop any source where `|v - m| > max(FLOOR, MULTIPLIER · σ)`;
+         record each drop as a TranscriptionFailure.
+      4. Among survivors, pick the one with the smallest effective
+         resolution (= |a_i| · µrad/px for source i).
+      5. If no live source survives, fall back to archive (gap-fill).
+
+    K≥2 → K=1 handoff blending is applied as a post-pass: within
+    ±K1_HANDOFF_BLEND_HOURS of a transition where the set of sources
+    shrinks to one, blend the K=1 source's value toward the last-K≥2
+    consensus so the curve is continuous.
+    """
+    resolutions = {
+        name: align.effective_resolution_microrad_per_pixel
+        for name, align in alignments.items()
+    }
+
+    # Tag every corrected row with its source + merge bucket + value.
     tagged: list[pd.DataFrame] = []
-    for name, df in aligned.items():
+    for name, df in corrected.items():
         d = df[[DATE_COL, TILT_COL]].copy()
         d["_source"] = name
         d["_bucket"] = d[DATE_COL].dt.round(MERGE_BUCKET)
-        d["_priority"] = priority_index.get(name, len(priority_index))
+        d["_res"] = resolutions.get(name, 1.0)
         tagged.append(d)
 
     combined = pd.concat(tagged, ignore_index=True)
-    combined = combined.sort_values(
-        ["_bucket", "_priority", DATE_COL], kind="stable"
+    combined = combined.dropna(subset=[TILT_COL, "_bucket"])
+    if len(combined) == 0:
+        if archive_df is not None and len(archive_df) > 0:
+            return archive_df.sort_values(DATE_COL).reset_index(drop=True)
+        return _empty_history_df()
+
+    # Aggregate per bucket: keep one row per (bucket, source) — the
+    # latest-dated one if multiple rows of the same source fall in the
+    # same 15-min bucket.
+    combined = combined.sort_values([DATE_COL]).drop_duplicates(
+        subset=["_bucket", "_source"], keep="last"
     )
 
-    # Conflict detection: any bucket where the winning value (lowest-priority
-    # index) and any losing value differ by more than the threshold. We do
-    # this in one groupby pass before the dedupe so we can capture both
-    # sides of the conflict.
-    for bucket, group in combined.groupby("_bucket", sort=False):
-        if len(group) < 2:
-            continue
-        # group is sorted by priority because of the outer sort_values
-        winner_row = group.iloc[0]
-        winning_tilt = float(winner_row[TILT_COL])
-        for _, row in group.iloc[1:].iterrows():
-            losing_tilt = float(row[TILT_COL])
-            delta = winning_tilt - losing_tilt
-            if abs(delta) > CONFLICT_THRESHOLD_MICRORAD:
-                report.conflicts.append(
-                    ReconcileConflict(
-                        bucket=bucket,
-                        winning_source=str(winner_row["_source"]),
-                        losing_source=str(row["_source"]),
-                        winning_tilt=winning_tilt,
-                        losing_tilt=losing_tilt,
-                        delta=delta,
-                    )
-                )
+    emitted_rows: list[tuple[pd.Timestamp, float, str]] = []
+    for bucket, group in combined.groupby("_bucket", sort=True):
+        values = group[TILT_COL].to_numpy(dtype=float)
+        sources = group["_source"].to_numpy(dtype=str)
+        resolutions_here = group["_res"].to_numpy(dtype=float)
+        dates = group[DATE_COL].to_numpy()
 
-    deduped = combined.drop_duplicates(subset="_bucket", keep="first")
-    deduped = deduped.drop(columns=["_source", "_priority", "_bucket"])
-    deduped = deduped.sort_values(DATE_COL).reset_index(drop=True)
-    return deduped
+        if len(values) == 0:
+            continue
+
+        # ── MAD outlier gate ────────────────────────────────────────────────
+        if len(values) >= 2:
+            m = float(np.median(values))
+            mad = float(np.median(np.abs(values - m)))
+            sigma = 1.4826 * mad
+            threshold = max(
+                MAD_OUTLIER_SIGMA_FLOOR_MICRORAD,
+                MAD_OUTLIER_SIGMA_MULTIPLIER * sigma,
+            )
+            keep_mask = np.abs(values - m) <= threshold
+            if not keep_mask.all():
+                for v, s in zip(values[~keep_mask], sources[~keep_mask]):
+                    report.transcription_failures.append(
+                        TranscriptionFailure(
+                            bucket=bucket,
+                            source=str(s),
+                            value_corrected=float(v),
+                            bucket_median=m,
+                            delta_microrad=float(v) - m,
+                        )
+                    )
+                    # count the reject on the source's alignment record
+                    align = alignments.get(str(s))
+                    if align is not None:
+                        align.rows_mad_rejected += 1
+                values = values[keep_mask]
+                sources = sources[keep_mask]
+                resolutions_here = resolutions_here[keep_mask]
+                dates = dates[keep_mask]
+
+        if len(values) == 0:
+            continue
+
+        # ── Best-effective-resolution wins ──────────────────────────────────
+        winner_idx = int(np.argmin(resolutions_here))
+        emitted_rows.append(
+            (pd.Timestamp(dates[winner_idx]), float(values[winner_idx]), str(sources[winner_idx]))
+        )
+
+    merged = pd.DataFrame(
+        emitted_rows, columns=[DATE_COL, TILT_COL, "_source"]
+    )
+
+    # ── K=1 handoff blending ────────────────────────────────────────────────
+    if len(merged) >= 2:
+        merged = _blend_k1_handoffs(merged, combined)
+
+    # ── Archive gap-fill for K=0 buckets ────────────────────────────────────
+    if archive_df is not None and len(archive_df) > 0:
+        merged = _fill_archive_gaps(merged, archive_df)
+
+    merged = merged[[DATE_COL, TILT_COL]].sort_values(DATE_COL).reset_index(drop=True)
+    return merged
+
+
+def _blend_k1_handoffs(
+    merged: pd.DataFrame, combined: pd.DataFrame
+) -> pd.DataFrame:
+    """Taper the merge across K≥2 → K=1 transitions.
+
+    Identifies 15-min buckets where the count of source contributors
+    drops from ≥2 to 1 (or rises back) and linearly interpolates the
+    merged value across ±K1_HANDOFF_BLEND_HOURS so no step appears at
+    the boundary.
+
+    Why this matters: even after pairwise calibration, each source's
+    corrected values carry residual transcription noise (typically 1-3
+    µrad). Inside a region where ≥2 sources contribute, the best-
+    effective-resolution winner may sit a µrad off from another source's
+    value; when that other source winks out at a window boundary and the
+    winner is suddenly the only one, whatever residual offset it carried
+    becomes a visible step — unless we smooth across the transition.
+    """
+    # Count sources per bucket from the combined-table view.
+    counts = (
+        combined.groupby("_bucket")["_source"].nunique().rename("_k")
+    )
+    merged_with = merged.assign(
+        _bucket=lambda d: d[DATE_COL].dt.round(MERGE_BUCKET)
+    ).merge(counts, left_on="_bucket", right_index=True, how="left")
+    merged_with["_k"] = merged_with["_k"].fillna(1).astype(int)
+
+    if not (merged_with["_k"] >= 2).any() or not (merged_with["_k"] == 1).any():
+        return merged  # nothing to blend
+
+    # Find transitions: indices where _k crosses between ≥2 and 1.
+    k = merged_with["_k"].to_numpy()
+    transitions = []
+    for i in range(1, len(k)):
+        if (k[i - 1] >= 2) != (k[i] >= 2):
+            transitions.append(i)
+
+    if not transitions:
+        return merged
+
+    blend_delta = pd.Timedelta(hours=K1_HANDOFF_BLEND_HOURS)
+    tilts = merged_with[TILT_COL].to_numpy(dtype=float).copy()
+    dates = merged_with[DATE_COL].to_numpy()
+    # At each transition, smooth the values within ±blend_delta so the
+    # curve tapers from the last "high-K" value into the K=1 regime.
+    for ti in transitions:
+        t_boundary = pd.Timestamp(dates[ti])
+        t_start = t_boundary - blend_delta
+        t_end = t_boundary + blend_delta
+        # Find the last high-K value before ti and the first K=1 value
+        # after (or vice versa).
+        left_k2_idx = ti - 1
+        right_k1_idx = ti
+        if k[left_k2_idx] < 2 and k[right_k1_idx] < 2:
+            continue  # not a 2→1 boundary
+        if k[left_k2_idx] >= 2 and k[right_k1_idx] >= 2:
+            continue
+        high_side, low_side = (
+            (left_k2_idx, right_k1_idx)
+            if k[left_k2_idx] >= 2
+            else (right_k1_idx, left_k2_idx)
+        )
+        step = float(tilts[low_side] - tilts[high_side])
+        if abs(step) <= CONTINUITY_WARNING_THRESHOLD_MICRORAD:
+            continue  # step is small; no blend needed
+        # Distribute the step correction linearly across the blend zone on
+        # the low-side. The high-K side is treated as the reference.
+        window_mask = (pd.to_datetime(dates) >= t_start) & (
+            pd.to_datetime(dates) <= t_end
+        )
+        window_idx = np.where(window_mask)[0]
+        if len(window_idx) < 2:
+            continue
+        for idx in window_idx:
+            dist_hours = abs(
+                (pd.Timestamp(dates[idx]) - t_boundary).total_seconds() / 3600.0
+            )
+            # Weight ramps from 1.0 at the boundary to 0 at blend edge.
+            w = max(0.0, 1.0 - dist_hours / K1_HANDOFF_BLEND_HOURS)
+            # Only adjust the low-K side (where the spurious step lives).
+            if k[idx] < 2:
+                tilts[idx] -= step * w * 0.5
+            else:
+                tilts[idx] += step * w * 0.5
+
+    merged_with[TILT_COL] = tilts
+    return merged_with[[DATE_COL, TILT_COL, "_source"]].copy()
+
+
+def _fill_archive_gaps(
+    merged: pd.DataFrame, archive_df: pd.DataFrame
+) -> pd.DataFrame:
+    """Append archive rows whose 15-min buckets are not already in `merged`.
+
+    The archive is a pure gap-filler in Phase 2 — it contributes only for
+    buckets no live source covers. Typical use: pre-Dec-2024 history
+    (older than dec2024_to_now's window).
+    """
+    live_buckets = set(
+        pd.to_datetime(merged[DATE_COL]).dt.round(MERGE_BUCKET)
+    )
+    arch = archive_df[[DATE_COL, TILT_COL]].copy()
+    arch[DATE_COL] = pd.to_datetime(arch[DATE_COL])
+    arch["_bucket"] = arch[DATE_COL].dt.round(MERGE_BUCKET)
+    # Keep one archive row per bucket (latest).
+    arch = arch.sort_values(DATE_COL).drop_duplicates(subset="_bucket", keep="last")
+    fill = arch[~arch["_bucket"].isin(live_buckets)][[DATE_COL, TILT_COL]].copy()
+    if len(fill) == 0:
+        return merged
+    fill["_source"] = ARCHIVE_SOURCE_NAME
+    return pd.concat([merged, fill], ignore_index=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Continuity audit
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _audit_continuity(merged: pd.DataFrame, report: ReconcileReport) -> None:
+    """Flag adjacent-bucket steps exceeding the warning threshold.
+
+    Not a hard fail — during real eruption transitions the signal can step
+    by 5+ µrad across a 15-min bucket — but a surge in violations is an
+    actionable regression signal. The list is committed to the per-run
+    JSON for post-hoc investigation.
+    """
+    if len(merged) < 2:
+        return
+    df = merged.sort_values(DATE_COL).reset_index(drop=True)
+    deltas = df[TILT_COL].diff().abs()
+    violations = deltas > CONTINUITY_WARNING_THRESHOLD_MICRORAD
+    for i in np.where(violations.to_numpy())[0]:
+        report.continuity_violations.append(
+            ContinuityViolation(
+                bucket_before=pd.Timestamp(df[DATE_COL].iloc[int(i) - 1]),
+                bucket_after=pd.Timestamp(df[DATE_COL].iloc[int(i)]),
+                tilt_before=float(df[TILT_COL].iloc[int(i) - 1]),
+                tilt_after=float(df[TILT_COL].iloc[int(i)]),
+                delta_microrad=float(deltas.iloc[int(i)]),
+            )
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _empty_history_df() -> pd.DataFrame:
