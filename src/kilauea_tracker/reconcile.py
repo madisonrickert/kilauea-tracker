@@ -605,22 +605,31 @@ def _merge_best_resolution(
     archive_df: Optional[pd.DataFrame],
 ) -> pd.DataFrame:
     """Walk every 15-min bucket in the union of corrected sources and emit
-    one row per bucket, chosen by best-effective-resolution among sources
-    passing the MAD outlier gate.
+    one row per bucket, chosen by best-effective-resolution over the
+    entire set of contributing sources (not only MAD-survivors).
+
+    Phase 4 Commit 4: the MAD gate NO LONGER removes sources from winner
+    selection — it only LOGS outliers to `transcription_failures` and
+    `rows_mad_rejected` for diagnostic visibility. Deterministic
+    per-source-set selection means the same source wins every bucket
+    within a region of stable coverage, which eliminates the sawtooth
+    that MAD-driven mid-region winner-flipping produced in 2026-04 prod.
+
+    Upstream filtering (`trace._filter_rolling_median_outliers`) catches
+    genuine OCR-glitch spikes before they reach reconcile, so the MAD
+    gate's removal role was rarely load-bearing; its sole remaining
+    purpose is diagnostic recording of residual inter-source
+    disagreement.
 
     Algorithm (per bucket):
       1. Collect every live source's corrected value for the bucket.
-      2. Compute unweighted median `m` and MAD `σ = 1.4826 · median(|v-m|)`.
-      3. Drop any source where `|v - m| > max(FLOOR, MULTIPLIER · σ)`;
-         record each drop as a TranscriptionFailure.
-      4. Among survivors, pick the one with the smallest effective
-         resolution (= |a_i| · µrad/px for source i).
-      5. If no live source survives, fall back to archive (gap-fill).
+      2. Compute median and MAD; record any source beyond
+         `max(FLOOR, MULTIPLIER·σ_MAD)` as a TranscriptionFailure (log only).
+      3. Pick the source with the smallest effective resolution
+         (`|a_i| · µrad/px`) from ALL contributing sources.
+      4. If no live source covers the bucket, fall back to archive.
 
-    K≥2 → K=1 handoff blending is applied as a post-pass: within
-    ±K1_HANDOFF_BLEND_HOURS of a transition where the set of sources
-    shrinks to one, blend the K=1 source's value toward the last-K≥2
-    consensus so the curve is continuous.
+    K≥2 → K=1 handoff blending is applied as a post-pass (unchanged).
     """
     resolutions = {
         name: align.effective_resolution_microrad_per_pixel
@@ -660,7 +669,10 @@ def _merge_best_resolution(
         if len(values) == 0:
             continue
 
-        # ── MAD outlier gate ────────────────────────────────────────────────
+        # ── MAD outlier gate (DIAGNOSTIC-ONLY in Phase 4 Commit 4) ─────────
+        # Record outliers but DO NOT remove from winner selection —
+        # per-region determinism requires the rank-0 source to win every
+        # bucket it covers, regardless of momentary consensus.
         if len(values) >= 2:
             m = float(np.median(values))
             mad = float(np.median(np.abs(values - m)))
@@ -669,9 +681,9 @@ def _merge_best_resolution(
                 MAD_OUTLIER_SIGMA_FLOOR_MICRORAD,
                 MAD_OUTLIER_SIGMA_MULTIPLIER * sigma,
             )
-            keep_mask = np.abs(values - m) <= threshold
-            if not keep_mask.all():
-                for v, s in zip(values[~keep_mask], sources[~keep_mask]):
+            outlier_mask = np.abs(values - m) > threshold
+            if outlier_mask.any():
+                for v, s in zip(values[outlier_mask], sources[outlier_mask]):
                     report.transcription_failures.append(
                         TranscriptionFailure(
                             bucket=bucket,
@@ -681,19 +693,11 @@ def _merge_best_resolution(
                             delta_microrad=float(v) - m,
                         )
                     )
-                    # count the reject on the source's alignment record
                     align = alignments.get(str(s))
                     if align is not None:
                         align.rows_mad_rejected += 1
-                values = values[keep_mask]
-                sources = sources[keep_mask]
-                resolutions_here = resolutions_here[keep_mask]
-                dates = dates[keep_mask]
 
-        if len(values) == 0:
-            continue
-
-        # ── Best-effective-resolution wins ──────────────────────────────────
+        # ── Best-effective-resolution wins (deterministic, no MAD drop) ────
         winner_idx = int(np.argmin(resolutions_here))
         winner_source = str(sources[winner_idx])
         emitted_rows.append(

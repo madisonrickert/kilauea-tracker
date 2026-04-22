@@ -416,6 +416,84 @@ def test_pathological_a_resets_to_identity_with_scalar_b():
     assert np.isfinite(month.b)
 
 
+def test_per_region_winner_deterministic_under_mad_pressure():
+    """Phase 4 Commit 4: within a region of stable coverage, the same
+    source wins every bucket, even when MAD flags it as an outlier.
+
+    Constructs a pathological scenario: digital and dec2024_to_now both
+    cover the same range, but dec has an intermittent 4-5 µrad jitter
+    that pre-Commit-4 would cause MAD to reject dec at some buckets,
+    flipping the winner to... (no alternate with just 2 sources, but
+    the test still asserts no source-change mid-region).
+    """
+    from kilauea_tracker.reconcile import reconcile_sources as _rs
+
+    n = 40
+    # Use an irregular signal so MAD has teeth.
+    t = np.arange(n)
+    rng = np.random.default_rng(0)
+    signal = -20 + 3 * np.sin(t / 2) + rng.normal(0, 0.3, n)
+    digital_df = pd.DataFrame({
+        DATE_COL: pd.date_range("2025-03-01", periods=n, freq="15min"),
+        TILT_COL: signal,
+    })
+    # dec2024_to_now: same truth + bigger per-bucket noise, biased +2 µrad
+    dec_df = digital_df.copy()
+    dec_df[TILT_COL] = dec_df[TILT_COL] + 2.0 + rng.normal(0, 1.5, n)
+
+    merged, report = _rs({"digital": digital_df, "dec2024_to_now": dec_df})
+    # digital has best effective resolution and should win EVERY bucket
+    # in this region — both sources cover every bucket, so the source
+    # set is constant.
+    assert report.winner_counts.get("digital", 0) == len(merged), (
+        f"digital should win all {len(merged)} buckets, got "
+        f"{report.winner_counts.get('digital', 0)}"
+    )
+    # dec2024_to_now should never win here.
+    assert report.winner_counts.get("dec2024_to_now", 0) == 0
+
+
+def test_mad_does_not_remove_from_merge_phase4_commit4():
+    """Phase 4 Commit 4 demoted the MAD gate to diagnostic-only.
+
+    An outlier at a bucket MUST still appear as a TranscriptionFailure
+    and be counted in `rows_mad_rejected`, but the underlying source
+    is NOT removed from winner candidacy — winner is still decided by
+    best-effective-resolution across all contributing sources.
+
+    Here we arrange for the outlier to be the BEST-effective-resolution
+    source (`digital`). Pre-Commit-4 MAD would have dropped digital and
+    the merge would have picked dec's "correct" value. Post-Commit-4
+    digital wins anyway because the merge is deterministic.
+    """
+    from kilauea_tracker.reconcile import reconcile_sources as _rs
+
+    n = PAIRWISE_MIN_OVERLAP_BUCKETS * 2
+    truth = _series("2025-03-01", n=n, base=0.0, amplitude=5.0, freq="15min")
+    # digital: good everywhere except ONE bucket spiked up
+    digital_spiked = truth.copy()
+    spike_idx = n // 2
+    digital_spiked.loc[spike_idx, TILT_COL] = 50.0  # 50 µrad spike
+    dec_ok = _apply_linear(truth, 1.05, 0.5)  # slightly miscalibrated
+
+    sources = {"digital": digital_spiked, "dec2024_to_now": dec_ok.copy()}
+    sources["three_month"] = _apply_linear(truth, 0.98, 0.1)  # need K≥3 for MAD
+    merged, report = _rs(sources)
+
+    # MAD flagged digital at the spike — logged but didn't remove from winner.
+    assert report.transcription_failures, (
+        "MAD should still log the spike as a transcription_failure"
+    )
+    # digital still won the spike bucket (best effective resolution).
+    spike_ts = truth.loc[spike_idx, DATE_COL]
+    merged_at_spike = merged[merged[DATE_COL] == spike_ts]
+    assert len(merged_at_spike) == 1
+    # The merged value at the spike IS the spike (50 µrad) because digital
+    # won and we no longer remove it. Upstream rolling-median filter is
+    # responsible for catching spikes before they reach reconcile.
+    assert abs(merged_at_spike.iloc[0][TILT_COL] - 50.0) < 1.0
+
+
 def test_mad_floor_does_not_reject_well_calibrated_outlier():
     """When multiple miscalibrated sources agree at one value and one
     well-calibrated source sits several µrad away, the MAD floor MUST
