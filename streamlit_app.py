@@ -1675,11 +1675,20 @@ with st.expander("🔬 Transcription quality inspector"):
         # ── Integer-µrad gridlines (dashed, cyan) ─────────────────────
         # Step chosen adaptively so lines don't overlap on wide-range
         # plots (e.g. dec2024_to_now spans ~140 µrad — 1-µrad lines
-        # would pack together illegibly).
+        # would pack together illegibly). Range is CLIPPED to the OCR-
+        # labelled extrema, not the bbox extrapolation — the bbox
+        # extends a few pixels past the outermost printed ticks into
+        # axis-margin whitespace where no real data renders, and drawing
+        # gridlines there (e.g. three_month's "-30" when the bottom tick
+        # is actually at "-25") is misleading.
         if layers.get("ygrid"):
-            y_top = calibration.pixel_to_microradians(y0)
-            y_bot = calibration.pixel_to_microradians(y1)
-            lo, hi = sorted((y_top, y_bot))
+            label_vals = [v for _, v in (calibration.y_labels_found or [])]
+            if label_vals:
+                lo, hi = float(min(label_vals)), float(max(label_vals))
+            else:
+                y_top = calibration.pixel_to_microradians(y0)
+                y_bot = calibration.pixel_to_microradians(y1)
+                lo, hi = sorted((y_top, y_bot))
             span = hi - lo
             if span < 10:
                 step = 1

@@ -571,9 +571,17 @@ def calibrate_axes(
         )
 
     # Phase 1a: compare this run's slope to the rolling history of the same
-    # source. If it drifts too far, fall back to the last-known-good slope
-    # and warn — USGS shifts the y-range across updates but shouldn't
-    # change the per-pixel scale between consecutive captures.
+    # source. Two scenarios can produce slope drift:
+    #   (a) USGS rescaled the PNG's y-axis (legitimate — they do this
+    #       periodically when the data range shifts). The current fit is
+    #       clean (sub-pixel residuals across all OCR labels) and is the
+    #       correct answer — history is stale.
+    #   (b) OCR misread a label value or pixel position, pulling the fit
+    #       off the real ticks. Residuals will be noticeable (multi-pixel)
+    #       because the bogus point doesn't sit on the true line.
+    # Distinguish by the residual quality we already computed: clean fit
+    # = trust the new slope; noisy fit = trust history and refit the
+    # intercept so the pair stays mathematically consistent.
     slope_history_median: Optional[float] = None
     slope_fallback_used = False
     if source_name is not None:
@@ -583,15 +591,37 @@ def calibrate_axes(
             denom = abs(slope_history_median) if slope_history_median else 1.0
             drift_pct = 100.0 * abs(a_y - slope_history_median) / denom
             if drift_pct > Y_SLOPE_REGRESSION_TOLERANCE_PERCENT:
-                # Fallback: keep this run's intercept (USGS legitimately
-                # shifts it) but restore the historical slope so the pixel
-                # scale stays stable across runs.
-                a_y = slope_history_median
-                slope_fallback_used = True
-                logger.warning(
-                    "calibrate %s: y-slope drift %.1f%% exceeds tolerance — falling back to history median %.4f",
-                    source_name, drift_pct, slope_history_median,
-                )
+                if y_resid_max_pixels <= 1.0:
+                    # Clean fit with drift → USGS rescaled. Trust the fit.
+                    # History will catch up as more fetches append.
+                    logger.info(
+                        "calibrate %s: y-slope drift %.1f%% but residuals "
+                        "are sub-pixel (%.2f px); accepting new fit "
+                        "(likely USGS axis rescale)",
+                        source_name, drift_pct, y_resid_max_pixels,
+                    )
+                else:
+                    # Noisy fit AND drift → OCR probably mis-read a label.
+                    # Use the historical slope and refit the intercept as
+                    # a weighted-mean of `y_i - a_hist·px_i` so the line
+                    # passes through the OCR labels as closely as
+                    # possible under the fixed slope constraint. Without
+                    # the refit, the intercept was computed assuming a
+                    # different slope and the calibration ends up with
+                    # mismatched (a,b) that diverges from truth at the
+                    # pixel extremes.
+                    a_y = slope_history_median
+                    b_y = float(
+                        np.average(values - a_y * pixel_ys, weights=weights)
+                    )
+                    slope_fallback_used = True
+                    logger.warning(
+                        "calibrate %s: y-slope drift %.1f%% AND noisy fit "
+                        "(%.2f px max resid) — falling back to history "
+                        "median %.4f and refitting intercept",
+                        source_name, drift_pct, y_resid_max_pixels,
+                        slope_history_median,
+                    )
 
     # ── x-axis ──────────────────────────────────────────────────────────────
     x_start, x_end, psm_used, title_raw = ocr_title_timestamps(img, plot_bbox)
