@@ -369,8 +369,16 @@ PAIRWISE_MIN_OVERLAP_BUCKETS = 50
 # MAD_OUTLIER_SIGMA_MULTIPLIER * σ_MAD)  from the bucket's unweighted
 # median.  The floor keeps the check meaningful at buckets where all
 # sources agree (σ_MAD ≈ 0).
+#
+# Floor set to 5 µrad (was 2 µrad in Phase 2): the typical inter-source
+# calibration disagreement after pairwise correction is 2-3 µrad, so a
+# 2 µrad floor would flag well-calibrated sources as outliers when the
+# consensus happens to fall close to the miscalibrated side — the exact
+# mechanism that produced the 2026-04-22 alternating-lines prod
+# regression.  5 µrad still catches real OCR-glitch outliers (typically
+# 10+ µrad off) while tolerating legitimate inter-source spread.
 MAD_OUTLIER_SIGMA_MULTIPLIER = 3.0
-MAD_OUTLIER_SIGMA_FLOOR_MICRORAD = 2.0
+MAD_OUTLIER_SIGMA_FLOOR_MICRORAD = 5.0
 
 # Blending zone for K≥2 → K=1 handoffs (the canonical day-90 boundary where
 # three_month ends and only dec2024_to_now covers further back). Inside

@@ -718,14 +718,58 @@ def _serialize_reconcile(rep: ReconcileReport) -> dict:
             {
                 "name": s.name,
                 "rows_in": s.rows_in,
+                "a": s.a,
+                "b": s.b,
                 "offset_microrad": s.offset_microrad,
                 "overlap_buckets": s.overlap_buckets,
+                "pairs_used": s.pairs_used,
+                "effective_resolution_microrad_per_pixel": (
+                    s.effective_resolution_microrad_per_pixel
+                ),
+                "rows_mad_rejected": s.rows_mad_rejected,
                 "is_anchor": s.is_anchor,
                 "note": s.note,
                 "rows_proximity_dropped": s.rows_proximity_dropped,
                 "piecewise_residuals": dict(s.piecewise_residuals),
             }
             for s in rep.sources
+        ],
+        "pairs": [
+            {
+                "source_i": p.source_i,
+                "source_j": p.source_j,
+                "alpha": p.alpha,
+                "beta": p.beta,
+                "overlap_buckets": p.overlap_buckets,
+                "residual_std_microrad": p.residual_std_microrad,
+            }
+            for p in rep.pairs
+        ],
+        "winner_counts": dict(rep.winner_counts),
+        "transcription_failures_top": [
+            {
+                "bucket_utc": _dt_str(f.bucket),
+                "source": f.source,
+                "value_corrected": f.value_corrected,
+                "bucket_median": f.bucket_median,
+                "delta_microrad": f.delta_microrad,
+            }
+            for f in sorted(
+                rep.transcription_failures,
+                key=lambda f: abs(f.delta_microrad),
+                reverse=True,
+            )[:20]
+        ],
+        "transcription_failures_total": len(rep.transcription_failures),
+        "continuity_violations": [
+            {
+                "bucket_before": _dt_str(v.bucket_before),
+                "bucket_after": _dt_str(v.bucket_after),
+                "tilt_before": v.tilt_before,
+                "tilt_after": v.tilt_after,
+                "delta_microrad": v.delta_microrad,
+            }
+            for v in rep.continuity_violations
         ],
         "conflicts_top": [
             {

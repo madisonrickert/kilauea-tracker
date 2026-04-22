@@ -416,6 +416,64 @@ def test_pathological_a_resets_to_identity_with_scalar_b():
     assert np.isfinite(month.b)
 
 
+def test_mad_floor_does_not_reject_well_calibrated_outlier():
+    """When multiple miscalibrated sources agree at one value and one
+    well-calibrated source sits several µrad away, the MAD floor MUST
+    tolerate the well-calibrated source's delta.
+
+    Regression guard for the 2026-04 sawtooth: with `MAD_FLOOR = 2.0`,
+    two_day's legitimate 2.5-3 µrad offset from a miscalibrated median
+    was alternately rejected bucket-to-bucket, producing a visible
+    zigzag. Floor raised to 5 µrad in Phase 4 Commit 3 fixes this while
+    still catching genuine OCR-glitch outliers (typically 10+ µrad off).
+    """
+    from kilauea_tracker.reconcile import reconcile_sources as _rs
+    from kilauea_tracker.config import MAD_OUTLIER_SIGMA_FLOOR_MICRORAD
+
+    assert MAD_OUTLIER_SIGMA_FLOOR_MICRORAD >= 3.0, (
+        "MAD floor regression: Phase 4 raised this to 5 to stop sawtooth"
+    )
+
+    n = PAIRWISE_MIN_OVERLAP_BUCKETS * 2
+    # 3 miscalibrated sources agree at -28; one well-calibrated at -25.
+    # Delta of 3 µrad would be kicked by floor=2 but not by floor=5.
+    truth = _series("2025-03-01", n=n, base=-25.0, amplitude=0.5, freq="15min")
+    miscalibrated = truth.copy()
+    miscalibrated[TILT_COL] = miscalibrated[TILT_COL] - 3.0  # shifted by -3 µrad
+    sources = {
+        "digital": truth,  # well-calibrated, best resolution (0.001)
+        "week": miscalibrated.copy(),
+        "month": miscalibrated.copy(),
+        "three_month": miscalibrated.copy(),
+    }
+    merged, _ = _rs(sources)
+    # digital should win every bucket. If MAD kicked it (the 2026-04 bug),
+    # we'd see week/month/three_month's value (-28) in the merged output.
+    merged_mean = merged[TILT_COL].mean()
+    assert abs(merged_mean - (-25.0)) < 0.5, (
+        f"merged mean {merged_mean:.2f} suggests digital got MAD-rejected; "
+        f"the well-calibrated source should win over miscalibrated consensus"
+    )
+
+
+def test_winner_counts_populated():
+    """_merge_best_resolution records which source won each bucket so
+    the Streamlit diagnostics panel and JSON run report can display the
+    distribution.
+    """
+    n = PAIRWISE_MIN_OVERLAP_BUCKETS * 2
+    truth = _series("2025-03-01", n=n, base=0.0, amplitude=5.0, freq="15min")
+    sources = {
+        "digital": truth,
+        "dec2024_to_now": _apply_linear(truth, 1.1, 2.0),
+    }
+    merged, report = reconcile_sources(sources)
+    assert isinstance(report.winner_counts, dict)
+    assert sum(report.winner_counts.values()) == len(merged)
+    # digital has tighter effective resolution, so it wins every bucket.
+    assert report.winner_counts.get("digital", 0) == len(merged)
+
+
 def test_huber_pair_fit_robust_to_outlier():
     """Pairwise fits use Huber-robust regression so a small fraction of
     gross-outlier samples doesn't swing the recovered slope.

@@ -175,6 +175,10 @@ class ReconcileReport:
     continuity_violations: list[ContinuityViolation] = field(default_factory=list)
     conflicts: list[ReconcileConflict] = field(default_factory=list)  # always empty
     warnings: list[str] = field(default_factory=list)
+    # Per-source count of 15-min buckets that source won at merge time.
+    # Populated by `_merge_best_resolution`. Used by the Streamlit
+    # diagnostics panel and surfaced in the JSON run report.
+    winner_counts: dict[str, int] = field(default_factory=dict)
 
 
 def reconcile_sources(
@@ -691,8 +695,12 @@ def _merge_best_resolution(
 
         # ── Best-effective-resolution wins ──────────────────────────────────
         winner_idx = int(np.argmin(resolutions_here))
+        winner_source = str(sources[winner_idx])
         emitted_rows.append(
-            (pd.Timestamp(dates[winner_idx]), float(values[winner_idx]), str(sources[winner_idx]))
+            (pd.Timestamp(dates[winner_idx]), float(values[winner_idx]), winner_source)
+        )
+        report.winner_counts[winner_source] = (
+            report.winner_counts.get(winner_source, 0) + 1
         )
 
     merged = pd.DataFrame(
@@ -706,6 +714,16 @@ def _merge_best_resolution(
     # ── Archive gap-fill for K=0 buckets ────────────────────────────────────
     if archive_df is not None and len(archive_df) > 0:
         merged = _fill_archive_gaps(merged, archive_df)
+        # Count archive gap-fills as winners so the observability panel
+        # shows archive's contribution honestly.
+        if ARCHIVE_SOURCE_NAME in merged.get("_source", pd.Series(dtype=str)).values:
+            archive_fills = int(
+                (merged["_source"] == ARCHIVE_SOURCE_NAME).sum()
+            ) if "_source" in merged.columns else 0
+            if archive_fills > 0:
+                report.winner_counts[ARCHIVE_SOURCE_NAME] = (
+                    report.winner_counts.get(ARCHIVE_SOURCE_NAME, 0) + archive_fills
+                )
 
     merged = merged[[DATE_COL, TILT_COL]].sort_values(DATE_COL).reset_index(drop=True)
     return merged
