@@ -264,6 +264,42 @@ with st.sidebar:
     )
 
     st.divider()
+    with st.expander("🔬 Inspector overlays", expanded=False):
+        st.caption(
+            "Layers for the PNG transcription inspector below. Enabled "
+            "layers stack on top of each source's raw USGS PNG. "
+            "Placed in the sidebar so they stay visible while you "
+            "scroll through each source's overlay."
+        )
+        _insp_t1, _insp_t2 = st.columns(2)
+        with _insp_t1:
+            st.markdown("**Axis**")
+            layer_dots = st.checkbox("Re-traced dots", value=True, key="ovl_dots")
+            layer_bbox = st.checkbox("Plot bbox outline", value=False, key="ovl_bbox")
+            layer_yticks = st.checkbox("Y-tick OCR markers", value=False, key="ovl_yticks")
+            layer_ygrid = st.checkbox("Integer-µrad gridlines", value=False, key="ovl_ygrid")
+            layer_corners = st.checkbox("Corner (date, µrad) labels", value=False, key="ovl_corners")
+        with _insp_t2:
+            st.markdown("**Pixels**")
+            layer_blue = st.checkbox("Blue-curve HSV mask", value=False, key="ovl_blue")
+            layer_legend = st.checkbox("Legend-exclusion zone", value=False, key="ovl_legend")
+            layer_dropcols = st.checkbox("Dropped-width columns", value=False, key="ovl_dropcols")
+            layer_outliers = st.checkbox("Outlier drops", value=False, key="ovl_outliers")
+        st.markdown("**World / frame**")
+        layer_now = st.checkbox("'Now' UTC vertical line", value=False, key="ovl_now")
+        layer_green = st.checkbox("Green Az 30° HSV mask", value=False, key="ovl_green")
+        layer_csv = st.checkbox(
+            "Accumulated CSV samples (frame-corrected)",
+            value=False,
+            key="ovl_csv",
+            help=(
+                "Plots the per-source CSV against this PNG's calibration, "
+                "with the median CSV↔re-trace offset subtracted so "
+                "rebaseline drift doesn't push every dot off-plot."
+            ),
+        )
+
+    st.divider()
     st.caption(
         "Built by [Madison Rickert](https://github.com/madisonrickert) · "
         "[source on GitHub](https://github.com/madisonrickert/kilauea-tracker)"
@@ -1009,6 +1045,20 @@ chart_selection = st.plotly_chart(
     selection_mode="box",
     key="main_chart",
 )
+# Plotly's native double-click-to-deselect is fiddly to hit on the chart
+# area; give the user an explicit button that clears the box-select
+# state in session_state so the CSV export date pickers fall back to
+# their defaults. Only render when a selection is actually live to keep
+# the UI quiet otherwise.
+_has_chart_selection = (
+    bool(chart_selection)
+    and isinstance(chart_selection, dict)
+    and chart_selection.get("selection", {}).get("box")
+)
+if _has_chart_selection:
+    if st.button("✕ Clear chart selection", key="clear_chart_selection"):
+        st.session_state.pop("main_chart", None)
+        st.rerun()
 
 # Hover-to-clipboard: press ⌘C / Ctrl+C while hovering a datapoint on the
 # chart to copy "YYYY-MM-DD HH:MM | X.XX µrad" to the clipboard. Uses
@@ -1430,32 +1480,9 @@ with st.expander("🔎 Reconcile diagnostics"):
 with st.expander("🔬 Transcription quality inspector"):
     st.caption(
         "Each USGS source is rendered once with the selected overlay "
-        "layers stacked on top. Toggle layers below to isolate what "
-        "you're diagnosing — bbox/ticks to verify axis OCR, blue-mask "
-        "to verify the tracer, dropped/outlier markers to see where "
-        "the pipeline punted. All layers off = the plain USGS PNG."
+        "layers stacked on top. Layer toggles live in the sidebar under "
+        "**🔬 Inspector overlays** so they stay visible while you scroll."
     )
-
-    # Per-layer toggles, grouped by what they catch.
-    tier1_col, tier2_col, tier3_col = st.columns(3)
-    with tier1_col:
-        st.markdown("**Axis calibration**")
-        layer_dots = st.checkbox("Re-traced dots", value=True, key="ovl_dots")
-        layer_bbox = st.checkbox("Plot bbox outline", value=False, key="ovl_bbox")
-        layer_yticks = st.checkbox("Y-tick OCR markers", value=False, key="ovl_yticks")
-        layer_ygrid = st.checkbox("Integer-µrad gridlines", value=False, key="ovl_ygrid")
-        layer_corners = st.checkbox("Corner (date, µrad) labels", value=False, key="ovl_corners")
-    with tier2_col:
-        st.markdown("**Tracer pixels**")
-        layer_blue = st.checkbox("Blue-curve HSV mask", value=False, key="ovl_blue")
-        layer_legend = st.checkbox("Legend-exclusion zone", value=False, key="ovl_legend")
-        layer_dropcols = st.checkbox("Dropped-width columns", value=False, key="ovl_dropcols")
-        layer_outliers = st.checkbox("Rolling-median outlier drops", value=False, key="ovl_outliers")
-    with tier3_col:
-        st.markdown("**World state**")
-        layer_now = st.checkbox("'Now' UTC vertical line", value=False, key="ovl_now")
-        layer_green = st.checkbox("Green Az 30° HSV mask", value=False, key="ovl_green")
-        layer_csv = st.checkbox("Accumulated CSV samples", value=False, key="ovl_csv")
 
     layers = {
         "dots": layer_dots,
@@ -1487,6 +1514,7 @@ with st.expander("🔬 Transcription quality inspector"):
         calibration,
         report,
         layers: dict,
+        display_tz: str = "UTC",
     ) -> tuple[bytes | None, dict]:
         """Render the PNG with every enabled layer drawn on top.
 
@@ -1531,6 +1559,26 @@ with st.expander("🔬 Transcription quality inspector"):
         def val_to_py(val) -> float:
             return (val - calibration.y_intercept) / calibration.y_slope
 
+        def fmt_dt_tz(ts) -> str:
+            """Format a naive-UTC timestamp in the user's display timezone."""
+            try:
+                return (
+                    pd.Timestamp(ts)
+                    .tz_localize("UTC")
+                    .tz_convert(display_tz)
+                    .strftime("%Y-%m-%d %H:%M:%S")
+                )
+            except Exception:
+                return str(ts)
+
+        # Run trace_curve once if anything needs it (dots or csv layer).
+        traced = None
+        if layers.get("dots") or layers.get("csv"):
+            try:
+                traced = trace_curve(img_bgr, calibration)
+            except Exception:
+                traced = None
+
         img = Image.open(io.BytesIO(raw_bytes)).convert("RGBA")
         W, H = img.size
         overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
@@ -1568,12 +1616,12 @@ with st.expander("🔬 Transcription quality inspector"):
             for py, px in zip(ys, xs):
                 overlay.putpixel((int(px + x0), int(py + y0)), (0, 200, 255, 140))
 
-        # ── Green-mask highlight (yellow, contrasts with green) ───────
+        # ── Green-mask highlight (magenta for high contrast vs green) ─
         if layers.get("green") and green_mask is not None:
             ys, xs = np.where(green_mask)
             stats["green_px"] = int(ys.size)
             for py, px in zip(ys, xs):
-                overlay.putpixel((int(px + x0), int(py + y0)), (255, 230, 0, 140))
+                overlay.putpixel((int(px + x0), int(py + y0)), (255, 20, 220, 180))
 
         # ── Legend-exclusion rectangle ────────────────────────────────
         if layers.get("legend"):
@@ -1595,11 +1643,27 @@ with st.expander("🔬 Transcription quality inspector"):
                 draw.line((px, y0, px, y0 + 6), fill=(255, 140, 0, 220), width=1)
 
         # ── Integer-µrad gridlines (dashed, cyan) ─────────────────────
+        # Step chosen adaptively so lines don't overlap on wide-range
+        # plots (e.g. dec2024_to_now spans ~140 µrad — 1-µrad lines
+        # would pack together illegibly).
         if layers.get("ygrid"):
             y_top = calibration.pixel_to_microradians(y0)
             y_bot = calibration.pixel_to_microradians(y1)
             lo, hi = sorted((y_top, y_bot))
-            for val in range(int(np.floor(lo)), int(np.ceil(hi)) + 1):
+            span = hi - lo
+            if span < 10:
+                step = 1
+            elif span < 30:
+                step = 2
+            elif span < 60:
+                step = 5
+            elif span < 120:
+                step = 10
+            else:
+                step = 20
+            start = int(np.ceil(lo / step) * step)
+            end = int(np.floor(hi / step) * step)
+            for val in range(start, end + 1, step):
                 py = val_to_py(val)
                 if not (y0 <= py <= y1):
                     continue
@@ -1610,10 +1674,20 @@ with st.expander("🔬 Transcription quality inspector"):
                         width=1,
                     )
                 if font is not None:
+                    label = f"{val:+d}"
+                    lw = (
+                        draw.textlength(label, font=font)
+                        if hasattr(draw, "textlength")
+                        else 6 * len(label)
+                    )
+                    draw.rectangle(
+                        (x1 - lw - 4, py - 6, x1 - 2, py + 6),
+                        fill=(0, 0, 0, 140),
+                    )
                     draw.text(
-                        (x1 - 22, py - 6),
-                        f"{val:+d}",
-                        fill=(100, 220, 255, 220),
+                        (x1 - lw - 2, py - 6),
+                        label,
+                        fill=(100, 220, 255, 230),
                         font=font,
                     )
 
@@ -1632,23 +1706,31 @@ with st.expander("🔬 Transcription quality inspector"):
                     )
 
         # ── 'Now' vertical line ───────────────────────────────────────
+        # Clamp to the plot's right edge if 'now' is past x_end (common
+        # on rolling windows: USGS PNGs lag real time by a few minutes).
+        # Visualize as bright if inside the window, dimmer if clamped —
+        # so you can tell whether the window's right edge = now or
+        # whether x_end has drifted significantly from wall-clock.
         if layers.get("now"):
             from datetime import datetime as _dt, timezone as _tz
             now = pd.Timestamp(_dt.now(tz=_tz.utc)).tz_localize(None)
-            px_now = date_to_px(now)
-            if x0 <= px_now <= x1:
-                draw.line(
-                    (px_now, y0, px_now, y1),
-                    fill=(0, 255, 120, 200),
-                    width=1,
+            px_now_raw = date_to_px(now)
+            clamped = not (x0 <= px_now_raw <= x1)
+            px_now = int(max(x0, min(px_now_raw, x1)))
+            line_color = (150, 255, 150, 180) if clamped else (0, 255, 120, 220)
+            draw.line((px_now, y0, px_now, y1), fill=line_color, width=2)
+            if font is not None:
+                label = "now ↩" if clamped else "now"
+                lw = (
+                    draw.textlength(label, font=font)
+                    if hasattr(draw, "textlength")
+                    else 6 * len(label)
                 )
-                if font is not None:
-                    draw.text(
-                        (px_now + 2, y0 + 2),
-                        "now",
-                        fill=(0, 255, 120, 230),
-                        font=font,
-                    )
+                # Position label to the LEFT of the line if it's at x1,
+                # otherwise right.
+                tx = px_now - lw - 2 if clamped and px_now >= x1 - 10 else px_now + 2
+                draw.rectangle((tx - 1, y0 + 1, tx + lw + 1, y0 + 13), fill=(0, 0, 0, 170))
+                draw.text((tx, y0 + 2), label, fill=line_color, font=font)
 
         # ── Outlier drops (yellow X markers at dropped samples) ───────
         if layers.get("outliers"):
@@ -1674,34 +1756,59 @@ with st.expander("🔬 Transcription quality inspector"):
             )
 
         # ── Corner (date, µrad) labels ────────────────────────────────
+        # Y values use the OCR'd label range rather than the bbox
+        # extrapolation, because the plot bbox extends a few pixels
+        # past the outermost tick into axis-margin whitespace. Using
+        # the labelled range matches the user's visual intuition
+        # ("the top of this plot says +20"). If OCR didn't land any
+        # labels, we fall back to the bbox extrapolation.
         if layers.get("corners") and font is not None:
-            def _fmt_dt(ts):
-                try:
-                    return pd.Timestamp(ts).strftime("%Y-%m-%d %H:%M")
-                except Exception:
-                    return str(ts)
-            y_top = calibration.pixel_to_microradians(y0)
-            y_bot = calibration.pixel_to_microradians(y1)
-            corner_labels = [
-                (x0 + 2, y0 + 2, f"TL {_fmt_dt(calibration.x_start)} {y_top:+.1f}"),
-                (max(x0, x1 - 220), y0 + 2, f"TR {_fmt_dt(calibration.x_end)} {y_top:+.1f}"),
-                (x0 + 2, y1 - 14, f"BL {_fmt_dt(calibration.x_start)} {y_bot:+.1f}"),
-                (max(x0, x1 - 220), y1 - 14, f"BR {_fmt_dt(calibration.x_end)} {y_bot:+.1f}"),
-            ]
-            for tx, ty, txt in corner_labels:
-                # Draw a dark rectangle behind text for legibility.
-                if font is not None:
-                    w = draw.textlength(txt, font=font) if hasattr(draw, "textlength") else 6 * len(txt)
-                    draw.rectangle((tx - 1, ty - 1, tx + w + 1, ty + 11), fill=(0, 0, 0, 170))
-                    draw.text((tx, ty), txt, fill=(255, 255, 0, 230), font=font)
+            labels = calibration.y_labels_found or []
+            if labels:
+                label_vals = [v for _, v in labels]
+                y_top_disp = max(label_vals)
+                y_bot_disp = min(label_vals)
+                suffix = ""
+            else:
+                y_top_disp = calibration.pixel_to_microradians(y0)
+                y_bot_disp = calibration.pixel_to_microradians(y1)
+                suffix = " (bbox-extrap)"
 
-        # ── Accumulated CSV samples (purple) ──────────────────────────
-        # Reads the per-source CSV and plots each sample at (pixel_x, pixel_y)
-        # using the CURRENT PNG's calibration. Offsets vs the blue line
-        # reveal the delta between (a) the CSV's cumulative reference frame
-        # (frame-aligned by append_history across fetches) and (b) the raw
-        # frame USGS labelled on this PNG. Uniform vertical offset = USGS
-        # rebaseline (expected); parallel tracks or sawtooth = alignment bug.
+            corner_texts = [
+                ("TL", x0 + 2, y0 + 2, False,
+                 f"TL {fmt_dt_tz(calibration.x_start)} {y_top_disp:+.1f}{suffix}"),
+                ("TR", x1 - 2, y0 + 2, True,
+                 f"{fmt_dt_tz(calibration.x_end)} {y_top_disp:+.1f}{suffix} TR"),
+                ("BL", x0 + 2, y1 - 14, False,
+                 f"BL {fmt_dt_tz(calibration.x_start)} {y_bot_disp:+.1f}{suffix}"),
+                ("BR", x1 - 2, y1 - 14, True,
+                 f"{fmt_dt_tz(calibration.x_end)} {y_bot_disp:+.1f}{suffix} BR"),
+            ]
+            for _id, anchor_x, ty, right_aligned, txt in corner_texts:
+                w = (
+                    draw.textlength(txt, font=font)
+                    if hasattr(draw, "textlength")
+                    else 6 * len(txt)
+                )
+                tx = anchor_x - w if right_aligned else anchor_x
+                draw.rectangle(
+                    (tx - 2, ty - 1, tx + w + 2, ty + 11),
+                    fill=(0, 0, 0, 180),
+                )
+                draw.text((tx, ty), txt, fill=(255, 255, 0, 235), font=font)
+
+        # ── Accumulated CSV samples (purple, frame-corrected) ─────────
+        # The per-source CSV lives in the cumulative frame that
+        # append_history aligns fetches to. That frame is offset from
+        # the CURRENT PNG's raw y-axis whenever USGS rebaselines the
+        # plot (two_day/week/month are relative-zero; they drift over
+        # time). Without correction the dots all fall off-plot.
+        #
+        # We subtract the median offset between CSV values and re-
+        # traced values at overlapping timestamps — so the "rebaseline
+        # offset" is zeroed out. Any REMAINING offset between dots and
+        # the blue line = a real per-sample alignment defect worth
+        # investigating (parallel tracks, sawtooth splits).
         if layers.get("csv"):
             try:
                 from kilauea_tracker.config import source_csv_path
@@ -1710,6 +1817,7 @@ with st.expander("🔬 Transcription quality inspector"):
                 csv_path = None
             n_csv_drawn = 0
             n_csv_clipped = 0
+            applied_offset = 0.0
             if csv_path is not None and csv_path.exists():
                 try:
                     df_csv = pd.read_csv(csv_path, parse_dates=[DATE_COL])
@@ -1719,43 +1827,62 @@ with st.expander("🔬 Transcription quality inspector"):
                     in_x = (df_csv[DATE_COL] >= calibration.x_start) & (
                         df_csv[DATE_COL] <= calibration.x_end
                     )
-                    df_win = df_csv[in_x]
+                    df_win = df_csv[in_x].copy()
+                    # Compute frame offset from re-trace ∩ CSV at
+                    # matching 15-min buckets.
+                    if traced is not None and len(traced) > 0 and len(df_win) > 0:
+                        bucket_csv = (
+                            df_win.assign(
+                                _b=df_win[DATE_COL].dt.floor("15min")
+                            )
+                            .groupby("_b")[TILT_COL]
+                            .median()
+                        )
+                        bucket_trace = (
+                            traced.assign(
+                                _b=traced[DATE_COL].dt.floor("15min")
+                            )
+                            .groupby("_b")[TILT_COL]
+                            .median()
+                        )
+                        common = bucket_csv.index.intersection(bucket_trace.index)
+                        if len(common) >= 3:
+                            deltas = (
+                                bucket_trace.loc[common] - bucket_csv.loc[common]
+                            ).values
+                            applied_offset = float(np.median(deltas))
                     dot_r = 2
                     for _, row in df_win.iterrows():
                         px = date_to_px(row[DATE_COL])
-                        py = val_to_py(row[TILT_COL])
+                        py = val_to_py(row[TILT_COL] + applied_offset)
                         if not (x0 <= px <= x1 and y0 <= py <= y1):
                             n_csv_clipped += 1
                             continue
                         draw.ellipse(
                             (px - dot_r, py - dot_r, px + dot_r, py + dot_r),
-                            fill=(170, 60, 230, 90),
-                            outline=(130, 0, 200, 160),
+                            fill=(170, 60, 230, 110),
+                            outline=(130, 0, 200, 180),
                         )
                         n_csv_drawn += 1
             stats["csv_drawn"] = n_csv_drawn
             stats["csv_clipped_y"] = n_csv_clipped
+            stats["csv_offset"] = applied_offset
 
         # ── Re-traced dots (red, translucent) ─────────────────────────
         n_dots = 0
-        if layers.get("dots"):
-            try:
-                traced = trace_curve(img_bgr, calibration)
-            except Exception:
-                traced = None
-            if traced is not None:
-                dot_r = 2
-                for _, row in traced.iterrows():
-                    px = date_to_px(row[DATE_COL])
-                    py = val_to_py(row[TILT_COL])
-                    if not (x0 - dot_r <= px <= x1 + dot_r and y0 - dot_r <= py <= y1 + dot_r):
-                        continue
-                    draw.ellipse(
-                        (px - dot_r, py - dot_r, px + dot_r, py + dot_r),
-                        fill=(255, 40, 40, 80),
-                        outline=(200, 0, 0, 140),
-                    )
-                    n_dots += 1
+        if layers.get("dots") and traced is not None:
+            dot_r = 2
+            for _, row in traced.iterrows():
+                px = date_to_px(row[DATE_COL])
+                py = val_to_py(row[TILT_COL])
+                if not (x0 - dot_r <= px <= x1 + dot_r and y0 - dot_r <= py <= y1 + dot_r):
+                    continue
+                draw.ellipse(
+                    (px - dot_r, py - dot_r, px + dot_r, py + dot_r),
+                    fill=(255, 40, 40, 80),
+                    outline=(200, 0, 0, 140),
+                )
+                n_dots += 1
         stats["dots"] = n_dots
 
         blended = Image.alpha_composite(img, overlay)
@@ -1770,13 +1897,23 @@ with st.expander("🔬 Transcription quality inspector"):
     for r in reports:
         if r.source_name not in _inspector_url_map:
             continue
-        if r.calibration is None:
-            continue
         raw = _fetch_png_bytes(_inspector_url_map[r.source_name])
         if raw is None:
             st.caption(f"⚠️ {r.source_name}: could not fetch PNG")
             continue
-        overlay_bytes, stats = _build_overlay_png(raw, r.calibration, r, layers)
+        if r.calibration is None:
+            # Calibration failed this run — still show the raw PNG so the
+            # user can visually inspect what's being dropped. Surface the
+            # error instead of silently hiding the source.
+            st.markdown(f"**{r.source_name}** — calibration failed")
+            if r.error:
+                st.caption(f"❌ {r.error}")
+            st.image(raw, width="stretch", output_format="PNG")
+            st.markdown("---")
+            continue
+        overlay_bytes, stats = _build_overlay_png(
+            raw, r.calibration, r, layers, display_tz=DISPLAY_TZ,
+        )
 
         cal = r.calibration
         bx0, by0, bx1, by1 = cal.plot_bbox
@@ -1799,9 +1936,12 @@ with st.expander("🔬 Transcription quality inspector"):
         if stats.get("csv_drawn") is not None and (layers.get("csv")):
             csv_drawn = stats.get("csv_drawn", 0)
             csv_clipped = stats.get("csv_clipped_y", 0)
+            csv_offset = stats.get("csv_offset", 0.0)
             csv_bit = f"{csv_drawn} CSV samples in-plot"
+            if abs(csv_offset) > 0.01:
+                csv_bit += f" (frame offset {csv_offset:+.2f} µrad applied)"
             if csv_clipped:
-                csv_bit += f" ({csv_clipped} clipped off-range → frame drift)"
+                csv_bit += f" · {csv_clipped} still clipped → per-sample drift"
             caption_bits.append(csv_bit)
         st.markdown(" · ".join(caption_bits))
 
