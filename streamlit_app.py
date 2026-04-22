@@ -2030,8 +2030,9 @@ with st.expander("🔬 Transcription quality inspector"):
                     f"x-start (UTC): `{cal.x_start}`  \n"
                     f"x-end (UTC): `{cal.x_end}`  \n"
                     f"window: `{x_span_hrs:.1f}` hrs  \n"
-                    f"title PSM: `{cal.title_psm_used or '—'}`  \n"
-                    f"title OCR text:  \n`{(cal.title_raw_text or '').strip() or '(empty)'}`"
+                    f"time-range OCR PSM: `{cal.title_psm_used or '—'}`  \n"
+                    f"time-range OCR text (from strip below plot):  \n"
+                    f"`{(cal.title_raw_text or '').strip() or '(empty)'}`"
                 )
             with dbg_cols[1]:
                 st.markdown("**Y axis**")
