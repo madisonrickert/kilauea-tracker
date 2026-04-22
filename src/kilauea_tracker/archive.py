@@ -50,7 +50,15 @@ to be source-agnostic by the time it ships. The reconciler sees it as
 just another aligned source named `"archive"`.
 """
 
-from __future__ import annotations
+# NOTE: deliberately NOT importing `from __future__ import annotations`
+# here. Python 3.14 has a CPython dataclasses bug (observed on Streamlit
+# Cloud) where _is_type() dereferences a None return from
+# sys.modules.get(cls.__module__) during @dataclass processing of string-
+# form annotations. Keeping annotations as real type objects (3.9+ PEP
+# 585 syntax works without the future import) skips the string-resolution
+# path and avoids the crash. All other dataclass-defining modules still
+# use future-annotations; archive.py is the first one in the ingest
+# import chain so it's the one that actually trips the bug in practice.
 
 from dataclasses import dataclass, field
 from pathlib import Path
