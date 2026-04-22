@@ -358,6 +358,96 @@ def test_empty_sources_returns_empty_history():
     assert report.rows_out == 0
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 4 Commit 1: hard-pin digital + pathological-a reset
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_digital_hard_pin_exact():
+    """With many pair constraints, the digital pin MUST come out exactly
+    (1.0, 0.0), not approximately.
+
+    Regression guard for the Phase 2 soft-pin bug where the joint lstsq
+    treated the pin as one equal-weight row and returned
+    `a_digital = 0.9622` in 2026-04 production data.
+    """
+    n = PAIRWISE_MIN_OVERLAP_BUCKETS * 3
+    truth = _series("2025-03-01", n=n, base=0.0, amplitude=10.0)
+    sources = {
+        "digital": truth,
+        "dec2024_to_now": _apply_linear(truth, 1.15, 2.0),
+        "three_month": _apply_linear(truth, 0.85, -1.5),
+        "month": _apply_linear(truth, 1.1, 0.5),
+        "week": _apply_linear(truth, 0.92, 0.8),
+        "two_day": _apply_linear(truth, 1.05, -2.0),
+    }
+    _, report = reconcile_sources(sources)
+    digital = next(s for s in report.sources if s.name == "digital")
+    assert digital.a == 1.0, f"a_digital = {digital.a}, expected exactly 1.0"
+    assert digital.b == 0.0, f"b_digital = {digital.b}, expected exactly 0.0"
+    assert digital.is_anchor is True
+
+
+def test_pathological_a_resets_to_identity_with_scalar_b():
+    """A pair fit that returns pathological `a` (e.g. because the pair's
+    true signal is near-flat) must reset to `(a=1, b=median_offset)`
+    instead of applying the bad scaling. Amplifying noise by a factor
+    of 2-3 is worse than a constant offset.
+    """
+    # Build a dataset where `month` disagrees with dec2024_to_now by a
+    # HUGE slope — exactly the 2026-04 prod pathology. The reset must
+    # fire and we expect the source to land at identity with a scalar
+    # offset estimated vs dec2024_to_now.
+    n = PAIRWISE_MIN_OVERLAP_BUCKETS * 3
+    truth = _series("2025-03-01", n=n, base=-10.0, amplitude=8.0)
+    pathological_a = 0.3  # well outside PAIRWISE_MAX_A_DEVIATION_FRACTION (0.5)
+    pathological_b = 6.0
+    sources = {
+        "digital": truth,
+        "dec2024_to_now": _apply_linear(truth, 1.02, 0.1),
+        "month": _apply_linear(truth, pathological_a, pathological_b),
+    }
+    _, report = reconcile_sources(sources)
+    month = next(s for s in report.sources if s.name == "month")
+    assert month.a == 1.0, f"a_month should reset to 1.0, got {month.a}"
+    assert month.note is not None and "pathological" in month.note
+    # b should be finite (not inf/NaN) and representative of the scalar
+    # offset the identity-reset mode tries to preserve.
+    assert np.isfinite(month.b)
+
+
+def test_pathological_reset_uses_dec2024_to_now_when_digital_absent_in_overlap():
+    """When the pin is `digital` but the pathological source doesn't
+    temporally overlap digital, the reset's scalar offset comes from
+    the best available overlapping reference (typically
+    `dec2024_to_now`, which covers both digital's epoch and the rolling
+    sources').
+    """
+    n = PAIRWISE_MIN_OVERLAP_BUCKETS * 3
+    # Digital covers Jan-Jun 2025.
+    digital_truth = _series("2025-03-01", n=n, base=0.0, amplitude=8.0)
+    # dec2024_to_now covers BOTH Jan-Jun 2025 AND 2026.
+    dec_jan = _apply_linear(digital_truth, 1.0, 0.0)
+    dec_2026 = _series("2026-04-01", n=n, base=-15.0, amplitude=4.0)
+    dec = pd.concat([dec_jan, dec_2026], ignore_index=True)
+    # `month` only covers 2026 (no digital overlap). Inject pathological a.
+    month_truth = _series("2026-04-01", n=n, base=-15.0, amplitude=4.0)
+    month = _apply_linear(month_truth, 0.2, 5.0)  # very pathological a
+    sources = {
+        "digital": digital_truth,
+        "dec2024_to_now": dec,
+        "month": month,
+    }
+    _, report = reconcile_sources(sources)
+    month_rec = next(s for s in report.sources if s.name == "month")
+    assert month_rec.a == 1.0
+    # b should be roughly median(month - dec) ≈ median(0.2·truth+5 - truth)
+    # ≈ 5 + 0.2·median(truth) - median(truth). For the 2026 segment
+    # median(truth) ≈ -15, so expected b ≈ 5 + 0.2·(-15) - (-15) = 17.
+    # Loose bound — exact value depends on bucket boundaries.
+    assert 10 < month_rec.b < 25, f"reset b = {month_rec.b}, expected ~15-20"
+
+
 def test_sources_unknown_to_priority_tuple_silently_ignored_for_fallback_resolution():
     """A source name not in EFFECTIVE_RESOLUTION_FALLBACK_MICRORAD_PER_PIXEL
     gets the default 1.0 µrad/px resolution — it still participates in the

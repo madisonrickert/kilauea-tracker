@@ -316,100 +316,213 @@ def _solve_pairwise_calibration(
 ) -> dict[str, SourceAlignment]:
     """Solve two decoupled linear systems for {a_i} and {b_i} jointly.
 
-    The a-system uses pair measurements `a_i - α_ij · a_j = 0` plus a
-    pin row `a_pin = 1` (digital if present, else the first source
-    alphabetically).
+    The anchor source (`digital` if present, else the first source
+    alphabetically) is HARD-pinned at `a=1, b=0` by eliminating its
+    variables from the system entirely, not by adding a soft pin row.
+    A soft pin is just one equal-weight row in the lstsq, and with many
+    pair constraints it gets out-voted — in 2026-04 production data the
+    pin solved to `a_digital = 0.9622` instead of 1, propagating a 4%
+    scale error to every downstream source.
 
-    The b-system uses the same structure with RHS `β_ij` and a pin row
-    `b_pin = 0`:  `b_i - α_ij · b_j = β_ij`.
+    Substituted pair constraints (for α_ij from `y_i = α_ij · y_j + β_ij`):
+      - both sources pinned → constraint involves no unknowns; skip.
+      - only `i` pinned      → `a_j = 1/α_ij`, `b_j = -β_ij/α_ij`.
+      - only `j` pinned      → `a_i = α_ij`,   `b_i = β_ij`.
+      - neither pinned       → `a_i - α_ij·a_j = 0`,
+                               `b_i - α_ij·b_j = β_ij`.
 
-    Both systems are solved via `np.linalg.lstsq` which tolerates
-    underdetermined cases (returns the minimum-norm solution) — a source
-    with no pair constraint at all ends up at the pinned identity.
+    After the solve, any source whose recovered `|a-1|` exceeds
+    PAIRWISE_MAX_A_DEVIATION_FRACTION is flagged AND reset to identity
+    (a=1, b=median-offset-vs-anchor) — applying a pathological slope
+    correction is worse than applying none, because the division
+    amplifies the underlying transcription noise by 2-3×.
     """
     names = sorted(live.keys())
-    idx = {name: i for i, name in enumerate(names)}
     n = len(names)
+    pin_name = DIGITAL_SOURCE_NAME if DIGITAL_SOURCE_NAME in names else names[0]
 
-    pin_name = DIGITAL_SOURCE_NAME if DIGITAL_SOURCE_NAME in idx else names[0]
+    # Non-pinned variables are the unknowns we solve for.
+    unknowns = [n_ for n_ in names if n_ != pin_name]
+    uidx = {name: i for i, name in enumerate(unknowns)}
 
-    # ── a-system ────────────────────────────────────────────────────────────
-    a_rows: list[list[float]] = []
-    a_rhs: list[float] = []
-    pin_row = [0.0] * n
-    pin_row[idx[pin_name]] = 1.0
-    a_rows.append(pin_row)
-    a_rhs.append(1.0)
-    for f in fits:
-        row = [0.0] * n
-        row[idx[f.source_i]] = 1.0
-        row[idx[f.source_j]] = -f.alpha
-        a_rows.append(row)
-        a_rhs.append(0.0)
-    a_vec, *_ = np.linalg.lstsq(np.array(a_rows), np.array(a_rhs), rcond=None)
-
-    # ── b-system ────────────────────────────────────────────────────────────
-    # Use the same pairwise α from the raw measurements (not the re-derived
-    # a_i/a_j ratio) so measurement error propagates consistently into
-    # both systems.
-    b_rows: list[list[float]] = []
-    b_rhs: list[float] = []
-    pin_row = [0.0] * n
-    pin_row[idx[pin_name]] = 1.0
-    b_rows.append(pin_row)
-    b_rhs.append(0.0)
-    for f in fits:
-        row = [0.0] * n
-        row[idx[f.source_i]] = 1.0
-        row[idx[f.source_j]] = -f.alpha
-        b_rows.append(row)
-        b_rhs.append(f.beta)
-    b_vec, *_ = np.linalg.lstsq(np.array(b_rows), np.array(b_rhs), rcond=None)
-
-    # ── package per-source record ───────────────────────────────────────────
-    alignments: dict[str, SourceAlignment] = {}
     pair_counts: dict[str, int] = {name: 0 for name in names}
     for f in fits:
         pair_counts[f.source_i] += 1
         pair_counts[f.source_j] += 1
 
-    for name in names:
-        a = float(a_vec[idx[name]])
-        b = float(b_vec[idx[name]])
+    if len(unknowns) == 0:
+        # Only pin is present — nothing to solve.
+        alignments: dict[str, SourceAlignment] = {
+            pin_name: SourceAlignment(
+                name=pin_name,
+                rows_in=len(live[pin_name]),
+                a=1.0,
+                b=0.0,
+                pairs_used=pair_counts[pin_name],
+                is_anchor=True,
+                effective_resolution_microrad_per_pixel=(
+                    EFFECTIVE_RESOLUTION_FALLBACK_MICRORAD_PER_PIXEL.get(pin_name, 1.0)
+                ),
+                offset_microrad=0.0,
+                overlap_buckets=pair_counts[pin_name],
+            )
+        }
+        report.sources.append(alignments[pin_name])
+        return alignments
+
+    # Build both systems with pin variables substituted out.
+    a_rows: list[list[float]] = []
+    a_rhs: list[float] = []
+    b_rows: list[list[float]] = []
+    b_rhs: list[float] = []
+    m = len(unknowns)
+    for f in fits:
+        i_pin = (f.source_i == pin_name)
+        j_pin = (f.source_j == pin_name)
+        if i_pin and j_pin:
+            continue  # trivial
+        row_a = [0.0] * m
+        row_b = [0.0] * m
+        if not i_pin and not j_pin:
+            # a_i - α·a_j = 0,  b_i - α·b_j = β
+            row_a[uidx[f.source_i]] = 1.0
+            row_a[uidx[f.source_j]] = -f.alpha
+            row_b[uidx[f.source_i]] = 1.0
+            row_b[uidx[f.source_j]] = -f.alpha
+            a_rhs.append(0.0)
+            b_rhs.append(f.beta)
+        elif j_pin:
+            # a_i = α,  b_i = β
+            row_a[uidx[f.source_i]] = 1.0
+            row_b[uidx[f.source_i]] = 1.0
+            a_rhs.append(f.alpha)
+            b_rhs.append(f.beta)
+        else:  # i_pin
+            # a_j = 1/α,  b_j = -β/α  (assuming α is non-zero; it is by
+            # construction since α comes from a non-trivial linear fit)
+            if abs(f.alpha) < 1e-9:
+                continue
+            row_a[uidx[f.source_j]] = 1.0
+            row_b[uidx[f.source_j]] = 1.0
+            a_rhs.append(1.0 / f.alpha)
+            b_rhs.append(-f.beta / f.alpha)
+        a_rows.append(row_a)
+        b_rows.append(row_b)
+
+    if len(a_rows) == 0:
+        # No pair constraints left unknowns — everyone defaults to identity.
+        a_vec = np.ones(m)
+        b_vec = np.zeros(m)
+    else:
+        a_vec, *_ = np.linalg.lstsq(
+            np.array(a_rows), np.array(a_rhs), rcond=None
+        )
+        b_vec, *_ = np.linalg.lstsq(
+            np.array(b_rows), np.array(b_rhs), rcond=None
+        )
+
+    alignments: dict[str, SourceAlignment] = {}
+
+    # Pin record: exact identity, no solver noise.
+    alignments[pin_name] = SourceAlignment(
+        name=pin_name,
+        rows_in=len(live[pin_name]),
+        a=1.0,
+        b=0.0,
+        pairs_used=pair_counts[pin_name],
+        is_anchor=True,
+        effective_resolution_microrad_per_pixel=(
+            EFFECTIVE_RESOLUTION_FALLBACK_MICRORAD_PER_PIXEL.get(pin_name, 1.0)
+        ),
+        offset_microrad=0.0,
+        overlap_buckets=pair_counts[pin_name],
+    )
+    report.sources.append(alignments[pin_name])
+
+    for name in unknowns:
+        a = float(a_vec[uidx[name]])
+        b = float(b_vec[uidx[name]])
         record = SourceAlignment(
             name=name,
             rows_in=len(live[name]),
             a=a,
             b=b,
             pairs_used=pair_counts[name],
-            is_anchor=(name == pin_name),
+            is_anchor=False,
             effective_resolution_microrad_per_pixel=(
                 abs(a) * EFFECTIVE_RESOLUTION_FALLBACK_MICRORAD_PER_PIXEL.get(name, 1.0)
             ),
             offset_microrad=b,
             overlap_buckets=pair_counts[name],  # proxy for the old field
         )
-        # Sanity bounds: flag pathological corrections but do NOT refuse to
-        # apply them — the user explicitly wants Phase 2 to expose
-        # calibration bugs rather than hide them behind scalar offsets.
-        if abs(a - 1.0) > PAIRWISE_MAX_A_DEVIATION_FRACTION and not record.is_anchor:
+
+        # If the recovered slope is pathological, applying `(y - b)/a`
+        # amplifies transcription noise. Reset to a=1 and estimate b
+        # separately via median offset vs the best available reference.
+        # Prefer anchor-corrected `dec2024_to_now` (which always overlaps
+        # the rolling sources temporally) over `digital` (which covers
+        # only Jan-Jun 2025 and rarely overlaps rolling-source windows).
+        if abs(a - 1.0) > PAIRWISE_MAX_A_DEVIATION_FRACTION:
+            reference = (
+                "dec2024_to_now"
+                if "dec2024_to_now" in live
+                and name != "dec2024_to_now"
+                and alignments.get("dec2024_to_now") is not None
+                and alignments["dec2024_to_now"].note is None
+                else pin_name
+            )
+            reset_b = _estimate_scalar_offset(live, name, reference)
             msg = (
                 f"{name}: pairwise fit is pathological — "
                 f"a={a:.4f} (|a-1|={abs(a-1)*100:.1f}% > "
-                f"{PAIRWISE_MAX_A_DEVIATION_FRACTION*100:.0f}%)"
+                f"{PAIRWISE_MAX_A_DEVIATION_FRACTION*100:.0f}%); "
+                f"reset to a=1.0, b={reset_b:+.2f} µrad"
+            )
+            record.a = 1.0
+            record.b = reset_b
+            record.offset_microrad = reset_b
+            record.effective_resolution_microrad_per_pixel = (
+                EFFECTIVE_RESOLUTION_FALLBACK_MICRORAD_PER_PIXEL.get(name, 1.0)
             )
             record.note = msg
             report.warnings.append(msg)
-        elif abs(b) > PAIRWISE_MAX_B_MICRORAD and not record.is_anchor:
+        elif abs(b) > PAIRWISE_MAX_B_MICRORAD:
             msg = (
                 f"{name}: pairwise fit produces large intercept — "
                 f"b={b:+.2f} µrad (> {PAIRWISE_MAX_B_MICRORAD} µrad)"
             )
             record.note = msg
             report.warnings.append(msg)
+
         alignments[name] = record
         report.sources.append(record)
     return alignments
+
+
+def _estimate_scalar_offset(
+    live: dict[str, pd.DataFrame],
+    source_name: str,
+    reference_name: str,
+    *,
+    bucket_freq: str = ALIGNMENT_BUCKET,
+) -> float:
+    """Median bucket-aligned offset of `source` minus `reference`.
+
+    Called when a source's pairwise slope is pathological and we fall
+    back to a=1 + scalar-b correction. Returns 0.0 if there's no
+    overlap, which defers alignment to downstream handoff logic rather
+    than pick a value out of thin air.
+    """
+    if source_name not in live or reference_name not in live:
+        return 0.0
+    src = live[source_name]
+    ref = live[reference_name]
+    src_b = src.assign(_b=src[DATE_COL].dt.floor(bucket_freq)).groupby("_b")[TILT_COL].mean()
+    ref_b = ref.assign(_b=ref[DATE_COL].dt.floor(bucket_freq)).groupby("_b")[TILT_COL].mean()
+    overlap = src_b.index.intersection(ref_b.index)
+    if len(overlap) == 0:
+        return 0.0
+    return float(np.median(src_b.loc[overlap] - ref_b.loc[overlap]))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
