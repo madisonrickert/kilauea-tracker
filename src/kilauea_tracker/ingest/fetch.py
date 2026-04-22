@@ -22,19 +22,29 @@ logger = logging.getLogger(__name__)
 # Streamlit container if it isn't.
 DEFAULT_TIMEOUT_SECONDS = 30
 
-# A polite user-agent so HVO can identify the traffic if they want to.
-USER_AGENT = "kilauea-tracker/2.0 (+https://github.com/) python-requests"
+# Browser-like User-Agent prefix. HVO/USGS appears to serve non-browser
+# clients (python-requests, curl) with occasional 200-but-empty bodies
+# from Streamlit Cloud's egress IP range — same URL fetched via `st.image`
+# (which the browser handles) always works. Leading with a Mozilla/5.0
+# string greatly reduces that failure rate. The trailing parenthetical
+# keeps the "polite" kilauea-tracker identifier so HVO can still tell
+# this is automated traffic if they inspect logs.
+USER_AGENT = (
+    "Mozilla/5.0 (compatible; kilauea-tracker/2.0; "
+    "+https://github.com/madisonrickert/kilauea-tracker)"
+)
 
 # PNG magic bytes. HVO occasionally serves 200 OK with an empty or
 # truncated body (observed periodically on month/week); we detect the
 # malformed response by checking the magic signature and retry once.
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
-# Retry config for malformed responses. Total: at most 3 attempts with
-# short exponential-ish backoffs; we want the caller to get a real error
-# quickly rather than hang when USGS is systemically down.
-_RETRY_ATTEMPTS = 2
-_RETRY_BACKOFFS_SECONDS = [0.5, 2.0]
+# Retry config for malformed responses. USGS flakes can persist for a
+# few seconds before the next request succeeds, so the backoffs need to
+# span enough time to outlast the bad state without hanging the caller
+# forever on a true outage.
+_RETRY_ATTEMPTS = 3
+_RETRY_BACKOFFS_SECONDS = [1.0, 3.0, 6.0]
 
 
 @dataclass
