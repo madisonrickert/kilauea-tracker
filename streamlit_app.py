@@ -1924,6 +1924,31 @@ with st.expander("🔬 Transcription quality inspector"):
     # mapping in the USGS-source-plots expander is built further down.
     _inspector_url_map = {TILT_SOURCE_NAME[s]: USGS_TILT_URLS[s] for s in ALL_SOURCES}
 
+    @st.cache_data(ttl=INGEST_CACHE_TTL_SECONDS, show_spinner=False)
+    def _inspector_calibrate(raw_bytes: bytes, source_name: str):
+        """Decode raw PNG bytes and run the calibration pipeline.
+
+        The pipeline's `ingest()` skips calibration on 304 Not Modified
+        (the per-source CSV is already fresh, no need), so on a re-visit
+        to a warmed-cache app the IngestReports come back with
+        `calibration=None`. The inspector fetches fresh PNG bytes
+        unconditionally, so we can always re-calibrate from those bytes
+        here and show the overlays against the current PNG's axes —
+        instead of misleadingly rendering "calibration failed" for
+        every source just because nothing actually *failed*.
+        """
+        try:
+            import cv2
+            import numpy as np
+            from kilauea_tracker.ingest.calibrate import calibrate_axes
+            arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is None:
+                return None, "cv2.imdecode returned None"
+            return calibrate_axes(img, source_name=source_name), None
+        except Exception as e:
+            return None, str(e)
+
     for r in reports:
         if r.source_name not in _inspector_url_map:
             continue
@@ -1931,13 +1956,18 @@ with st.expander("🔬 Transcription quality inspector"):
         if raw is None:
             st.caption(f"⚠️ {r.source_name}: could not fetch PNG")
             continue
-        if r.calibration is None:
-            # Calibration failed this run — still show the raw PNG so the
-            # user can visually inspect what's being dropped. Surface the
-            # error instead of silently hiding the source.
+        # Prefer the pipeline's calibration when present (this fetch was
+        # fresh and went through the full trace), otherwise calibrate the
+        # PNG ourselves so we can still render overlays on 304-Not-
+        # Modified runs.
+        calibration = r.calibration
+        inspector_cal_error: str | None = None
+        if calibration is None:
+            calibration, inspector_cal_error = _inspector_calibrate(raw, r.source_name)
+        if calibration is None:
             st.markdown(f"**{r.source_name}** — calibration failed")
-            if r.error:
-                st.caption(f"❌ {r.error}")
+            msg = inspector_cal_error or r.error or "unknown cause"
+            st.caption(f"❌ {msg}")
             try:
                 st.image(raw, width="stretch", output_format="PNG")
             except Exception as e:
@@ -1945,10 +1975,10 @@ with st.expander("🔬 Transcription quality inspector"):
             st.markdown("---")
             continue
         overlay_bytes, stats = _build_overlay_png(
-            raw, r.calibration, r, layers, display_tz=DISPLAY_TZ,
+            raw, calibration, r, layers, display_tz=DISPLAY_TZ,
         )
 
-        cal = r.calibration
+        cal = calibration  # may have come from inspector_calibrate on a 304
         bx0, by0, bx1, by1 = cal.plot_bbox
         y_top = cal.pixel_to_microradians(by0)
         y_bot = cal.pixel_to_microradians(by1)
