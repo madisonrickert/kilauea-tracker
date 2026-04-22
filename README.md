@@ -95,11 +95,11 @@ non-technical end users just visit a URL.
    paid Streamlit tier.
 3. On <https://share.streamlit.io>, click **"New app"**.
 4. Select your repo, branch (`main`), and main file path (`streamlit_app.py`).
-5. Click **"Advanced settings"** → set **Python version** to `3.11`. No
-   secrets needed (the USGS PNGs are public).
+5. **Python version** is set by `runtime.txt` (currently `python-3.14`).
+   No secrets needed (the USGS PNGs are public).
 6. Click **Deploy**. The first build takes ~5 minutes while Streamlit Cloud
-   installs Tesseract via `packages.txt` and pip installs the dependencies
-   from `requirements.txt`.
+   installs Tesseract via `packages.txt` and runs `uv sync` against
+   `pyproject.toml` + `uv.lock` to install the Python dependencies.
 7. Your app lives at a URL like
    `https://<your-username>-kilauea-tracker-streamlit-app-<hash>.streamlit.app`.
 8. Every push to `main` auto-redeploys.
@@ -114,9 +114,10 @@ that, page loads are fast.
 kilauea-tracker/
 ├── streamlit_app.py            # the Streamlit entrypoint
 ├── pyproject.toml              # uv-managed dep list
-├── requirements.txt            # pinned, used by Streamlit Cloud
+├── uv.lock                     # pinned lock, used by Streamlit Cloud
+├── runtime.txt                 # Python version for Streamlit Cloud (3.14)
 ├── packages.txt                # apt packages for Streamlit Cloud (tesseract)
-├── .python-version             # 3.11
+├── .python-version             # 3.14
 ├── .streamlit/config.toml      # dark theme + lava-orange accent
 ├── .github/workflows/
 │   └── refresh-cache.yml       # daily cron that updates the committed cache
