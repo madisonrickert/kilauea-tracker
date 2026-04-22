@@ -1,0 +1,349 @@
+{
+  "run_started_at_utc": "2026-04-22T02:34:22Z",
+  "run_finished_at_utc": "2026-04-22T02:34:26Z",
+  "per_source": [
+    {
+      "source_name": "three_month",
+      "fetched": true,
+      "rows_raw": 712,
+      "rows_outlier_dropped": 1,
+      "rows_traced": 711,
+      "rows_appended": 711,
+      "frame_offset_microrad": 1.6762288063024506,
+      "frame_overlap_buckets": 571,
+      "last_modified": "Wed, 22 Apr 2026 02:25:15 GMT",
+      "title_psm_used": "psm7",
+      "title_raw_text": "\u2014 ~~ ~ Pacific/Honolul Time (2026-01-21 16:25:14 to 2026-04-21 16:25:14) aan\n",
+      "warnings": [
+        "dropped 1 per-row outlier(s) (|delta| > threshold vs rolling median)"
+      ],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.2234971741736599,
+        "y_intercept": 24.265285151567056,
+        "x_start_utc": "2026-01-22T02:25:14.000000",
+        "x_end_utc": "2026-04-22T02:25:14.000000",
+        "y_labels_found": [
+          [
+            64,
+            10.0
+          ],
+          [
+            153,
+            -10.0
+          ],
+          [
+            198,
+            -20.0
+          ],
+          [
+            243,
+            -30.0
+          ]
+        ],
+        "y_max_residual_microrad": 0.07021750299708884
+      },
+      "dropped_outlier_samples": [
+        {
+          "date_utc": "2026-01-24T23:26:54.665778",
+          "tilt": 3.927042301764004,
+          "local_median": -7.80655934235314
+        }
+      ]
+    },
+    {
+      "source_name": "month",
+      "fetched": true,
+      "rows_raw": 688,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 688,
+      "rows_appended": 688,
+      "frame_offset_microrad": -1.2431363007845704,
+      "frame_overlap_buckets": 596,
+      "last_modified": "Wed, 22 Apr 2026 02:30:53 GMT",
+      "title_psm_used": "psm6",
+      "title_raw_text": "OSi23 O3'26 Os'29 O4/01 O4/04 OS/07/ O4/10 O4/13 04/16 O4/19\nPacific/Honolulu Time (2026-03-22 16:30:52 to 2026-04-21 16:30:52)\n",
+      "warnings": [],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.06861462033599529,
+        "y_intercept": 3.2651905664912784,
+        "x_start_utc": "2026-03-23T02:30:52.000000",
+        "x_end_utc": "2026-04-22T02:30:52.000000",
+        "y_labels_found": [
+          [
+            19,
+            1.0
+          ],
+          [
+            153,
+            -5.0
+          ],
+          [
+            198,
+            -10.0
+          ],
+          [
+            243,
+            -15.0
+          ]
+        ],
+        "y_max_residual_microrad": 2.232846344916001
+      }
+    },
+    {
+      "source_name": "week",
+      "fetched": true,
+      "rows_raw": 0,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 0,
+      "rows_appended": 0,
+      "frame_offset_microrad": 0.0,
+      "frame_overlap_buckets": 0,
+      "last_modified": "Wed, 22 Apr 2026 02:15:27 GMT",
+      "title_psm_used": null,
+      "title_raw_text": null,
+      "warnings": [],
+      "error": "calibration failed: y-axis OCR found only 2 label(s) (need \u22653): [(206, -4.0), (243, -6.0)]"
+    },
+    {
+      "source_name": "two_day",
+      "fetched": true,
+      "rows_raw": 744,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 744,
+      "rows_appended": 193,
+      "frame_offset_microrad": -6.7827421682678875,
+      "frame_overlap_buckets": 168,
+      "last_modified": "Wed, 22 Apr 2026 02:30:34 GMT",
+      "title_psm_used": "psm7",
+      "title_raw_text": "_ \u00bb Pacific/Honoluls Time (2026-04-19 16:30:34 to 2026-04-21 16:30:34) ~\n",
+      "warnings": [
+        "large intra-source frame shift of -6.783 \u00b5rad; USGS may have rescaled this PNG's y-axis aggressively. The shift was absorbed but eyeballing the source plot is recommended."
+      ],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.016013198757763976,
+        "y_intercept": 1.508055124223603,
+        "x_start_utc": "2026-04-20T02:30:34.000000",
+        "x_end_utc": "2026-04-22T02:30:34.000000",
+        "y_labels_found": [
+          [
+            19,
+            1.0
+          ],
+          [
+            75,
+            0.5
+          ],
+          [
+            131,
+            -0.5
+          ],
+          [
+            159,
+            -1.0
+          ],
+          [
+            243,
+            -2.5
+          ]
+        ],
+        "y_max_residual_microrad": 0.20380434782608758
+      }
+    },
+    {
+      "source_name": "dec2024_to_now",
+      "fetched": true,
+      "rows_raw": 732,
+      "rows_outlier_dropped": 7,
+      "rows_traced": 725,
+      "rows_appended": 725,
+      "frame_offset_microrad": 0.31250000000001477,
+      "frame_overlap_buckets": 172,
+      "last_modified": "Wed, 22 Apr 2026 02:25:47 GMT",
+      "title_psm_used": "psm6",
+      "title_raw_text": "van-2U0zo Mar-20co May-2U02> JUFZUcS sep-c2Uczo Nov-2025 van-2026 Mar-2026\nPacific/Honolulu Time (2024-12-22 00:00:00 to 2026-04-21 16:25:42)\n",
+      "warnings": [
+        "dropped 7 per-row outlier(s) (|delta| > threshold vs rolling median)"
+      ],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.6249999999999999,
+        "y_intercept": 91.87499999999996,
+        "x_start_utc": "2024-12-22T10:00:00.000000",
+        "x_end_utc": "2026-04-22T02:25:42.000000",
+        "y_labels_found": [
+          [
+            179,
+            -20.0
+          ],
+          [
+            211,
+            -40.0
+          ],
+          [
+            243,
+            -60.0
+          ]
+        ],
+        "y_max_residual_microrad": 2.842170943040401e-14
+      },
+      "dropped_outlier_samples": [
+        {
+          "date_utc": "2025-06-12T10:38:30.215712",
+          "tilt": -1.8750000000000284,
+          "local_median": 2.1874999999999716
+        },
+        {
+          "date_utc": "2025-06-20T20:25:02.820239",
+          "tilt": -5.625000000000028,
+          "local_median": -1.5625000000000284
+        },
+        {
+          "date_utc": "2025-10-18T11:50:28.346205",
+          "tilt": -18.43750000000003,
+          "local_median": -14.375000000000028
+        },
+        {
+          "date_utc": "2025-11-26T07:06:49.597869",
+          "tilt": -9.687500000000028,
+          "local_median": -5.625000000000028
+        },
+        {
+          "date_utc": "2025-12-07T06:58:27.619174",
+          "tilt": -25.00000000000003,
+          "local_median": -20.62500000000003
+        },
+        {
+          "date_utc": "2026-02-16T10:18:26.580559",
+          "tilt": -28.125000000000014,
+          "local_median": -24.06250000000003
+        },
+        {
+          "date_utc": "2026-03-11T01:32:58.977363",
+          "tilt": -32.500000000000014,
+          "local_median": -28.437500000000014
+        }
+      ]
+    }
+  ],
+  "reconcile": {
+    "rows_out": 16301,
+    "sources": [
+      {
+        "name": "digital",
+        "rows_in": 8640,
+        "offset_microrad": 0.0,
+        "overlap_buckets": 0,
+        "is_anchor": true,
+        "note": null,
+        "rows_proximity_dropped": 0,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "archive",
+        "rows_in": 16191,
+        "offset_microrad": 0.0,
+        "overlap_buckets": 4322,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 8640,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "dec2024_to_now",
+        "rows_in": 11202,
+        "offset_microrad": -4.746298699816004,
+        "overlap_buckets": 4617,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 11200,
+        "piecewise_residuals": {
+          "digital": -0.90203342635224,
+          "archive": 0.009424907355448653,
+          "month": -0.6022393449875274,
+          "week": 0.2457146562800645,
+          "two_day": 0.10478057423671494
+        }
+      },
+      {
+        "name": "three_month",
+        "rows_in": 7395,
+        "offset_microrad": 8.39433446746606,
+        "overlap_buckets": 2179,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 7394,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "month",
+        "rows_in": 3854,
+        "offset_microrad": 10.292373376687607,
+        "overlap_buckets": 1007,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 3854,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "week",
+        "rows_in": 1683,
+        "offset_microrad": 9.915636384055684,
+        "overlap_buckets": 447,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 1573,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "two_day",
+        "rows_in": 1220,
+        "offset_microrad": 14.993526517277884,
+        "overlap_buckets": 304,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 24,
+        "piecewise_residuals": {}
+      }
+    ],
+    "conflicts_top": [],
+    "conflicts_total": 0,
+    "warnings": []
+  },
+  "archive": {
+    "rows_in_archive_before": 16191,
+    "rows_in_archive_after": 16275,
+    "rows_promoted": 84,
+    "rows_already_archived": 16188,
+    "rows_deferred_by_quorum": 29,
+    "warnings": [
+      "archive quorum gate deferred 29 row(s) \u2014 fewer than 2 sources contributed and no trusted archive neighbour within 30 min / 3.0 \u00b5rad"
+    ]
+  }
+}

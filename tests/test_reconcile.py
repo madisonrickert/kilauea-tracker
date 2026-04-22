@@ -328,20 +328,29 @@ def test_piecewise_realign_runs_for_dec2024_to_now_and_records_residuals():
     assert "digital" in d2n_record.piecewise_residuals
 
 
-def test_piecewise_realign_skips_sources_not_in_PIECEWISE_REALIGN_SOURCES():
-    """The realignment is targeted: it only runs for sources listed in
-    PIECEWISE_REALIGN_SOURCES (today: just dec2024_to_now). Other sources
-    keep their single-offset alignment from the first pass.
+def test_piecewise_realign_runs_for_sources_in_PIECEWISE_REALIGN_SOURCES():
+    """The realignment is targeted: it runs for sources listed in
+    PIECEWISE_REALIGN_SOURCES. As of the 2026-04 source-handoff fix that
+    includes all rolling-window PNG sources (two_day, week, month,
+    three_month, dec2024_to_now) — each of their global median offsets
+    sits in a slightly different place relative to the anchor, and the
+    piecewise pass corrects the residual locally so source handoffs
+    don't render as visible steps in the merged curve.
     """
+    from kilauea_tracker.reconcile import PIECEWISE_REALIGN_SOURCES
+
     digital = _series("2025-01-01", n=48, base=10.0, freq="1h")
     two_day = _series("2025-01-01", n=48, base=15.0, freq="1h")
     sources = {"digital": digital, "two_day": two_day}
 
     _, report = reconcile_sources(sources, proximity_minutes=0)
     two_day_record = next(s for s in report.sources if s.name == "two_day")
-    # two_day is NOT in PIECEWISE_REALIGN_SOURCES, so its piecewise_residuals
-    # dict should be empty.
-    assert two_day_record.piecewise_residuals == {}
+
+    if "two_day" in PIECEWISE_REALIGN_SOURCES:
+        # Piecewise pass ran against digital; residual recorded.
+        assert "digital" in two_day_record.piecewise_residuals
+    else:
+        assert two_day_record.piecewise_residuals == {}
 
 
 def test_proximity_gate_can_be_disabled():

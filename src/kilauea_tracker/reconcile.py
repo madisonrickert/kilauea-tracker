@@ -151,7 +151,39 @@ PROXIMITY_GATE_OVERRIDES_MINUTES: dict[str, int] = {
 # can be locally re-corrected. The realignment is purely additive on top of
 # the first-pass global offset, so a residual of 0 means "the global offset
 # was already correct in this region." See _piecewise_realign() for details.
-PIECEWISE_REALIGN_SOURCES: frozenset = frozenset({"dec2024_to_now"})
+# Sources that get a second-pass piecewise realignment. The user-reported
+# 2026-04 discontinuities across 04-11/04-12, 04-17, 04-18, 04-19 and
+# 03-10 were all source-handoff steps: each PNG's global median offset
+# sits in a slightly different place relative to the anchor, so the
+# merged curve stepped by several µrad whenever the winning source
+# changed at a bucket boundary. The piecewise pass computes per-source
+# residual offsets against every higher-priority source individually and
+# applies the residual of whichever higher-priority source's nearest
+# sample is closest in time — smoothing the handoff into a continuous
+# frame.
+#
+# All rolling-window PNG sources are included because they all exhibit
+# the same behaviour (dec2024_to_now was the first to be caught because
+# its long-window trace was most visibly distorted; the dense short-
+# window sources have the same issue at a smaller scale that still
+# shows up as visible steps at handoff buckets).
+PIECEWISE_REALIGN_SOURCES: frozenset = frozenset({
+    "dec2024_to_now",
+    "three_month",
+    "month",
+    "week",
+    "two_day",
+})
+
+# Internal sentinel for archive rows younger than the priority-demotion
+# cutoff. Split out from ARCHIVE_SOURCE_NAME in reconcile_sources so that
+# proximity gating, piecewise realignment, and the merge step all see a
+# separate logical source with a lowest-priority slot — a freshly-archived
+# contaminated row must lose to any live source that covers the same
+# bucket (that's the whole point of the demotion, broken until 2026-04
+# when the proximity gate was still using archive's un-demoted priority
+# and silently dropping the live-source rows that should have won).
+_ARCHIVE_RECENT_NAME = "__archive_recent"
 
 
 @dataclass
@@ -269,6 +301,19 @@ def reconcile_sources(
     if not aligned:
         report.rows_out = 0
         return _empty_history_df(), report
+
+    # Split the archive into "old" (historical anchor, keeps priority 2)
+    # and "recent" (<14 days, demoted to lowest priority). The split
+    # happens BEFORE proximity gating and merge so both stages see the
+    # demotion: young archive rows no longer gate live sources, and a
+    # live source wins priority contests at young-archive buckets.
+    #
+    # Without this split, proximity gating (which uses the un-demoted
+    # SOURCE_PRIORITY) would drop live-source rows within 60 min of any
+    # archive row — including young ones — leaving nothing to override
+    # the just-archived bad rows that the demotion was supposed to
+    # protect against.
+    aligned = _split_archive_by_age(aligned)
 
     # Second-pass piecewise realignment for sources with non-uniform local
     # y-frame distortion (see PIECEWISE_REALIGN_SOURCES docstring).
@@ -391,8 +436,8 @@ def _piecewise_realign(
         return aligned, {}
 
     target_df = aligned[target_name]
-    priority_index = {n: i for i, n in enumerate(SOURCE_PRIORITY)}
-    target_priority = priority_index.get(target_name, len(SOURCE_PRIORITY))
+    priority_index = _priority_index()
+    target_priority = priority_index.get(target_name, len(priority_index))
 
     # Compute the residual median delta against each higher-priority source
     # individually, using the SAME bucket granularity as the first-pass
@@ -401,7 +446,7 @@ def _piecewise_realign(
     for other_name, other_df in aligned.items():
         if other_name == target_name or len(other_df) == 0:
             continue
-        other_priority = priority_index.get(other_name, len(SOURCE_PRIORITY))
+        other_priority = priority_index.get(other_name, len(priority_index))
         if other_priority >= target_priority:
             continue
         residual, n = _median_bucket_offset(target_df, other_df)
@@ -476,13 +521,14 @@ def _drop_samples_near_higher_priority(
     Returns `(gated_aligned, drops_per_source)`. The dict counts how many
     rows were dropped from each source so the report can surface it.
     """
-    priority_index = {name: i for i, name in enumerate(SOURCE_PRIORITY)}
+    priority_index = _priority_index()
+    lowest = len(priority_index)
 
     result: dict[str, pd.DataFrame] = {}
     drops: dict[str, int] = {}
 
     for name, df in aligned.items():
-        my_priority = priority_index.get(name, len(SOURCE_PRIORITY))
+        my_priority = priority_index.get(name, lowest)
         # Per-source override takes precedence over the caller-supplied default.
         my_radius = PROXIMITY_GATE_OVERRIDES_MINUTES.get(name, proximity_minutes)
         proximity = pd.Timedelta(minutes=my_radius)
@@ -491,7 +537,7 @@ def _drop_samples_near_higher_priority(
         # proximity testing.
         higher_dates = []
         for other_name, other_df in aligned.items():
-            other_priority = priority_index.get(other_name, len(SOURCE_PRIORITY))
+            other_priority = priority_index.get(other_name, lowest)
             if other_priority < my_priority and len(other_df) > 0:
                 higher_dates.append(other_df[DATE_COL])
 
@@ -534,6 +580,52 @@ def _drop_samples_near_higher_priority(
     return result, drops
 
 
+def _priority_index() -> dict[str, int]:
+    """Build the priority lookup used by proximity gating and the merge.
+
+    Extends `SOURCE_PRIORITY` with the internal `_ARCHIVE_RECENT_NAME`
+    sentinel at the lowest slot — that's the source produced by
+    `_split_archive_by_age` for archive rows inside the demotion window.
+    """
+    base = {name: i for i, name in enumerate(SOURCE_PRIORITY)}
+    base[_ARCHIVE_RECENT_NAME] = len(SOURCE_PRIORITY)
+    return base
+
+
+def _split_archive_by_age(
+    aligned: dict[str, pd.DataFrame],
+) -> dict[str, pd.DataFrame]:
+    """Split the archive source into old (`archive`) + recent
+    (`_ARCHIVE_RECENT_NAME`) DataFrames based on the age cutoff.
+
+    The original archive source is retained for rows older than
+    `ARCHIVE_MAX_AGE_FOR_PRIORITY_DEMOTION_DAYS` — those keep their
+    priority-2 slot as a frozen historical anchor. Rows inside the cutoff
+    are moved to the sentinel key with a lowest-priority slot so that
+    every downstream stage (proximity gating, piecewise realignment,
+    merge) treats them as the lowest-priority source.
+    """
+    if ARCHIVE_SOURCE_NAME not in aligned:
+        return aligned
+    df = aligned[ARCHIVE_SOURCE_NAME]
+    if df is None or len(df) == 0:
+        return aligned
+
+    now_utc = pd.Timestamp.now("UTC").tz_localize(None)
+    cutoff = now_utc - pd.Timedelta(
+        days=ARCHIVE_MAX_AGE_FOR_PRIORITY_DEMOTION_DAYS
+    )
+    is_recent = df[DATE_COL] >= cutoff
+    recent_rows = df[is_recent].reset_index(drop=True)
+    old_rows = df[~is_recent].reset_index(drop=True)
+
+    new_aligned = dict(aligned)
+    new_aligned[ARCHIVE_SOURCE_NAME] = old_rows
+    if len(recent_rows) > 0:
+        new_aligned[_ARCHIVE_RECENT_NAME] = recent_rows
+    return new_aligned
+
+
 def _merge_by_priority(
     aligned: dict[str, pd.DataFrame],
     report: ReconcileReport,
@@ -541,44 +633,27 @@ def _merge_by_priority(
     """Walk every 15-min bucket in the union of `aligned` sources and pick
     the value from the highest-priority source that has data there.
 
-    Higher priority = lower index in `SOURCE_PRIORITY`. We tag each row with
-    its priority index, sort by (bucket, priority), and drop duplicates per
-    bucket keeping the FIRST (= highest-priority) row.
+    Higher priority = lower index in `_priority_index()`. We tag each row
+    with its priority index, sort by (bucket, priority), and drop
+    duplicates per bucket keeping the FIRST (= highest-priority) row.
 
-    Archive priority demotion: archive rows whose timestamps fall within
-    `ARCHIVE_MAX_AGE_FOR_PRIORITY_DEMOTION_DAYS` of the current UTC time
-    are temporarily demoted to the lowest priority slot. This lets a live
-    source override a freshly-archived bad row on subsequent cron runs —
-    the archive's keep-first semantics mean a contaminated row is otherwise
-    permanent. Older archive rows keep their priority-2 slot because their
-    value as a frozen historical anchor outweighs any risk of stale drift.
+    The archive is split upstream into `archive` (historical anchor,
+    priority 2) and `_ARCHIVE_RECENT_NAME` (lowest priority) by
+    `_split_archive_by_age`, so nothing in this function needs to special-
+    case archive demotion — both buckets just look up their priority.
 
     Conflicts — buckets where two aligned sources disagree by more than
-    `CONFLICT_THRESHOLD_MICRORAD` — are recorded on `report.conflicts` so the
-    UI can show actionable provenance instead of just a count.
+    `CONFLICT_THRESHOLD_MICRORAD` — are recorded on `report.conflicts` so
+    the UI can show actionable provenance instead of just a count.
     """
-    priority_index = {name: i for i, name in enumerate(SOURCE_PRIORITY)}
-    lowest_priority = len(SOURCE_PRIORITY)  # one past the end
-    now_utc = pd.Timestamp.now("UTC").tz_localize(None)
-    demotion_cutoff = now_utc - pd.Timedelta(
-        days=ARCHIVE_MAX_AGE_FOR_PRIORITY_DEMOTION_DAYS
-    )
+    priority_index = _priority_index()
 
     tagged: list[pd.DataFrame] = []
     for name, df in aligned.items():
         d = df[[DATE_COL, TILT_COL]].copy()
         d["_source"] = name
         d["_bucket"] = d[DATE_COL].dt.round(MERGE_BUCKET)
-        base_priority = priority_index[name]
-        if name == ARCHIVE_SOURCE_NAME:
-            # Row-by-row priority: young rows get demoted; old rows keep
-            # their priority-2 slot. This is the only source with
-            # per-row priority variation.
-            is_young = d[DATE_COL] >= demotion_cutoff
-            d["_priority"] = base_priority
-            d.loc[is_young, "_priority"] = lowest_priority
-        else:
-            d["_priority"] = base_priority
+        d["_priority"] = priority_index.get(name, len(priority_index))
         tagged.append(d)
 
     combined = pd.concat(tagged, ignore_index=True)
