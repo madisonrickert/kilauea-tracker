@@ -2,7 +2,7 @@
 name = "kilauea-tracker"
 version = "2.0.0"
 description = "Predicts the next fountain event at Kīlauea by tracing tilt data from USGS plot images."
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.15"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
