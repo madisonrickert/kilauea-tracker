@@ -185,6 +185,46 @@ def test_build_figure_per_source_overlay(realistic_inputs):
     assert all(t.visible == "legendonly" for t in overlay_traces)
 
 
+def test_inspector_pixel_math_round_trips():
+    """The PNG inspector (Phase 4 Commit 6) maps (date, tilt) to
+    (pixel_x, pixel_y) for overlay drawing. This must be the inverse
+    of the calibration's pixel-to-value transforms so dots land on the
+    actual traced line pixel-for-pixel.
+
+    Round-trip: value → pixel → value.  Within 1 pixel of integer
+    rounding error.
+    """
+    from kilauea_tracker.ingest.calibrate import AxisCalibration
+
+    cal = AxisCalibration(
+        plot_bbox=(75, 20, 826, 245),
+        y_slope=-0.0534,      # µrad per pixel (week PNG default)
+        y_intercept=5.72,
+        x_start=pd.Timestamp("2026-04-15 12:00:00"),
+        x_end=pd.Timestamp("2026-04-22 12:00:00"),
+    )
+
+    # y round-trip: pick a tilt value, compute pixel, invert.
+    tilt_in = -25.5
+    px_y = (tilt_in - cal.y_intercept) / cal.y_slope
+    tilt_back = cal.pixel_to_microradians(px_y)
+    assert abs(tilt_back - tilt_in) < 1e-9, (
+        f"round-trip tilt {tilt_in} → px {px_y} → tilt {tilt_back}"
+    )
+
+    # x round-trip: pick a date, compute pixel, invert.
+    dt_in = pd.Timestamp("2026-04-17 18:30:00")
+    x0, _, x1, _ = cal.plot_bbox
+    span_s = (cal.x_end - cal.x_start).total_seconds()
+    px_span = float(x1 - x0)
+    px_x = x0 + (dt_in - cal.x_start).total_seconds() * px_span / span_s
+    dt_back = cal.pixel_to_datetime(px_x)
+    delta_s = abs((dt_back - dt_in).total_seconds())
+    assert delta_s < 60, (
+        f"round-trip date {dt_in} → px {px_x} → date {dt_back}, delta {delta_s}s"
+    )
+
+
 def test_build_figure_empty_overlay_is_noop(realistic_inputs):
     """Passing an empty dict for per_source_overlay doesn't error or
     add traces.

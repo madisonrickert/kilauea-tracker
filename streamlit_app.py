@@ -19,6 +19,7 @@ the cheap pure-function math.
 
 from __future__ import annotations
 
+import io
 import math
 import sys
 from datetime import datetime, timezone
@@ -1400,6 +1401,128 @@ with st.expander("🔎 Reconcile diagnostics"):
                     f"…and {len(reconcile_report.transcription_failures) - 15} more "
                     "(smaller deltas)."
                 )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PNG transcription inspector (Phase 4 Commit 6)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Side-by-side renderer for each rolling source: raw USGS PNG on the
+# left, same PNG with traced-sample dots overlaid on the right. The
+# traced dots come from the per-source CSV this run produced, mapped
+# back to pixel coordinates via the AxisCalibration stored on each
+# IngestReport. Any visible drift between the dots and the USGS line
+# is a transcription defect — pixel-level ground truth for bug reports.
+
+with st.expander("🔬 Transcription quality inspector"):
+    st.caption(
+        "For each USGS source, the left column shows the raw PNG we "
+        "fetched and the right column shows the same PNG with red dots "
+        "at every sample we traced this run. The dots should land on "
+        "the USGS tilt line. Any visible drift is a transcription defect "
+        "worth reporting — hover over a dot in the merged chart above to "
+        "read off the exact value and timestamp."
+    )
+
+    @st.cache_data(ttl=INGEST_CACHE_TTL_SECONDS, show_spinner=False)
+    def _fetch_png_bytes(url: str) -> bytes | None:
+        """Fetch a USGS PNG and return the raw bytes. None on failure."""
+        from kilauea_tracker.ingest.fetch import fetch_tilt_png
+        try:
+            result = fetch_tilt_png(url, None)
+            return result.body
+        except Exception:
+            return None
+
+    def _build_overlay_png(
+        raw_bytes: bytes,
+        source_name: str,
+        calibration,
+    ) -> bytes | None:
+        """Return raw_bytes with red dots drawn at every traced-sample
+        pixel, derived from the per-source CSV + calibration.
+
+        Returns None if PIL or the source CSV isn't available.
+        """
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            return None
+        from kilauea_tracker.config import source_csv_path
+        csv_path = source_csv_path(source_name)
+        if not csv_path.exists():
+            return None
+        try:
+            df = pd.read_csv(csv_path, parse_dates=[DATE_COL])
+        except Exception:
+            return None
+        if len(df) == 0 or calibration is None:
+            return None
+
+        img = Image.open(io.BytesIO(raw_bytes)).convert("RGBA")
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+
+        x0, y0, x1, y1 = calibration.plot_bbox
+        # Only draw dots whose timestamp falls inside the PNG's x-range.
+        in_range = (df[DATE_COL] >= calibration.x_start) & (
+            df[DATE_COL] <= calibration.x_end
+        )
+        df_in = df[in_range]
+        # Map (date, tilt) → (pixel_x, pixel_y)
+        span_seconds = (calibration.x_end - calibration.x_start).total_seconds()
+        px_span = max(1.0, float(x1 - x0))
+        dot_r = 2
+        if calibration.y_slope == 0:
+            return None
+        for _, row in df_in.iterrows():
+            dt_offset = (row[DATE_COL] - calibration.x_start).total_seconds()
+            px = x0 + dt_offset * px_span / span_seconds
+            py = (row[TILT_COL] - calibration.y_intercept) / calibration.y_slope
+            # Clip to plot area so stray samples don't draw outside the axes.
+            if not (x0 - dot_r <= px <= x1 + dot_r and y0 - dot_r <= py <= y1 + dot_r):
+                continue
+            draw.ellipse(
+                (px - dot_r, py - dot_r, px + dot_r, py + dot_r),
+                fill=(255, 60, 60, 200),
+                outline=(255, 0, 0, 220),
+            )
+        blended = Image.alpha_composite(img, overlay)
+        buf = io.BytesIO()
+        blended.convert("RGB").save(buf, format="PNG")
+        return buf.getvalue()
+
+    # Map source_name → URL; replicated here because the original
+    # mapping in the USGS-source-plots expander is built further down.
+    _inspector_url_map = {TILT_SOURCE_NAME[s]: USGS_TILT_URLS[s] for s in ALL_SOURCES}
+
+    for r in reports:
+        if r.source_name not in _inspector_url_map:
+            continue
+        if r.calibration is None:
+            continue
+        raw = _fetch_png_bytes(_inspector_url_map[r.source_name])
+        if raw is None:
+            st.caption(f"⚠️ {r.source_name}: could not fetch PNG")
+            continue
+        overlay_bytes = _build_overlay_png(raw, r.source_name, r.calibration)
+
+        st.markdown(f"**{r.source_name}** &nbsp;·&nbsp; "
+                    f"{r.rows_traced} samples · "
+                    f"y-slope {r.calibration.y_slope:.4f} µrad/px")
+        col_raw, col_over = st.columns(2)
+        with col_raw:
+            st.image(raw, caption=f"{r.source_name} — raw USGS PNG", width="stretch")
+        with col_over:
+            if overlay_bytes is not None:
+                st.image(
+                    overlay_bytes,
+                    caption=f"{r.source_name} — traced samples overlaid",
+                    width="stretch",
+                )
+            else:
+                st.caption("(overlay unavailable — PIL/CSV missing)")
+        st.markdown("---")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
