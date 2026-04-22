@@ -153,3 +153,46 @@ def test_build_figure_renders_confidence_band(realistic_inputs):
     assert any("confidence" in n.lower() for n in legend_names)
     # And there should be at least one shape (the vrect)
     assert fig.layout.shapes is not None and len(fig.layout.shapes) > 0
+
+
+def test_build_figure_per_source_overlay(realistic_inputs):
+    """When `per_source_overlay` is provided, build_figure adds one
+    trace per source. Phase 4 Commit 5 observability feature.
+    """
+    df, all_peaks, fit_peaks, pred = realistic_inputs
+    # Build fake per-source corrected DataFrames by shifting df copies
+    overlay = {
+        "two_day": df.copy().assign(
+            **{TILT_COL: df[TILT_COL] - 2.0}
+        ).tail(100),
+        "week": df.copy().assign(
+            **{TILT_COL: df[TILT_COL] + 1.0}
+        ).tail(500),
+    }
+    fig_no = build_figure(df, fit_peaks, pred, all_peaks_df=all_peaks)
+    fig_yes = build_figure(
+        df, fit_peaks, pred, all_peaks_df=all_peaks,
+        per_source_overlay=overlay,
+    )
+    # With overlay: +2 more traces (one per source).
+    assert len(fig_yes.data) == len(fig_no.data) + 2
+    # Names match the source keys.
+    overlay_names = [t.name for t in fig_yes.data if t.name and t.name.startswith("source: ")]
+    assert "source: two_day" in overlay_names
+    assert "source: week" in overlay_names
+    # Overlay traces start hidden (legend-click to toggle).
+    overlay_traces = [t for t in fig_yes.data if t.name in ("source: two_day", "source: week")]
+    assert all(t.visible == "legendonly" for t in overlay_traces)
+
+
+def test_build_figure_empty_overlay_is_noop(realistic_inputs):
+    """Passing an empty dict for per_source_overlay doesn't error or
+    add traces.
+    """
+    df, all_peaks, fit_peaks, pred = realistic_inputs
+    fig_no = build_figure(df, fit_peaks, pred, all_peaks_df=all_peaks)
+    fig_empty = build_figure(
+        df, fit_peaks, pred, all_peaks_df=all_peaks,
+        per_source_overlay={},
+    )
+    assert len(fig_no.data) == len(fig_empty.data)

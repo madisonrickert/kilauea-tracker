@@ -224,6 +224,23 @@ with st.sidebar:
     )
     TZ_LABEL = "HST" if DISPLAY_TZ == "Pacific/Honolulu" else "UTC"
 
+    # Phase 4 Commit 5: per-source overlay toggle. Off by default so
+    # non-technical viewers see the clean merged line. Click on →
+    # overlay traces for each source appear in the legend and can be
+    # toggled individually by clicking the legend entries.
+    show_per_source = st.toggle(
+        "🔍 Show per-source traces",
+        value=False,
+        help=(
+            "Overlay each USGS source's calibrated trace beneath the "
+            "merged line. Useful for diagnosing apparent alignment "
+            "issues — you can see whether a visible step comes from "
+            "calibration drift, source handoff, or transcription noise. "
+            "Individual source traces are hidden by default; click the "
+            "legend entries to toggle them on."
+        ),
+    )
+
     st.divider()
     st.caption("**Data source**")
     st.caption(
@@ -916,6 +933,52 @@ _episode_curve_visible = eruption_state not in ("active", "starting")
 # someone to look out for the bus they're already riding.
 _next_event_visible = eruption_state != "active"
 
+def _load_per_source_corrected_for_overlay() -> dict[str, pd.DataFrame]:
+    """Reload each per-source CSV and apply the run's (a, b) correction.
+
+    Reads:
+      - anchor_fits on ingest_result to replicate Phase 1c correction
+        for dec2024_to_now (and any other anchor-corrected source)
+      - reconcile_report.sources for each source's (a, b) — applied as
+        `(y - b) / a` per `_apply_ab_corrections`
+
+    Returns `{source_name → DataFrame}` ready to hand to build_figure.
+    Best-effort: a missing CSV or malformed row report returns an
+    empty dict so overlay mode silently falls back to no overlay.
+    """
+    from kilauea_tracker.config import source_csv_path, ALL_SOURCES, TILT_SOURCE_NAME
+
+    if reconcile_report is None:
+        return {}
+
+    out: dict[str, pd.DataFrame] = {}
+    anchor_fits_by_source = {
+        f.source_name: f for f in (ingest_result.anchor_fits or [])
+    }
+    alignments_by_source = {s.name: s for s in reconcile_report.sources}
+
+    for s in ALL_SOURCES:
+        name = TILT_SOURCE_NAME[s]
+        path = source_csv_path(name)
+        if not path.exists():
+            continue
+        try:
+            df = pd.read_csv(path, parse_dates=[DATE_COL])
+        except Exception:
+            continue
+        df = df[[DATE_COL, TILT_COL]].dropna().sort_values(DATE_COL)
+        # 1. Phase 1c anchor correction (if warning fired)
+        af = anchor_fits_by_source.get(name)
+        if af is not None and af.ran and af.warning is not None:
+            df[TILT_COL] = af.a * df[TILT_COL] + af.b
+        # 2. Phase 2 pairwise (a, b) correction
+        align = alignments_by_source.get(name)
+        if align is not None and align.a and abs(align.a) > 1e-9:
+            df[TILT_COL] = (df[TILT_COL] - align.b) / align.a
+        out[name] = df.reset_index(drop=True)
+    return out
+
+
 fig = build_figure(
     tilt_df,
     recent_peaks,
@@ -924,8 +987,17 @@ fig = build_figure(
     title="",
     show_current_episode=_episode_curve_visible,
     show_next_event_prediction=_next_event_visible,
+    per_source_overlay=_load_per_source_corrected_for_overlay() if show_per_source else None,
 )
-st.plotly_chart(fig, width="stretch")
+# Phase 4 Commit 5: enable box-select on the chart so the user can drag
+# a rectangle over a region to populate the CSV export date range.
+chart_selection = st.plotly_chart(
+    fig,
+    width="stretch",
+    on_select="rerun",
+    selection_mode="box",
+    key="main_chart",
+)
 
 # Hover-to-clipboard: press ⌘C / Ctrl+C while hovering a datapoint on the
 # chart to copy "YYYY-MM-DD HH:MM | X.XX µrad" to the clipboard. Injected
@@ -970,7 +1042,364 @@ components.html(
     """,
     height=0,
 )
-st.caption("Tip: hover a point on the chart and press ⌘C / Ctrl+C to copy it.")
+st.caption(
+    "Tip: hover a point and press ⌘C / Ctrl+C to copy it. "
+    "Or drag a box over the chart to set the CSV export range below."
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CSV export (Phase 4 Commit 5)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Two modes. Simple: date + merged tilt + winning source + configurable
+# per-source corrected values. Debug: every column, everything, as a zip
+# bundle including pair fits + per-bucket MAD diagnostics.
+#
+# Range selection works three ways that all feed the same date pickers:
+#   1. Box-select on the chart (see above) pre-populates the range.
+#   2. Manual date pickers in the sidebar-style expander.
+#   3. "Export full history" button ignores the range entirely.
+
+with st.expander("📤 Export data as CSV"):
+    # Resolve initial range from box-selection on the chart, falling
+    # back to the last 7 days of data.
+    default_to = pd.Timestamp(tilt_df[DATE_COL].max())
+    default_from = default_to - pd.Timedelta(days=7)
+    if chart_selection and "box" in (chart_selection or {}).get("selection", {}):
+        boxes = chart_selection["selection"]["box"]
+        if boxes:
+            # Plotly selection box has x0/x1 as datetime strings when the
+            # x-axis is a datetime axis. Convert and order.
+            try:
+                x0 = pd.Timestamp(boxes[0]["x"][0]) if "x" in boxes[0] else None
+                x1 = pd.Timestamp(boxes[0]["x"][1]) if "x" in boxes[0] else None
+                if x0 is not None and x1 is not None:
+                    default_from = min(x0, x1)
+                    default_to = max(x0, x1)
+            except (KeyError, ValueError, IndexError):
+                pass
+
+    col_from, col_to = st.columns(2)
+    with col_from:
+        range_from = st.date_input(
+            "From",
+            value=default_from.date(),
+            help="Start of the export window (inclusive, UTC).",
+        )
+    with col_to:
+        range_to = st.date_input(
+            "To",
+            value=default_to.date(),
+            help="End of the export window (inclusive, UTC).",
+        )
+
+    st.caption("**Simple mode** — pick which extra columns to include:")
+    col_opts_a, col_opts_b, col_opts_c = st.columns(3)
+    with col_opts_a:
+        inc_corrected = st.checkbox(
+            "Per-source corrected values",
+            value=False,
+            help=(
+                "One column per source with the pairwise-calibrated tilt "
+                "value at each bucket. Makes it easy to see which source "
+                "disagreed where."
+            ),
+        )
+    with col_opts_b:
+        inc_raw = st.checkbox(
+            "Per-source raw values",
+            value=False,
+            help=(
+                "One column per source with the UNCORRECTED traced value. "
+                "Useful for distinguishing transcription errors from "
+                "calibration drift."
+            ),
+        )
+    with col_opts_c:
+        inc_mad = st.checkbox(
+            "MAD rejection flags",
+            value=False,
+            help="Column listing sources MAD-flagged as outliers per bucket.",
+        )
+
+    # Build the simple export on demand.
+    def _build_simple_export() -> pd.DataFrame:
+        start_ts = pd.Timestamp(range_from)
+        end_ts = pd.Timestamp(range_to) + pd.Timedelta(days=1)  # inclusive
+        out = tilt_df[
+            (tilt_df[DATE_COL] >= start_ts) & (tilt_df[DATE_COL] < end_ts)
+        ].copy()
+        out = out.rename(columns={
+            DATE_COL: "date_utc",
+            TILT_COL: "tilt_merged_microrad",
+        })
+        # Add MAD rejections (grouped by bucket)
+        if inc_mad and reconcile_report is not None:
+            rej_by_bucket: dict = {}
+            for f in reconcile_report.transcription_failures:
+                key = pd.Timestamp(f.bucket).round("15min")
+                rej_by_bucket.setdefault(key, []).append(f.source)
+            out["mad_rejected_sources"] = out["date_utc"].dt.round("15min").map(
+                lambda b: ",".join(rej_by_bucket.get(b, []))
+            )
+        # Add per-source columns (corrected and/or raw)
+        if inc_corrected or inc_raw:
+            corrected_map = (
+                _load_per_source_corrected_for_overlay() if inc_corrected else {}
+            )
+            from kilauea_tracker.config import source_csv_path, ALL_SOURCES, TILT_SOURCE_NAME
+            for s in ALL_SOURCES:
+                name = TILT_SOURCE_NAME[s]
+                if inc_corrected and name in corrected_map:
+                    cdf = corrected_map[name].copy()
+                    cdf["_bucket"] = cdf[DATE_COL].dt.round("15min")
+                    series = cdf.drop_duplicates("_bucket", keep="last").set_index("_bucket")[TILT_COL]
+                    out[f"{name}_corrected_microrad"] = out["date_utc"].dt.round("15min").map(series)
+                if inc_raw:
+                    p = source_csv_path(name)
+                    if p.exists():
+                        try:
+                            rdf = pd.read_csv(p, parse_dates=[DATE_COL])
+                            rdf["_bucket"] = rdf[DATE_COL].dt.round("15min")
+                            r_series = rdf.drop_duplicates("_bucket", keep="last").set_index("_bucket")[TILT_COL]
+                            out[f"{name}_raw_microrad"] = out["date_utc"].dt.round("15min").map(r_series)
+                        except Exception:
+                            pass
+        return out.reset_index(drop=True)
+
+    if pd.Timestamp(range_from) > pd.Timestamp(range_to):
+        st.error("'From' date must be on or before 'To' date.")
+    else:
+        col_simple, col_debug, col_full = st.columns(3)
+        with col_simple:
+            simple_df = _build_simple_export()
+            st.download_button(
+                "⬇ Simple CSV",
+                data=simple_df.to_csv(index=False),
+                file_name=(
+                    f"tilt_{range_from.isoformat()}_to_{range_to.isoformat()}.csv"
+                ),
+                mime="text/csv",
+                help=f"{len(simple_df)} rows in the selected range.",
+            )
+
+        with col_debug:
+            # Debug bundle: simple CSV + pair fits + alignments + full run
+            # report JSON, zipped in-memory.
+            import io, zipfile, json as _json_dbg
+
+            def _build_debug_zip() -> bytes:
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    # 1. merged CSV (full range)
+                    full = tilt_df.rename(columns={
+                        DATE_COL: "date_utc",
+                        TILT_COL: "tilt_merged_microrad",
+                    })
+                    zf.writestr("tilt_history_merged.csv", full.to_csv(index=False))
+                    # 2. simple selected-range CSV
+                    zf.writestr("selected_range.csv", simple_df.to_csv(index=False))
+                    # 3. pair fits, alignments, MAD rejections as JSON
+                    if reconcile_report is not None:
+                        debug = {
+                            "rows_out": reconcile_report.rows_out,
+                            "winner_counts": dict(
+                                getattr(reconcile_report, "winner_counts", {}) or {}
+                            ),
+                            "pairs": [
+                                {
+                                    "source_i": p.source_i,
+                                    "source_j": p.source_j,
+                                    "alpha": p.alpha,
+                                    "beta": p.beta,
+                                    "overlap_buckets": p.overlap_buckets,
+                                    "residual_std_microrad": p.residual_std_microrad,
+                                }
+                                for p in reconcile_report.pairs
+                            ],
+                            "alignments": [
+                                {
+                                    "name": s.name,
+                                    "a": s.a,
+                                    "b": s.b,
+                                    "pairs_used": s.pairs_used,
+                                    "effective_resolution": (
+                                        s.effective_resolution_microrad_per_pixel
+                                    ),
+                                    "rows_mad_rejected": s.rows_mad_rejected,
+                                    "is_anchor": s.is_anchor,
+                                    "note": s.note,
+                                }
+                                for s in reconcile_report.sources
+                            ],
+                            "transcription_failures": [
+                                {
+                                    "bucket": str(f.bucket),
+                                    "source": f.source,
+                                    "value_corrected": f.value_corrected,
+                                    "bucket_median": f.bucket_median,
+                                    "delta_microrad": f.delta_microrad,
+                                }
+                                for f in reconcile_report.transcription_failures
+                            ],
+                            "continuity_violations": [
+                                {
+                                    "bucket_before": str(v.bucket_before),
+                                    "bucket_after": str(v.bucket_after),
+                                    "tilt_before": v.tilt_before,
+                                    "tilt_after": v.tilt_after,
+                                    "delta_microrad": v.delta_microrad,
+                                }
+                                for v in reconcile_report.continuity_violations
+                            ],
+                            "warnings": list(reconcile_report.warnings),
+                        }
+                        zf.writestr(
+                            "reconcile_diagnostics.json",
+                            _json_dbg.dumps(debug, indent=2, default=str),
+                        )
+                    # 4. run report if available on disk
+                    if ingest_result.run_report_path and ingest_result.run_report_path.exists():
+                        zf.writestr(
+                            f"run_report_{ingest_result.run_report_path.name}",
+                            ingest_result.run_report_path.read_text(),
+                        )
+                return buf.getvalue()
+
+            st.download_button(
+                "⬇ Debug ZIP",
+                data=_build_debug_zip(),
+                file_name=(
+                    f"tilt_debug_{range_from.isoformat()}_to_{range_to.isoformat()}.zip"
+                ),
+                mime="application/zip",
+                help=(
+                    "Zipped bundle: merged history, selected-range CSV, per-"
+                    "source alignments, pair fits, MAD rejections, continuity "
+                    "violations, and the raw run report. This is the bug-"
+                    "report payload."
+                ),
+            )
+
+        with col_full:
+            full_df = tilt_df.rename(columns={
+                DATE_COL: "date_utc",
+                TILT_COL: "tilt_merged_microrad",
+            })
+            st.download_button(
+                "⬇ Full history CSV",
+                data=full_df.to_csv(index=False),
+                file_name="tilt_history_full.csv",
+                mime="text/csv",
+                help=f"Complete {len(full_df)}-row merged tilt history (all time).",
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reconcile diagnostics (Phase 4 Commit 5)
+# ─────────────────────────────────────────────────────────────────────────────
+
+with st.expander("🔎 Reconcile diagnostics"):
+    st.caption(
+        "Deep view into the per-source calibration and merge decisions "
+        "for the current run. If a visible step or disagreement in the "
+        "chart surprises you, the answer is almost always in one of "
+        "these three tables."
+    )
+    if reconcile_report is None:
+        st.info("Reconcile didn't run this session.")
+    else:
+        # ── Per-source alignments ──────────────────────────────────────────
+        st.markdown("**Per-source alignments** — the (a, b) applied to each source")
+        align_rows = []
+        for s in reconcile_report.sources:
+            align_rows.append({
+                "source": s.name,
+                "a (slope)": round(s.a, 4),
+                "b (µrad)": round(s.b, 3),
+                "pairs used": s.pairs_used,
+                "effective resolution (µrad/px)": round(
+                    s.effective_resolution_microrad_per_pixel, 4
+                ),
+                "MAD flags": s.rows_mad_rejected,
+                "anchor": "🎯" if s.is_anchor else "",
+                "note": s.note or "",
+            })
+        if align_rows:
+            st.dataframe(pd.DataFrame(align_rows), hide_index=True, width="stretch")
+
+        # ── Bucket winner distribution ─────────────────────────────────────
+        st.markdown("**Bucket winner distribution** — which source contributed each region")
+        winner_counts = getattr(reconcile_report, "winner_counts", None) or {}
+        if winner_counts:
+            total = sum(winner_counts.values()) or 1
+            winner_rows = [
+                {
+                    "source": name,
+                    "buckets won": count,
+                    "share %": round(100 * count / total, 1),
+                }
+                for name, count in sorted(
+                    winner_counts.items(), key=lambda kv: -kv[1]
+                )
+            ]
+            st.dataframe(pd.DataFrame(winner_rows), hide_index=True, width="stretch")
+        else:
+            st.caption("No winner counts recorded.")
+
+        # ── Pairwise fits ──────────────────────────────────────────────────
+        st.markdown(
+            "**Pairwise fits** — each source pair's Huber-robust `y_i = α · y_j + β` regression"
+        )
+        if reconcile_report.pairs:
+            pair_rows = [
+                {
+                    "i": p.source_i,
+                    "j": p.source_j,
+                    "α": round(p.alpha, 4),
+                    "β (µrad)": round(p.beta, 3),
+                    "overlap": p.overlap_buckets,
+                    "σ(residual) µrad": round(p.residual_std_microrad, 3),
+                }
+                for p in sorted(
+                    reconcile_report.pairs,
+                    key=lambda p: (p.source_i, p.source_j),
+                )
+            ]
+            st.dataframe(pd.DataFrame(pair_rows), hide_index=True, width="stretch")
+        else:
+            st.caption("No pairs with sufficient overlap this run.")
+
+        # ── MAD outlier rejections ─────────────────────────────────────────
+        if reconcile_report.transcription_failures:
+            st.markdown(
+                f"**MAD outlier rejections** — {len(reconcile_report.transcription_failures)} "
+                "bucket(s) where a source disagreed with the consensus beyond the "
+                "MAD threshold (diagnostic only; winner is still best-effective-"
+                "resolution per Phase 4 Commit 4)"
+            )
+            worst = sorted(
+                reconcile_report.transcription_failures,
+                key=lambda f: abs(f.delta_microrad),
+                reverse=True,
+            )[:15]
+            mad_rows = [
+                {
+                    "bucket": pd.Timestamp(f.bucket).strftime("%Y-%m-%d %H:%M"),
+                    "source": f.source,
+                    "value (µrad)": round(f.value_corrected, 2),
+                    "bucket median": round(f.bucket_median, 2),
+                    "delta (µrad)": round(f.delta_microrad, 2),
+                }
+                for f in worst
+            ]
+            st.dataframe(pd.DataFrame(mad_rows), hide_index=True, width="stretch")
+            if len(reconcile_report.transcription_failures) > 15:
+                st.caption(
+                    f"…and {len(reconcile_report.transcription_failures) - 15} more "
+                    "(smaller deltas)."
+                )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

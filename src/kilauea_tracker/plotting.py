@@ -30,6 +30,20 @@ NEXT_EVENT_COLOR = "#ff4d4d"
 CONFIDENCE_BAND_FILL = "rgba(255, 77, 77, 0.22)"
 CONFIDENCE_BAND_LINE = "rgba(255, 77, 77, 0.55)"
 
+# Per-source overlay colors (Phase 4 Commit 5). Each source traces a
+# distinct translucent color on top of the merged line so the user can
+# see which source contributed each region and where they disagree.
+# Chosen to be distinguishable without shouting over the merged line.
+SOURCE_OVERLAY_COLORS: dict[str, str] = {
+    "two_day": "rgba(255, 193, 7, 0.55)",        # amber
+    "week": "rgba(139, 195, 74, 0.55)",          # light green
+    "month": "rgba(0, 188, 212, 0.55)",          # cyan
+    "three_month": "rgba(156, 39, 176, 0.55)",   # purple
+    "dec2024_to_now": "rgba(233, 30, 99, 0.55)", # pink
+    "digital": "rgba(100, 221, 23, 0.75)",       # lime, slightly stronger
+    "archive": "rgba(158, 158, 158, 0.45)",      # grey
+}
+
 # Default zoom window when no user interaction has happened yet.
 DEFAULT_ZOOM_HISTORY_DAYS = 90
 DEFAULT_ZOOM_FUTURE_DAYS = 14
@@ -47,6 +61,7 @@ def build_figure(
     title: str = "",
     show_current_episode: bool = True,
     show_next_event_prediction: bool = True,
+    per_source_overlay: Optional[dict[str, pd.DataFrame]] = None,
 ) -> go.Figure:
     """Render the full prediction chart.
 
@@ -76,8 +91,38 @@ def build_figure(
                                     at that point we shouldn't be telling
                                     the user when "the next" event is when
                                     one is happening on screen.
+        per_source_overlay:         Optional `{source_name → DataFrame}` of
+                                    each source's corrected tilt values. When
+                                    provided, draws one translucent trace per
+                                    source beneath the merged line so the
+                                    user can see which source contributed
+                                    each region and where they disagree.
+                                    Phase 4 Commit 5 observability feature.
     """
     fig = go.Figure()
+
+    # ── 0. per-source overlay (drawn first so merged line sits on top) ──────
+    if per_source_overlay:
+        for name, src_df in per_source_overlay.items():
+            if src_df is None or len(src_df) == 0:
+                continue
+            color = SOURCE_OVERLAY_COLORS.get(name, "rgba(255, 255, 255, 0.35)")
+            fig.add_trace(
+                go.Scatter(
+                    x=src_df[DATE_COL],
+                    y=src_df[TILT_COL],
+                    mode="lines",
+                    name=f"source: {name}",
+                    line=dict(color=color, width=1.0, dash="dot"),
+                    visible="legendonly",  # opt-in via legend click; off by default
+                    hovertemplate=(
+                        f"<b>{name}</b><br>"
+                        "%{x|%Y-%m-%d %H:%M}<br>"
+                        "%{y:.2f} µrad"
+                        "<extra></extra>"
+                    ),
+                )
+            )
 
     # ── 1. raw tilt ─────────────────────────────────────────────────────────
     if len(tilt_df) > 0:
