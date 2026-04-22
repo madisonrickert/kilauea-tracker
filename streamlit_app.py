@@ -1933,7 +1933,6 @@ with st.expander("🔬 Transcription quality inspector"):
     # mapping in the USGS-source-plots expander is built further down.
     _inspector_url_map = {TILT_SOURCE_NAME[s]: USGS_TILT_URLS[s] for s in ALL_SOURCES}
 
-    @st.cache_data(ttl=INGEST_CACHE_TTL_SECONDS, show_spinner=False)
     def _inspector_calibrate(raw_bytes: bytes, source_name: str):
         """Decode raw PNG bytes and run the calibration pipeline.
 
@@ -1945,6 +1944,14 @@ with st.expander("🔬 Transcription quality inspector"):
         here and show the overlays against the current PNG's axes —
         instead of misleadingly rendering "calibration failed" for
         every source just because nothing actually *failed*.
+
+        NOT cached via st.cache_data: @st.cache_data's hash-based cache
+        invalidation only sees changes to THIS function's body, so
+        pushing a fix to calibrate_axes (which this wrapper calls into)
+        wouldn't invalidate the cache if raw_bytes were unchanged —
+        users would keep seeing stale wrong calibrations until USGS
+        updated the PNG. Calibration is ~50ms; not worth the staleness
+        risk.
         """
         try:
             import cv2
