@@ -1,0 +1,937 @@
+{
+  "run_started_at_utc": "2026-04-23T12:36:45Z",
+  "run_finished_at_utc": "2026-04-23T12:37:06Z",
+  "per_source": [
+    {
+      "source_name": "three_month",
+      "fetched": true,
+      "rows_raw": 734,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 734,
+      "rows_appended": 734,
+      "frame_offset_microrad": 0.00943836813002008,
+      "frame_overlap_buckets": 730,
+      "last_modified": "Thu, 23 Apr 2026 12:30:29 GMT",
+      "title_psm_used": "psm7",
+      "title_raw_text": "Pacific/Honolulu Time (2026-01-23 02:30:28 to 2026-04-23 02:30:28)\n",
+      "warnings": [],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.2675712671502732,
+        "y_intercept": 35.04811548071723,
+        "x_start_utc": "2026-01-23T12:30:28.000000",
+        "x_end_utc": "2026-04-23T12:30:28.000000",
+        "y_labels_found": [
+          [
+            56,
+            20.0
+          ],
+          [
+            94,
+            10.0
+          ],
+          [
+            168,
+            -10.0
+          ],
+          [
+            206,
+            -20.0
+          ],
+          [
+            243,
+            -30.0
+          ]
+        ],
+        "y_max_residual_microrad": 0.10358363140845128
+      }
+    },
+    {
+      "source_name": "month",
+      "fetched": true,
+      "rows_raw": 712,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 712,
+      "rows_appended": 712,
+      "frame_offset_microrad": -0.11176582320135253,
+      "frame_overlap_buckets": 699,
+      "last_modified": "Thu, 23 Apr 2026 12:25:05 GMT",
+      "title_psm_used": "psm7",
+      "title_raw_text": "Pacific/Honolulu Time (2026-03-24 02:25:04 to 2026-04-23 02:25:04)\n",
+      "warnings": [],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.11176582320134872,
+        "y_intercept": 12.144174336708874,
+        "x_start_utc": "2026-03-24T12:25:04.000000",
+        "x_end_utc": "2026-04-23T12:25:04.000000",
+        "y_labels_found": [
+          [
+            19,
+            10.0
+          ],
+          [
+            64,
+            5.0
+          ],
+          [
+            109,
+            0.0
+          ],
+          [
+            153,
+            -5.0
+          ],
+          [
+            198,
+            -10.0
+          ],
+          [
+            243,
+            -15.0
+          ]
+        ],
+        "y_max_residual_microrad": 0.044003386902518926
+      }
+    },
+    {
+      "source_name": "week",
+      "fetched": true,
+      "rows_raw": 746,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 746,
+      "rows_appended": 667,
+      "frame_offset_microrad": -0.6641881384058204,
+      "frame_overlap_buckets": 696,
+      "last_modified": "Thu, 23 Apr 2026 12:26:25 GMT",
+      "title_psm_used": "psm7",
+      "title_raw_text": "Pacific/Honolulu Time (2026-04-16 02:26:25 to 2026-04-23 02:26:25)\n",
+      "warnings": [],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.04025382657004971,
+        "y_intercept": 5.775429071574407,
+        "x_start_utc": "2026-04-16T12:26:25.000000",
+        "x_end_utc": "2026-04-23T12:26:25.000000",
+        "y_labels_found": [
+          [
+            44,
+            4.0
+          ],
+          [
+            69,
+            3.0
+          ],
+          [
+            94,
+            2.0
+          ],
+          [
+            168,
+            -1.0
+          ],
+          [
+            193,
+            -2.0
+          ],
+          [
+            218,
+            -3.0
+          ],
+          [
+            243,
+            -4.0
+          ]
+        ],
+        "y_max_residual_microrad": 0.012786207806056105
+      }
+    },
+    {
+      "source_name": "two_day",
+      "fetched": true,
+      "rows_raw": 707,
+      "rows_outlier_dropped": 0,
+      "rows_traced": 707,
+      "rows_appended": 191,
+      "frame_offset_microrad": -0.7991071428571446,
+      "frame_overlap_buckets": 531,
+      "last_modified": "Thu, 23 Apr 2026 12:29:56 GMT",
+      "title_psm_used": "psm7",
+      "title_raw_text": "Pacific/Honolulu Time (2026-04-21 02:29:56 to 2026-04-23 02:29:56)\n",
+      "warnings": [],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.015625000000000003,
+        "y_intercept": 2.296875,
+        "x_start_utc": "2026-04-21T12:29:56.000000",
+        "x_end_utc": "2026-04-23T12:29:56.000000",
+        "y_labels_found": [
+          [
+            19,
+            2.0
+          ],
+          [
+            51,
+            1.5
+          ],
+          [
+            83,
+            1.0
+          ],
+          [
+            115,
+            0.5
+          ],
+          [
+            147,
+            0.0
+          ],
+          [
+            179,
+            -0.5
+          ],
+          [
+            211,
+            -1.0
+          ],
+          [
+            243,
+            -1.5
+          ]
+        ],
+        "y_max_residual_microrad": 8.881784197001252e-16
+      }
+    },
+    {
+      "source_name": "dec2024_to_now",
+      "fetched": true,
+      "rows_raw": 695,
+      "rows_outlier_dropped": 17,
+      "rows_traced": 678,
+      "rows_appended": 678,
+      "frame_offset_microrad": 0.0,
+      "frame_overlap_buckets": 553,
+      "last_modified": "Thu, 23 Apr 2026 12:29:04 GMT",
+      "title_psm_used": "psm7",
+      "title_raw_text": "Pacific/Honolulu Time (2024-12-22 00:00:00 to 2026-04-23 02:29:00)\n",
+      "warnings": [
+        "dropped 17 per-row outlier(s) (|delta| > threshold vs rolling median)",
+        "anchor cross-check flags dec2024_to_now: digital = 1.1211 \u00b7 png + +4.261  (|a-1|=12.1%, |b|=4.26 \u00b5rad, residual_std=4.09 \u00b5rad over 588 buckets)"
+      ],
+      "error": null,
+      "calibration": {
+        "plot_bbox": [
+          75,
+          20,
+          826,
+          245
+        ],
+        "y_slope": -0.6249999999999999,
+        "y_intercept": 91.87500000000003,
+        "x_start_utc": "2024-12-22T10:00:00.000000",
+        "x_end_utc": "2026-04-23T12:29:00.000000",
+        "y_labels_found": [
+          [
+            51,
+            60.0
+          ],
+          [
+            83,
+            40.0
+          ],
+          [
+            147,
+            0.0
+          ],
+          [
+            179,
+            -20.0
+          ],
+          [
+            211,
+            -40.0
+          ],
+          [
+            243,
+            -60.0
+          ]
+        ],
+        "y_max_residual_microrad": 5.684341886080802e-14
+      },
+      "dropped_outlier_samples": [
+        {
+          "date_utc": "2024-12-23T01:33:59.600532",
+          "tilt": 46.250000000000036,
+          "local_median": 39.062500000000036
+        },
+        {
+          "date_utc": "2025-02-12T22:53:27.643142",
+          "tilt": -3.7499999999999574,
+          "local_median": 0.31250000000004263
+        },
+        {
+          "date_utc": "2025-03-05T17:01:14.860186",
+          "tilt": -3.7499999999999574,
+          "local_median": 1.2500000000000426
+        },
+        {
+          "date_utc": "2025-03-21T06:37:05.272969",
+          "tilt": 2.1875000000000426,
+          "local_median": 6.250000000000043
+        },
+        {
+          "date_utc": "2025-05-26T10:24:24.527296",
+          "tilt": -3.7499999999999574,
+          "local_median": 0.31250000000004263
+        },
+        {
+          "date_utc": "2025-06-05T19:28:18.135818",
+          "tilt": -3.1249999999999574,
+          "local_median": 2.1875000000000426
+        },
+        {
+          "date_utc": "2025-08-23T22:35:29.400798",
+          "tilt": -5.624999999999957,
+          "local_median": -0.6249999999999574
+        },
+        {
+          "date_utc": "2025-10-01T20:35:05.432756",
+          "tilt": -14.374999999999957,
+          "local_median": -9.687499999999957
+        },
+        {
+          "date_utc": "2025-10-18T17:18:55.046604",
+          "tilt": -18.124999999999957,
+          "local_median": -13.749999999999957
+        },
+        {
+          "date_utc": "2025-11-10T10:08:41.065246",
+          "tilt": -13.749999999999957,
+          "local_median": -9.687499999999957
+        },
+        {
+          "date_utc": "2025-11-25T23:44:31.478029",
+          "tilt": -13.749999999999957,
+          "local_median": -6.562499999999957
+        },
+        {
+          "date_utc": "2025-12-07T00:22:24.687083",
+          "tilt": -28.124999999999943,
+          "local_median": -18.124999999999957
+        },
+        {
+          "date_utc": "2025-12-24T12:40:13.901464",
+          "tilt": -21.874999999999957,
+          "local_median": -16.874999999999957
+        },
+        {
+          "date_utc": "2026-01-25T07:25:54.327563",
+          "tilt": -28.124999999999943,
+          "local_median": -23.749999999999957
+        },
+        {
+          "date_utc": "2026-02-16T08:41:40.745672",
+          "tilt": -29.999999999999943,
+          "local_median": -24.062499999999957
+        },
+        {
+          "date_utc": "2026-03-11T01:31:26.764314",
+          "tilt": -33.74999999999994,
+          "local_median": -28.437499999999943
+        },
+        {
+          "date_utc": "2026-04-09T21:35:08.388814",
+          "tilt": -28.124999999999943,
+          "local_median": -23.749999999999957
+        }
+      ]
+    }
+  ],
+  "reconcile": {
+    "rows_out": 46039,
+    "sources": [
+      {
+        "name": "digital",
+        "rows_in": 8640,
+        "a": 1.0,
+        "b": 0.0,
+        "offset_microrad": 0.0,
+        "overlap_buckets": 1,
+        "pairs_used": 1,
+        "effective_resolution_microrad_per_pixel": 0.001,
+        "rows_mad_rejected": 0,
+        "is_anchor": true,
+        "note": null,
+        "rows_proximity_dropped": 0,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "dec2024_to_now",
+        "rows_in": 1967,
+        "a": 1.0,
+        "b": 0.2587070884874411,
+        "offset_microrad": 0.2587070884874411,
+        "overlap_buckets": 4,
+        "pairs_used": 4,
+        "effective_resolution_microrad_per_pixel": 0.62,
+        "rows_mad_rejected": 0,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 0,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "month",
+        "rows_in": 1625,
+        "a": 1.0,
+        "b": 13.64055673063935,
+        "offset_microrad": 13.64055673063935,
+        "overlap_buckets": 4,
+        "pairs_used": 4,
+        "effective_resolution_microrad_per_pixel": 0.13,
+        "rows_mad_rejected": 0,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 0,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "three_month",
+        "rows_in": 2185,
+        "a": 1.0,
+        "b": 12.193732410108446,
+        "offset_microrad": 12.193732410108446,
+        "overlap_buckets": 4,
+        "pairs_used": 4,
+        "effective_resolution_microrad_per_pixel": 0.18,
+        "rows_mad_rejected": 0,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 0,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "two_day",
+        "rows_in": 249,
+        "a": 1.0,
+        "b": 9.186800762445964,
+        "offset_microrad": 9.186800762445964,
+        "overlap_buckets": 3,
+        "pairs_used": 3,
+        "effective_resolution_microrad_per_pixel": 0.027,
+        "rows_mad_rejected": 0,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 0,
+        "piecewise_residuals": {}
+      },
+      {
+        "name": "week",
+        "rows_in": 726,
+        "a": 1.0,
+        "b": 12.025842085927033,
+        "offset_microrad": 12.025842085927033,
+        "overlap_buckets": 4,
+        "pairs_used": 4,
+        "effective_resolution_microrad_per_pixel": 0.09,
+        "rows_mad_rejected": 0,
+        "is_anchor": false,
+        "note": null,
+        "rows_proximity_dropped": 0,
+        "piecewise_residuals": {}
+      }
+    ],
+    "pairs": [
+      {
+        "source_i": "dec2024_to_now",
+        "source_j": "digital",
+        "alpha": 1.0,
+        "beta": 0.2587070884874394,
+        "overlap_buckets": 591,
+        "residual_std_microrad": 3.7413683181552706
+      },
+      {
+        "source_i": "dec2024_to_now",
+        "source_j": "month",
+        "alpha": 1.0,
+        "beta": -13.47284291790385,
+        "overlap_buckets": 108,
+        "residual_std_microrad": 0.4070139257255451
+      },
+      {
+        "source_i": "dec2024_to_now",
+        "source_j": "three_month",
+        "alpha": 1.0,
+        "beta": -11.920765970249391,
+        "overlap_buckets": 205,
+        "residual_std_microrad": 1.050030061677107
+      },
+      {
+        "source_i": "dec2024_to_now",
+        "source_j": "week",
+        "alpha": 1.0,
+        "beta": -11.690401073059267,
+        "overlap_buckets": 27,
+        "residual_std_microrad": 0.4484188160649396
+      },
+      {
+        "source_i": "month",
+        "source_j": "three_month",
+        "alpha": 1.0,
+        "beta": 1.4327519241143551,
+        "overlap_buckets": 374,
+        "residual_std_microrad": 0.10817717539568253
+      },
+      {
+        "source_i": "month",
+        "source_j": "two_day",
+        "alpha": 1.0,
+        "beta": 4.4208653204411945,
+        "overlap_buckets": 61,
+        "residual_std_microrad": 0.1378972901318127
+      },
+      {
+        "source_i": "month",
+        "source_j": "week",
+        "alpha": 1.0,
+        "beta": 1.5706844131291147,
+        "overlap_buckets": 180,
+        "residual_std_microrad": 0.07816822202220414
+      },
+      {
+        "source_i": "three_month",
+        "source_j": "two_day",
+        "alpha": 1.0,
+        "beta": 3.0253536717341163,
+        "overlap_buckets": 28,
+        "residual_std_microrad": 0.10430714706832003
+      },
+      {
+        "source_i": "three_month",
+        "source_j": "week",
+        "alpha": 1.0,
+        "beta": 0.14965525506485244,
+        "overlap_buckets": 96,
+        "residual_std_microrad": 0.12464379953932851
+      },
+      {
+        "source_i": "two_day",
+        "source_j": "week",
+        "alpha": 1.0,
+        "beta": -2.8535099471616467,
+        "overlap_buckets": 62,
+        "residual_std_microrad": 0.027276828355597787
+      }
+    ],
+    "winner_counts": {
+      "dec2024_to_now": 20526,
+      "digital": 17329,
+      "three_month": 5301,
+      "month": 2027,
+      "week": 480,
+      "two_day": 249,
+      "archive": 127
+    },
+    "transcription_failures_top": [],
+    "transcription_failures_total": 0,
+    "continuity_violations": [
+      {
+        "bucket_before": "2024-12-23T16:45:00.000000",
+        "bucket_after": "2024-12-24T07:23:53.824234",
+        "tilt_before": 47.00361168861621,
+        "tilt_after": 39.35299486610933,
+        "delta_microrad": 7.650616822506883
+      },
+      {
+        "bucket_before": "2024-12-24T07:23:53.824234",
+        "bucket_after": "2024-12-24T12:15:00.000000",
+        "tilt_before": 39.35299486610933,
+        "tilt_after": 44.56800730888711,
+        "delta_microrad": 5.215012442777784
+      },
+      {
+        "bucket_before": "2024-12-25T12:15:00.000000",
+        "bucket_after": "2024-12-25T13:39:49.707057",
+        "tilt_before": 40.37533944486927,
+        "tilt_after": 34.97799486610934,
+        "delta_microrad": 5.3973445787599275
+      },
+      {
+        "bucket_before": "2024-12-25T13:39:49.707057",
+        "bucket_after": "2024-12-25T19:15:00.000000",
+        "tilt_before": 34.97799486610934,
+        "tilt_after": 39.111072882613925,
+        "delta_microrad": 4.133078016504584
+      },
+      {
+        "bucket_before": "2025-07-20T10:00:00.000000",
+        "bucket_after": "2025-07-20T17:00:00.000000",
+        "tilt_before": 9.050810924934472,
+        "tilt_after": 4.639623133237276,
+        "delta_microrad": 4.411187791697197
+      },
+      {
+        "bucket_before": "2025-08-22T21:30:00.000000",
+        "bucket_after": "2025-08-23T09:31:09.902796",
+        "tilt_before": 13.533375925533075,
+        "tilt_after": -2.522005133890657,
+        "delta_microrad": 16.05538105942373
+      },
+      {
+        "bucket_before": "2025-08-23T10:22:43.326231",
+        "bucket_after": "2025-08-23T18:45:00.000000",
+        "tilt_before": -2.834505133890657,
+        "tilt_after": 5.652184027766021,
+        "delta_microrad": 8.486689161656678
+      },
+      {
+        "bucket_before": "2025-09-02T13:15:00.000000",
+        "bucket_after": "2025-09-02T19:30:00.000000",
+        "tilt_before": 5.084386637345884,
+        "tilt_after": -0.3157218350316313,
+        "delta_microrad": 5.400108472377515
+      },
+      {
+        "bucket_before": "2025-10-01T01:30:00.000000",
+        "bucket_after": "2025-10-01T11:15:00.000000",
+        "tilt_before": 7.112201503091943,
+        "tilt_after": -0.828880414932631,
+        "delta_microrad": 7.941081918024574
+      },
+      {
+        "bucket_before": "2025-10-01T12:36:35.693741",
+        "bucket_after": "2025-10-01T15:30:00.000000",
+        "tilt_before": -5.959505133890657,
+        "tilt_after": -1.893842008874369,
+        "delta_microrad": 4.065663125016288
+      },
+      {
+        "bucket_before": "2025-10-17T22:15:00.000000",
+        "bucket_after": "2025-10-18T11:45:00.000000",
+        "tilt_before": 4.343614703781707,
+        "tilt_after": -5.464272486541159,
+        "delta_microrad": 9.807887190322866
+      },
+      {
+        "bucket_before": "2025-11-09T15:00:00.000000",
+        "bucket_after": "2025-11-10T03:45:00.000000",
+        "tilt_before": 5.113018379416057,
+        "tilt_after": -1.9026926822408576,
+        "delta_microrad": 7.015711061656915
+      },
+      {
+        "bucket_before": "2025-11-25T23:06:02.113182",
+        "bucket_after": "2025-11-25T23:20:20.884154",
+        "tilt_before": 1.6899987924605266,
+        "tilt_after": -2.685001207539474,
+        "delta_microrad": 4.375
+      },
+      {
+        "bucket_before": "2025-11-25T23:20:20.884154",
+        "bucket_after": "2025-11-25T23:34:38.940079",
+        "tilt_before": -2.685001207539474,
+        "tilt_after": -7.060001207539473,
+        "delta_microrad": 4.375
+      },
+      {
+        "bucket_before": "2025-11-26T00:17:34.537949",
+        "bucket_after": "2025-11-26T03:15:00.000000",
+        "tilt_before": -7.372501207539473,
+        "tilt_after": 0.08245904468956766,
+        "delta_microrad": 7.454960252229041
+      },
+      {
+        "bucket_before": "2025-12-06T12:15:00.000000",
+        "bucket_after": "2025-12-06T16:19:11.230359",
+        "tilt_before": 0.2244251813361764,
+        "tilt_after": -10.497501207539472,
+        "delta_microrad": 10.721926388875648
+      },
+      {
+        "bucket_before": "2025-12-23T22:00:00.000000",
+        "bucket_after": "2025-12-24T07:00:00.000000",
+        "tilt_before": -1.4266556678059388,
+        "tilt_after": -8.675550730071944,
+        "delta_microrad": 7.248895062266005
+      },
+      {
+        "bucket_before": "2026-01-24T21:00:00.000000",
+        "bucket_after": "2026-01-24T21:20:37.581890",
+        "tilt_before": -0.8210236176618939,
+        "tilt_after": -22.372501207539475,
+        "delta_microrad": 21.55147758987758
+      },
+      {
+        "bucket_before": "2026-01-24T21:54:18.972037",
+        "bucket_after": "2026-01-24T22:55:32.193075",
+        "tilt_before": -23.31000120753946,
+        "tilt_after": -31.930392394958982,
+        "delta_microrad": 8.620391187419521
+      },
+      {
+        "bucket_before": "2026-01-24T22:55:32.193075",
+        "bucket_after": "2026-01-25T01:00:00.000000",
+        "tilt_before": -31.930392394958982,
+        "tilt_after": -15.89061183954896,
+        "delta_microrad": 16.039780555410022
+      },
+      {
+        "bucket_before": "2026-02-15T13:45:00.000000",
+        "bucket_after": "2026-02-15T14:00:00.000000",
+        "tilt_before": -1.8539468161037957,
+        "tilt_after": 4.330905053781342,
+        "delta_microrad": 6.184851869885137
+      },
+      {
+        "bucket_before": "2026-02-15T22:15:00.000000",
+        "bucket_after": "2026-02-15T22:39:47.808255",
+        "tilt_before": 1.457694783216787,
+        "tilt_after": -22.060001207539475,
+        "delta_microrad": 23.517695990756263
+      },
+      {
+        "bucket_before": "2026-02-15T23:33:06.921438",
+        "bucket_after": "2026-02-16T02:20:17.739014",
+        "tilt_before": -23.31000120753946,
+        "tilt_after": -27.986707597444003,
+        "delta_microrad": 4.676706389904542
+      },
+      {
+        "bucket_before": "2026-02-16T03:18:11.019973",
+        "bucket_after": "2026-02-16T03:54:36.460719",
+        "tilt_before": -29.3184704907386,
+        "tilt_after": -16.56705779701791,
+        "delta_microrad": 12.751412693720692
+      },
+      {
+        "bucket_before": "2026-02-16T04:54:36.460719",
+        "bucket_after": "2026-02-16T06:27:10.655126",
+        "tilt_before": -19.58426964836232,
+        "tilt_after": -23.6072187834882,
+        "delta_microrad": 4.022949135125881
+      },
+      {
+        "bucket_before": "2026-02-16T07:07:10.655126",
+        "bucket_after": "2026-02-16T08:16:15.913448",
+        "tilt_before": -25.05995041561698,
+        "tilt_after": -53.41148446078185,
+        "delta_microrad": 28.35153404516487
+      },
+      {
+        "bucket_before": "2026-02-16T09:03:19.408788",
+        "bucket_after": "2026-02-16T09:30:00.000000",
+        "tilt_before": -53.73560701733263,
+        "tilt_after": -25.104756641281927,
+        "delta_microrad": 28.630850376050706
+      },
+      {
+        "bucket_before": "2026-03-10T08:00:00.000000",
+        "bucket_after": "2026-03-10T08:15:00.000000",
+        "tilt_before": -0.5928001475149864,
+        "tilt_after": -5.775290121238209,
+        "delta_microrad": 5.182489973723222
+      },
+      {
+        "bucket_before": "2026-03-10T08:15:00.000000",
+        "bucket_after": "2026-03-10T08:30:00.000000",
+        "tilt_before": -5.775290121238209,
+        "tilt_after": -0.11750450006471524,
+        "delta_microrad": 5.657785621173494
+      },
+      {
+        "bucket_before": "2026-03-10T13:45:00.000000",
+        "bucket_after": "2026-03-10T14:05:10.814913",
+        "tilt_before": 0.21807243569076273,
+        "tilt_after": -11.694088093551976,
+        "delta_microrad": 11.912160529242739
+      },
+      {
+        "bucket_before": "2026-03-10T14:05:10.814913",
+        "bucket_after": "2026-03-10T14:15:00.000000",
+        "tilt_before": -11.694088093551976,
+        "tilt_after": 0.30933587510796057,
+        "delta_microrad": 12.003423968659936
+      },
+      {
+        "bucket_before": "2026-03-10T16:45:00.000000",
+        "bucket_after": "2026-03-10T17:27:36.456724",
+        "tilt_before": -2.0769165408821437,
+        "tilt_after": -10.301705377209991,
+        "delta_microrad": 8.224788836327848
+      },
+      {
+        "bucket_before": "2026-03-10T17:27:36.456724",
+        "bucket_after": "2026-03-10T18:53:53.762982",
+        "tilt_before": -10.301705377209991,
+        "tilt_after": -16.2430223055436,
+        "delta_microrad": 5.94131692833361
+      },
+      {
+        "bucket_before": "2026-03-10T18:53:53.762982",
+        "bucket_after": "2026-03-10T20:20:10.651131",
+        "tilt_before": -16.2430223055436,
+        "tilt_after": -25.880077251141604,
+        "delta_microrad": 9.637054945598003
+      },
+      {
+        "bucket_before": "2026-03-10T20:30:19.203728",
+        "bucket_after": "2026-03-10T21:03:10.000000",
+        "tilt_before": -25.817583700419465,
+        "tilt_after": -9.109972616503237,
+        "delta_microrad": 16.707611083916227
+      },
+      {
+        "bucket_before": "2026-03-10T21:03:10.000000",
+        "bucket_after": "2026-03-10T21:16:36.956058",
+        "tilt_before": -9.109972616503237,
+        "tilt_after": -35.069986339499664,
+        "delta_microrad": 25.96001372299643
+      },
+      {
+        "bucket_before": "2026-03-10T21:16:36.956058",
+        "bucket_after": "2026-03-10T21:43:37.000000",
+        "tilt_before": -35.069986339499664,
+        "tilt_after": -12.646139025203258,
+        "delta_microrad": 22.423847314296406
+      },
+      {
+        "bucket_before": "2026-03-11T02:13:44.509986",
+        "bucket_after": "2026-03-11T02:30:00.000000",
+        "tilt_before": -23.47706364614384,
+        "tilt_after": -31.763340895050067,
+        "delta_microrad": 8.286277248906227
+      },
+      {
+        "bucket_before": "2026-03-11T04:15:00.000000",
+        "bucket_after": "2026-03-11T04:26:16.786950",
+        "tilt_before": -35.01128999657252,
+        "tilt_after": -26.638020187877576,
+        "delta_microrad": 8.373269808694946
+      },
+      {
+        "bucket_before": "2026-03-11T04:26:16.786950",
+        "bucket_after": "2026-03-11T04:45:00.000000",
+        "tilt_before": -26.638020187877576,
+        "tilt_after": -35.11246887423037,
+        "delta_microrad": 8.474448686352797
+      },
+      {
+        "bucket_before": "2026-03-11T04:45:00.000000",
+        "bucket_after": "2026-03-11T05:00:00.000000",
+        "tilt_before": -35.11246887423037,
+        "tilt_after": -29.83715891195216,
+        "delta_microrad": 5.2753099622782145
+      },
+      {
+        "bucket_before": "2026-04-09T21:45:00.000000",
+        "bucket_after": "2026-04-09T22:06:40.161118",
+        "tilt_before": -10.707077783377459,
+        "tilt_after": -15.938096074039066,
+        "delta_microrad": 5.231018290661607
+      },
+      {
+        "bucket_before": "2026-04-09T22:22:12.215712",
+        "bucket_after": "2026-04-09T22:33:30.813581",
+        "tilt_before": -17.53859614137695,
+        "tilt_after": -11.247145282625755,
+        "delta_microrad": 6.291450858751194
+      },
+      {
+        "bucket_before": "2026-04-09T22:33:30.813581",
+        "bucket_after": "2026-04-09T22:51:26.926764",
+        "tilt_before": -11.247145282625755,
+        "tilt_after": -17.34979645064634,
+        "delta_microrad": 6.102651168020586
+      }
+    ],
+    "conflicts_top": [],
+    "conflicts_total": 0,
+    "warnings": []
+  },
+  "archive": {
+    "rows_in_archive_before": 28370,
+    "rows_in_archive_after": 30020,
+    "rows_promoted": 1650,
+    "rows_already_archived": 28370,
+    "rows_deferred_by_quorum": 16019,
+    "warnings": [
+      "archive quorum gate deferred 16019 row(s) \u2014 fewer than 2 sources contributed and no trusted archive neighbour within 30 min / 3.0 \u00b5rad"
+    ]
+  },
+  "anchor_fits": [
+    {
+      "source_name": "three_month",
+      "ran": false,
+      "overlap_buckets": 0,
+      "a": 1.0,
+      "b": 0.0,
+      "residual_std_microrad": 0.0,
+      "warning": null,
+      "note": "overlap too small (0 buckets, need \u226550)"
+    },
+    {
+      "source_name": "month",
+      "ran": false,
+      "overlap_buckets": 0,
+      "a": 1.0,
+      "b": 0.0,
+      "residual_std_microrad": 0.0,
+      "warning": null,
+      "note": "overlap too small (0 buckets, need \u226550)"
+    },
+    {
+      "source_name": "week",
+      "ran": false,
+      "overlap_buckets": 0,
+      "a": 1.0,
+      "b": 0.0,
+      "residual_std_microrad": 0.0,
+      "warning": null,
+      "note": "overlap too small (0 buckets, need \u226550)"
+    },
+    {
+      "source_name": "two_day",
+      "ran": false,
+      "overlap_buckets": 0,
+      "a": 1.0,
+      "b": 0.0,
+      "residual_std_microrad": 0.0,
+      "warning": null,
+      "note": "overlap too small (0 buckets, need \u226550)"
+    },
+    {
+      "source_name": "dec2024_to_now",
+      "ran": true,
+      "overlap_buckets": 588,
+      "a": 1.1210938853561365,
+      "b": 4.260828336491907,
+      "residual_std_microrad": 4.088388956819465,
+      "warning": "anchor cross-check flags dec2024_to_now: digital = 1.1211 \u00b7 png + +4.261  (|a-1|=12.1%, |b|=4.26 \u00b5rad, residual_std=4.09 \u00b5rad over 588 buckets)",
+      "note": null
+    }
+  ]
+}
