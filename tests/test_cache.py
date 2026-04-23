@@ -232,21 +232,21 @@ def test_append_report_correct_with_intra_batch_dedupe(tmp_history: Path):
 
     df = load_history(tmp_history)
     assert len(df) == 3
-    # Bucket A's surviving row is the latest of the intra-batch trio (10.2),
-    # SHIFTED by the median frame offset (which is 1.2 here — the only
-    # overlap bucket has existing=9.0 and the latest new=10.2). After the
-    # shift, 10.2 → 9.0, so the bucket-A survivor matches the existing
-    # row's frame. The B and C rows shift by the same offset.
+    # Frame-offset computation uses nearest-neighbour pairing (v4
+    # rewrite) rather than bucket-match, so all three intra-batch rows
+    # (10.0, 10.1, 10.2) pair to the one existing row (9.0). Deltas are
+    # [1.0, 1.1, 1.2]; median = 1.1. Every new row then shifts by 1.1.
+    expected_offset = 1.1
     a_row = df[df[DATE_COL] < pd.Timestamp("2026-02-01")]
     assert len(a_row) == 1
-    assert a_row[TILT_COL].iloc[0] == pytest.approx(9.0)
+    assert a_row[TILT_COL].iloc[0] == pytest.approx(10.2 - expected_offset)
     b_row = df[
         (df[DATE_COL] >= pd.Timestamp("2026-02-01"))
         & (df[DATE_COL] < pd.Timestamp("2026-03-01"))
     ]
-    assert b_row[TILT_COL].iloc[0] == pytest.approx(11.0 - 1.2)
+    assert b_row[TILT_COL].iloc[0] == pytest.approx(11.0 - expected_offset)
     c_row = df[df[DATE_COL] >= pd.Timestamp("2026-03-01")]
-    assert c_row[TILT_COL].iloc[0] == pytest.approx(12.0 - 1.2)
+    assert c_row[TILT_COL].iloc[0] == pytest.approx(12.0 - expected_offset)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

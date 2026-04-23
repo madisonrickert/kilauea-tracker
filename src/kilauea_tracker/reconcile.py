@@ -1,59 +1,75 @@
-"""Per-source reconciliation via pairwise self-consistency calibration.
+"""Per-source reconciliation via pairwise scalar-offset alignment.
 
 All five USGS PNG sources (`two_day`, `week`, `month`, `three_month`,
 `dec2024_to_now`) are different time-window renderings of the SAME
 underlying tilt signal (station UWD, Az 300°). `digital` is the same
-signal in authoritative research-release CSV form for Jan-Jun 2025. They
-should agree exactly modulo transcription error (OCR mis-reads of the
-y-axis labels, sub-pixel trace ambiguity, gridline bleed).
+signal in authoritative research-release CSV form for Jan-Jun 2025.
 
-The v3 alignment rewrite models each source as a linear image of a
-single underlying truth:
+The ingest pipeline's per-source y-axis calibration (`calibrate.py`)
+already converts pixels → µrad using OCR'd tick labels, so each source
+arrives at reconcile in the correct µrad scale. What remains is a
+per-source SCALAR OFFSET: USGS re-baselines the y-axis between renders,
+so the same sample can appear at y=-25 µrad on today's `week` plot and
+y=-22 µrad on the `month` plot of the same moment. That's a pure shift,
+not a scale difference.
 
-    y_i(t) = a_i · true(t) + b_i + noise_i(t)
+Model:
 
-where `a_i` absorbs y-slope calibration error (OCR'd y-axis labels
-yielding a slope off by a few %) and `b_i` absorbs y-intercept error
-(y-range shifts between USGS re-renders). Under this model, for any
-pair (i, j) with temporal overlap we can measure
+    y_i(t) = true(t) + b_i + noise_i(t)
 
-    α_ij = a_i / a_j
-    β_ij = b_i - α_ij · b_j
+`b_i` is the one free parameter per source. Digital is pinned at b=0.
+For each pair (i, j) with temporal overlap we measure
 
-via ordinary least squares on bucket-aligned paired samples. With
-digital pinned to (a=1, b=0) by convention, a single joint least-squares
-solve over all pair measurements recovers every other source's
-calibration factors. Each source is then corrected pointwise via
-    corrected_i(t) = (y_i(t) - b_i) / a_i
-and merged by best effective resolution at 15-min granularity.
+    β_ij = median(y_i - y_j)    over bucket-aligned samples
 
-Why this replaces the previous architecture
--------------------------------------------
+(median, not OLS, because the distribution of inter-source deltas is
+heavy-tailed — OCR glitches and trace drop-outs produce ±20+ µrad
+outliers that would drag a mean-based estimator off the signal). The
+`{b_i}` are then recovered by a single linear-least-squares solve over
+the system `b_i - b_j = β_ij`, with `b_digital = 0` substituted in.
 
-The predecessor stack — scalar median offset per source, piecewise
-residuals by nearest higher-priority reference, proximity gating,
-archive-age demotion — tried to approximate a time-varying bias with a
-succession of constants and kept producing visible step discontinuities
-at source-handoff boundaries. That's because the actual bias is a
-y-slope error (e.g. the dec2024_to_now PNG traces to values satisfying
-`digital = 1.38 · dec + 5.3`), and a scalar offset can only hide a
-slope error at one tilt level; the error resurfaces everywhere else.
+Why this replaces the v3 slope+intercept model
+----------------------------------------------
 
-The pairwise-fit model recovers the slope correction directly. It is
-order-independent, handles sources that have no direct overlap with
-digital (chain-propagated through intermediate sources), and produces a
-single self-consistent set of calibrations each run.
+The v3 model (pre-2026-04-22) added a per-source slope `a_i` so pair
+fits were OLS lines, not medians. The intent was to absorb any residual
+y-scale miscalibration that survived ingest's OCR pass. In practice the
+slope recovery was noise-dominated: with pair `σ(residual) ≈ 2-4 µrad`
+against `σ(x) ≈ 3-8 µrad`, OLS slope uncertainty was ±0.15-0.2 even at
+300+ samples. The joint solve then compounded that noise across multiple
+pairs and routinely produced `a_i ≈ 0` for disconnected sources (the
+min-norm trivial solution to homogeneous `a_i - α·a_j = 0` rows), which
+triggered a pathological-reset cascade that left every rolling source at
+b = offset-vs-miscalibrated-dec2024_to_now — i.e. wildly wrong.
+
+Dropping `a_i` removes two failure modes:
+  - `(y - b)/a` noise amplification when `a` solves to something far
+    from 1.
+  - Min-norm collapse of disconnected subgraphs (homogeneous equations
+    have no natural anchor to 1; offset equations don't).
+
+If a source has a genuine y-scale miscalibration surviving ingest (e.g.
+the 2026-04 `dec2024_to_now` plot traces to values compressing the real
+~40 µrad span into ~29 µrad), a scalar offset can't fully correct it —
+but neither could the v3 model reliably, and digital still wins every
+Jan-Jun 2025 bucket by effective-resolution priority, so the damage is
+bounded to the pre-Jan-2025 / post-Jun-2025 windows where there's no
+ground truth to disagree with anyway. Surface the disagreement in the
+diagnostics panel; fix the trace where possible; don't let the reconcile
+layer AMPLIFY it.
 
 Merge policy
 ------------
 
 For each 15-min bucket, the corrected value from the source with the
-smallest effective resolution (a_i · µrad/px) wins. Archive is a pure
+smallest effective resolution (µrad/px) wins. Archive is a pure
 gap-filler: it contributes only when no live source has a sample in the
 bucket (pre-Dec-2024 historical data). MAD outlier rejection per-bucket
-discards any source whose corrected value exceeds 3·σ_MAD from the
-unweighted median across sources in that bucket; the discard is recorded
-as a transcription-failure candidate for post-hoc investigation.
+is diagnostic-only: it logs outliers as `TranscriptionFailure`s but does
+NOT remove them from winner selection, because per-source deterministic
+winner preserves continuity and upstream rolling-median filtering
+(`trace._filter_rolling_median_outliers`) catches OCR glitches before
+they reach reconcile.
 
 At K≥2 → K=1 transitions (canonical case: day-90 boundary where
 three_month's window ends and only dec2024_to_now extends further back)
@@ -81,7 +97,6 @@ from .config import (
     K1_HANDOFF_BLEND_HOURS,
     MAD_OUTLIER_SIGMA_FLOOR_MICRORAD,
     MAD_OUTLIER_SIGMA_MULTIPLIER,
-    PAIRWISE_MAX_A_DEVIATION_FRACTION,
     PAIRWISE_MAX_B_MICRORAD,
     PAIRWISE_MIN_OVERLAP_BUCKETS,
 )
@@ -100,12 +115,15 @@ MERGE_BUCKET = "15min"
 
 @dataclass
 class SourceAlignment:
-    """Per-source outcome of pairwise self-consistency calibration."""
+    """Per-source outcome of pairwise scalar-offset alignment."""
 
     name: str
     rows_in: int = 0
-    a: float = 1.0                         # recovered y-slope correction
-    b: float = 0.0                         # recovered y-intercept correction
+    a: float = 1.0                         # always 1.0 — kept in the schema so
+                                           # downstream consumers (JSON serializer,
+                                           # Streamlit diagnostics) don't need to
+                                           # branch on model version
+    b: float = 0.0                         # recovered scalar offset
     pairs_used: int = 0                    # pair constraints involving this source
     is_anchor: bool = False                # True for the pinned source (digital)
     note: Optional[str] = None             # human-readable diagnostic
@@ -113,8 +131,7 @@ class SourceAlignment:
     effective_resolution_microrad_per_pixel: float = 0.0
 
     # Back-compat fields consumed by `ingest.pipeline._serialize_reconcile`
-    # and the legacy CLI print loop. These are populated so the existing
-    # run-report JSON structure keeps working.
+    # and the legacy CLI print loop.
     offset_microrad: Optional[float] = None  # = b for back-compat display
     overlap_buckets: int = 0
     rows_proximity_dropped: int = 0  # always 0 — proximity gate was removed
@@ -123,14 +140,20 @@ class SourceAlignment:
 
 @dataclass
 class PairwiseFit:
-    """One pairwise OLS fit y_i = α_ij · y_j + β_ij over overlapping buckets."""
+    """One pairwise median-offset measurement y_i - y_j = β_ij over
+    overlapping buckets.
+
+    `alpha` is retained at 1.0 for JSON schema stability with run
+    reports produced by the earlier slope+intercept model — diagnostics
+    panels that displayed it keep working without a schema migration.
+    """
 
     source_i: str
     source_j: str
-    alpha: float
-    beta: float
+    alpha: float                            # always 1.0 (schema stability)
+    beta: float                             # median(y_i - y_j) over overlap
     overlap_buckets: int
-    residual_std_microrad: float
+    residual_std_microrad: float            # std(y_i - y_j - β_ij)
 
 
 @dataclass
@@ -269,27 +292,19 @@ def _compute_pairwise_fits(
     """Return one `PairwiseFit` per ordered pair (i, j) with
     `≥ PAIRWISE_MIN_OVERLAP_BUCKETS` shared `bucket_freq` buckets.
 
-    Each pair is fit via **Huber-robust** regression (via
-    `scipy.optimize.least_squares(loss='huber')`) rather than plain OLS.
-    Real data has `σ(residual) ≈ 2-4 µrad` against `σ(x) ≈ 3-8 µrad`,
-    which gives OLS slope uncertainty of ±0.15-0.2 even at 300+ samples
-    — the joint solve then compounds noise across 11 pairs into the
-    pathological `a` values observed in 2026-04 production. Huber
-    down-weights tail residuals so the recovered slope reflects the
-    bulk of the signal, not the outliers.
+    Each pair's scalar offset is estimated as `β_ij = median(y_i - y_j)`
+    across bucket-aligned samples. Median rather than mean because the
+    distribution of inter-source deltas is heavy-tailed — OCR glitches
+    and trace drop-outs produce 20+ µrad outliers that would drag a
+    mean off the signal. `residual_std_microrad` is the post-offset
+    std, useful as a quality gauge: a pair with `residual_std > 4 µrad`
+    is a strong hint that one of the two sources has a real y-scale
+    problem that a scalar can't fix, and the diagnostics panel surfaces
+    it so the user can intervene upstream.
 
-    Mirrors `calibrate.recalibrate_by_anchor_fit`, which already uses
-    Huber successfully for the source-vs-digital anchor fit.
-
-    Only ordered pairs where `i < j` lexically are computed — the
-    constraint `a_j = α_ji · a_i` is redundant with `a_i = α_ij · a_j`
-    (`α_ji = 1/α_ij`), so one per unordered pair is sufficient.
+    Only ordered pairs where `i < j` lexically are computed —
+    `β_ji = -β_ij`, so one per unordered pair is sufficient.
     """
-    try:
-        from scipy.optimize import least_squares  # type: ignore
-    except ImportError:  # pragma: no cover — scipy is pinned
-        least_squares = None
-
     names = sorted(live.keys())
     buckets_per_source: dict[str, pd.Series] = {}
     for name in names:
@@ -308,36 +323,16 @@ def _compute_pairwise_fits(
             overlap = bi.index.intersection(bj.index)
             if len(overlap) < PAIRWISE_MIN_OVERLAP_BUCKETS:
                 continue
-            x = bj.loc[overlap].to_numpy(dtype=float)
-            y = bi.loc[overlap].to_numpy(dtype=float)
-
-            if least_squares is not None:
-                # Huber-robust: residuals > f_scale µrad are down-weighted
-                # to L1, smaller residuals stay L2. f_scale = 1.0 is
-                # conservative — most real inter-source disagreement is
-                # under 1 µrad, outliers are several µrad.
-                def _resid(p, x=x, y=y):
-                    return y - (p[0] * x + p[1])
-                fit_result = least_squares(
-                    _resid,
-                    x0=np.array([1.0, 0.0]),
-                    loss="huber",
-                    f_scale=1.0,
-                    max_nfev=200,
-                )
-                alpha = float(fit_result.x[0])
-                beta = float(fit_result.x[1])
-            else:  # scipy unavailable: OLS fallback
-                A = np.vstack([x, np.ones_like(x)]).T
-                solution, *_ = np.linalg.lstsq(A, y, rcond=None)
-                alpha, beta = float(solution[0]), float(solution[1])
-
-            residuals = y - (alpha * x + beta)
-            residual_std = float(np.std(residuals))
+            deltas = (
+                bi.loc[overlap].to_numpy(dtype=float)
+                - bj.loc[overlap].to_numpy(dtype=float)
+            )
+            beta = float(np.median(deltas))
+            residual_std = float(np.std(deltas - beta))
             fit = PairwiseFit(
                 source_i=name_i,
                 source_j=name_j,
-                alpha=alpha,
+                alpha=1.0,
                 beta=beta,
                 overlap_buckets=len(overlap),
                 residual_std_microrad=residual_std,
@@ -357,116 +352,58 @@ def _solve_pairwise_calibration(
     fits: list[PairwiseFit],
     report: ReconcileReport,
 ) -> dict[str, SourceAlignment]:
-    """Solve two decoupled linear systems for {a_i} and {b_i} jointly.
+    """Solve the linear system `b_i - b_j = β_ij` for `{b_i}`.
 
     The anchor source (`digital` if present, else the first source
-    alphabetically) is HARD-pinned at `a=1, b=0` by eliminating its
-    variables from the system entirely, not by adding a soft pin row.
-    A soft pin is just one equal-weight row in the lstsq, and with many
-    pair constraints it gets out-voted — in 2026-04 production data the
-    pin solved to `a_digital = 0.9622` instead of 1, propagating a 4%
-    scale error to every downstream source.
+    alphabetically) is HARD-pinned at `b=0` by eliminating its variable
+    from the system — not by adding a soft pin row that the lstsq could
+    out-vote.
 
-    Substituted pair constraints (for α_ij from `y_i = α_ij · y_j + β_ij`):
-      - both sources pinned → constraint involves no unknowns; skip.
-      - only `i` pinned      → `a_j = 1/α_ij`, `b_j = -β_ij/α_ij`.
-      - only `j` pinned      → `a_i = α_ij`,   `b_i = β_ij`.
-      - neither pinned       → `a_i - α_ij·a_j = 0`,
-                               `b_i - α_ij·b_j = β_ij`.
-
-    After the solve, any source whose recovered `|a-1|` exceeds
-    PAIRWISE_MAX_A_DEVIATION_FRACTION is flagged AND reset to identity
-    (a=1, b=median-offset-vs-anchor) — applying a pathological slope
-    correction is worse than applying none, because the division
-    amplifies the underlying transcription noise by 2-3×.
+    Sources in a connected component of the pair graph that contains
+    the pin are resolved by the joint solve. Sources in a component
+    disconnected from the pin default to `b=0` with a warning: a
+    disconnected component's equations are internally-consistent but
+    have no external anchor, so the min-norm lstsq solution picks zero
+    for every variable, which by coincidence is the right default (no
+    offset) — we just need to know it was an uncalibrated default and
+    not a measurement. In the happy path with
+    PAIRWISE_MIN_OVERLAP_BUCKETS = 20 and the usual 5-source coverage,
+    every source reaches digital through ≤ 2 hops via dec2024_to_now,
+    so the disconnected case is a diagnostic, not a regular occurrence.
     """
     names = sorted(live.keys())
-    n = len(names)
     pin_name = DIGITAL_SOURCE_NAME if DIGITAL_SOURCE_NAME in names else names[0]
 
-    # Non-pinned variables are the unknowns we solve for.
     unknowns = [n_ for n_ in names if n_ != pin_name]
     uidx = {name: i for i, name in enumerate(unknowns)}
+    m = len(unknowns)
 
     pair_counts: dict[str, int] = {name: 0 for name in names}
     for f in fits:
         pair_counts[f.source_i] += 1
         pair_counts[f.source_j] += 1
 
-    if len(unknowns) == 0:
-        # Only pin is present — nothing to solve.
-        alignments: dict[str, SourceAlignment] = {
-            pin_name: SourceAlignment(
-                name=pin_name,
-                rows_in=len(live[pin_name]),
-                a=1.0,
-                b=0.0,
-                pairs_used=pair_counts[pin_name],
-                is_anchor=True,
-                effective_resolution_microrad_per_pixel=(
-                    EFFECTIVE_RESOLUTION_FALLBACK_MICRORAD_PER_PIXEL.get(pin_name, 1.0)
-                ),
-                offset_microrad=0.0,
-                overlap_buckets=pair_counts[pin_name],
-            )
-        }
-        report.sources.append(alignments[pin_name])
-        return alignments
-
-    # Build both systems with pin variables substituted out.
-    a_rows: list[list[float]] = []
-    a_rhs: list[float] = []
-    b_rows: list[list[float]] = []
-    b_rhs: list[float] = []
-    m = len(unknowns)
+    # ── Graph-connectedness check (BFS from pin) ────────────────────────────
+    # Build an adjacency list across the fit graph, then walk from the
+    # pin. Sources not reached are in a disconnected component and
+    # won't be resolvable by the lstsq.
+    adj: dict[str, set[str]] = {name: set() for name in names}
     for f in fits:
-        i_pin = (f.source_i == pin_name)
-        j_pin = (f.source_j == pin_name)
-        if i_pin and j_pin:
-            continue  # trivial
-        row_a = [0.0] * m
-        row_b = [0.0] * m
-        if not i_pin and not j_pin:
-            # a_i - α·a_j = 0,  b_i - α·b_j = β
-            row_a[uidx[f.source_i]] = 1.0
-            row_a[uidx[f.source_j]] = -f.alpha
-            row_b[uidx[f.source_i]] = 1.0
-            row_b[uidx[f.source_j]] = -f.alpha
-            a_rhs.append(0.0)
-            b_rhs.append(f.beta)
-        elif j_pin:
-            # a_i = α,  b_i = β
-            row_a[uidx[f.source_i]] = 1.0
-            row_b[uidx[f.source_i]] = 1.0
-            a_rhs.append(f.alpha)
-            b_rhs.append(f.beta)
-        else:  # i_pin
-            # a_j = 1/α,  b_j = -β/α  (assuming α is non-zero; it is by
-            # construction since α comes from a non-trivial linear fit)
-            if abs(f.alpha) < 1e-9:
-                continue
-            row_a[uidx[f.source_j]] = 1.0
-            row_b[uidx[f.source_j]] = 1.0
-            a_rhs.append(1.0 / f.alpha)
-            b_rhs.append(-f.beta / f.alpha)
-        a_rows.append(row_a)
-        b_rows.append(row_b)
+        adj[f.source_i].add(f.source_j)
+        adj[f.source_j].add(f.source_i)
 
-    if len(a_rows) == 0:
-        # No pair constraints left unknowns — everyone defaults to identity.
-        a_vec = np.ones(m)
-        b_vec = np.zeros(m)
-    else:
-        a_vec, *_ = np.linalg.lstsq(
-            np.array(a_rows), np.array(a_rhs), rcond=None
-        )
-        b_vec, *_ = np.linalg.lstsq(
-            np.array(b_rows), np.array(b_rhs), rcond=None
-        )
+    connected_to_pin: set[str] = {pin_name}
+    queue = [pin_name]
+    while queue:
+        current = queue.pop()
+        for neighbor in adj[current]:
+            if neighbor not in connected_to_pin:
+                connected_to_pin.add(neighbor)
+                queue.append(neighbor)
 
     alignments: dict[str, SourceAlignment] = {}
 
-    # Pin record: exact identity, no solver noise.
+    # Pin record: exact identity.
     alignments[pin_name] = SourceAlignment(
         name=pin_name,
         rows_in=len(live[pin_name]),
@@ -482,92 +419,91 @@ def _solve_pairwise_calibration(
     )
     report.sources.append(alignments[pin_name])
 
+    if m == 0:
+        return alignments
+
+    # ── Build and solve the lstsq for connected unknowns ─────────────────────
+    # One row per fit: `b_i - b_j = β_ij`, with the pin's coefficient
+    # dropped when it appears (since b_pin = 0).
+    rows: list[list[float]] = []
+    rhs: list[float] = []
+    for f in fits:
+        # Skip fits between two non-connected unknowns — their constraint
+        # exists internally in a disconnected component, but without an
+        # anchor the whole component underdetermines itself. Including the
+        # constraint would bias connected-side variables.
+        if (
+            f.source_i not in connected_to_pin
+            or f.source_j not in connected_to_pin
+        ):
+            continue
+        i_pin = (f.source_i == pin_name)
+        j_pin = (f.source_j == pin_name)
+        if i_pin and j_pin:
+            continue
+        row = [0.0] * m
+        if not i_pin:
+            row[uidx[f.source_i]] = 1.0
+        if not j_pin:
+            row[uidx[f.source_j]] = -1.0
+        rows.append(row)
+        rhs.append(f.beta)
+
+    if rows:
+        b_vec, *_ = np.linalg.lstsq(
+            np.array(rows), np.array(rhs), rcond=None
+        )
+    else:
+        b_vec = np.zeros(m)
+
+    # ── Emit alignment records ───────────────────────────────────────────────
     for name in unknowns:
-        a = float(a_vec[uidx[name]])
-        b = float(b_vec[uidx[name]])
+        if name in connected_to_pin:
+            b = float(b_vec[uidx[name]])
+            note: Optional[str] = None
+        else:
+            # Disconnected from pin: no evidence to set b. Default to 0
+            # and let the effective-resolution merge-winner pick it up
+            # only when it's the sole source covering a bucket.
+            b = 0.0
+            note = (
+                f"{name}: no path to anchor ({pin_name}) in pair graph "
+                f"(pairs_used={pair_counts[name]}); scalar offset "
+                f"defaulted to 0 — merged values in this source's "
+                f"window may carry a residual offset"
+            )
+            report.warnings.append(note)
+            logger.warning("reconcile disconnected: %s", note)
+
         record = SourceAlignment(
             name=name,
             rows_in=len(live[name]),
-            a=a,
+            a=1.0,
             b=b,
             pairs_used=pair_counts[name],
             is_anchor=False,
             effective_resolution_microrad_per_pixel=(
-                abs(a) * EFFECTIVE_RESOLUTION_FALLBACK_MICRORAD_PER_PIXEL.get(name, 1.0)
+                EFFECTIVE_RESOLUTION_FALLBACK_MICRORAD_PER_PIXEL.get(name, 1.0)
             ),
             offset_microrad=b,
-            overlap_buckets=pair_counts[name],  # proxy for the old field
+            overlap_buckets=pair_counts[name],
+            note=note,
         )
 
-        # If the recovered slope is pathological, applying `(y - b)/a`
-        # amplifies transcription noise. Reset to a=1 and estimate b
-        # separately via median offset vs the best available reference.
-        # Prefer anchor-corrected `dec2024_to_now` (which always overlaps
-        # the rolling sources temporally) over `digital` (which covers
-        # only Jan-Jun 2025 and rarely overlaps rolling-source windows).
-        if abs(a - 1.0) > PAIRWISE_MAX_A_DEVIATION_FRACTION:
-            reference = (
-                "dec2024_to_now"
-                if "dec2024_to_now" in live
-                and name != "dec2024_to_now"
-                and alignments.get("dec2024_to_now") is not None
-                and alignments["dec2024_to_now"].note is None
-                else pin_name
-            )
-            reset_b = _estimate_scalar_offset(live, name, reference)
+        if abs(b) > PAIRWISE_MAX_B_MICRORAD and note is None:
             msg = (
-                f"{name}: pairwise fit is pathological — "
-                f"a={a:.4f} (|a-1|={abs(a-1)*100:.1f}% > "
-                f"{PAIRWISE_MAX_A_DEVIATION_FRACTION*100:.0f}%); "
-                f"reset to a=1.0, b={reset_b:+.2f} µrad"
-            )
-            record.a = 1.0
-            record.b = reset_b
-            record.offset_microrad = reset_b
-            record.effective_resolution_microrad_per_pixel = (
-                EFFECTIVE_RESOLUTION_FALLBACK_MICRORAD_PER_PIXEL.get(name, 1.0)
+                f"{name}: large scalar offset — "
+                f"b={b:+.2f} µrad (> {PAIRWISE_MAX_B_MICRORAD} µrad). "
+                f"USGS may have rebaselined this source's y-axis, or "
+                f"its trace has drifted from the common frame"
             )
             record.note = msg
             report.warnings.append(msg)
-            logger.warning("reconcile pathological a: %s", msg)
-        elif abs(b) > PAIRWISE_MAX_B_MICRORAD:
-            msg = (
-                f"{name}: pairwise fit produces large intercept — "
-                f"b={b:+.2f} µrad (> {PAIRWISE_MAX_B_MICRORAD} µrad)"
-            )
-            record.note = msg
-            report.warnings.append(msg)
-            logger.warning("reconcile large-intercept: %s", msg)
+            logger.warning("reconcile large-offset: %s", msg)
 
         alignments[name] = record
         report.sources.append(record)
     return alignments
-
-
-def _estimate_scalar_offset(
-    live: dict[str, pd.DataFrame],
-    source_name: str,
-    reference_name: str,
-    *,
-    bucket_freq: str = ALIGNMENT_BUCKET,
-) -> float:
-    """Median bucket-aligned offset of `source` minus `reference`.
-
-    Called when a source's pairwise slope is pathological and we fall
-    back to a=1 + scalar-b correction. Returns 0.0 if there's no
-    overlap, which defers alignment to downstream handoff logic rather
-    than pick a value out of thin air.
-    """
-    if source_name not in live or reference_name not in live:
-        return 0.0
-    src = live[source_name]
-    ref = live[reference_name]
-    src_b = src.assign(_b=src[DATE_COL].dt.floor(bucket_freq)).groupby("_b")[TILT_COL].mean()
-    ref_b = ref.assign(_b=ref[DATE_COL].dt.floor(bucket_freq)).groupby("_b")[TILT_COL].mean()
-    overlap = src_b.index.intersection(ref_b.index)
-    if len(overlap) == 0:
-        return 0.0
-    return float(np.median(src_b.loc[overlap] - ref_b.loc[overlap]))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -575,16 +511,92 @@ def _estimate_scalar_offset(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# Cap on how far to interpolate between samples of the same source.
+# Beyond this, the stretch is left as a gap so another source (or
+# archive gap-fill) can take over instead of fabricating a straight
+# line across a multi-hour fetch failure. 3×stride is wide enough to
+# absorb normal jitter and the odd single-bucket drop-out but narrow
+# enough that a half-day gap remains visible as a gap.
+_DENSIFY_GAP_STRIDE_MULTIPLE = 3.0
+
+
+def _densify_to_merge_grid(df: pd.DataFrame, freq: str) -> pd.DataFrame:
+    """Interpolate a source's samples onto a regular `freq` grid.
+
+    Bounded to `[df.min, df.max]` — no extrapolation past the source's
+    own window. Gaps wider than `_DENSIFY_GAP_STRIDE_MULTIPLE` × the
+    source's median inter-sample stride are left as NaN so downstream
+    merge policy (best-effective-resolution / archive gap-fill) can
+    pick a different source rather than fabricate data across a fetch
+    failure.
+    """
+    if df is None or len(df) == 0:
+        return df.copy() if df is not None else pd.DataFrame(
+            columns=[DATE_COL, TILT_COL]
+        )
+
+    d = df[[DATE_COL, TILT_COL]].copy()
+    d[DATE_COL] = pd.to_datetime(d[DATE_COL])
+    d = d.dropna().sort_values(DATE_COL).drop_duplicates(
+        subset=DATE_COL, keep="last"
+    )
+    if len(d) < 2:
+        return d
+
+    strides = d[DATE_COL].diff().dropna().dt.total_seconds()
+    if len(strides) == 0:
+        return d
+    median_stride_s = float(strides.median())
+    max_gap = pd.Timedelta(
+        seconds=max(median_stride_s * _DENSIFY_GAP_STRIDE_MULTIPLE, 900.0)
+    )
+
+    grid_start = d[DATE_COL].min().ceil(freq)
+    grid_end = d[DATE_COL].max().floor(freq)
+    if grid_end < grid_start:
+        return d
+    grid = pd.date_range(grid_start, grid_end, freq=freq)
+
+    series = d.set_index(DATE_COL)[TILT_COL]
+    combined_index = series.index.union(grid)
+    interp = (
+        series.reindex(combined_index)
+        .sort_index()
+        .interpolate(method="time", limit_direction="both")
+    )
+    # Mask any grid point whose nearest actual sample on either side is
+    # > max_gap away — protects against fabricated data across fetch
+    # failures.
+    actual_times = series.index.to_numpy()
+    grid_times = grid.to_numpy()
+    idx_after = np.searchsorted(actual_times, grid_times, side="left")
+    idx_before = np.clip(idx_after - 1, 0, len(actual_times) - 1)
+    idx_after = np.clip(idx_after, 0, len(actual_times) - 1)
+    before_dt = grid_times - actual_times[idx_before]
+    after_dt = actual_times[idx_after] - grid_times
+    gap_to_nearest = np.minimum(
+        np.abs(before_dt.astype("timedelta64[ns]").astype("int64")),
+        np.abs(after_dt.astype("timedelta64[ns]").astype("int64")),
+    )
+    max_gap_ns = max_gap.value
+    mask_too_far = gap_to_nearest > max_gap_ns
+
+    result = interp.reindex(grid)
+    result.iloc[mask_too_far] = np.nan
+    out = pd.DataFrame({DATE_COL: grid, TILT_COL: result.values})
+    out = out.dropna(subset=[TILT_COL]).reset_index(drop=True)
+    return out
+
+
 def _apply_ab_corrections(
     live: dict[str, pd.DataFrame],
     alignments: dict[str, SourceAlignment],
 ) -> dict[str, pd.DataFrame]:
-    """Return each source's DataFrame with `tilt ← (tilt - b) / a` applied.
+    """Return each source's DataFrame with `tilt ← tilt - b` applied.
 
-    The correction inverts the model `y_i = a_i · true + b_i` to recover
-    `true`. A near-zero `a_i` would indicate a pathological solve; clamp
-    to 1.0 in that case to avoid div-by-zero and let the continuity check
-    surface the problem downstream.
+    Inverts the scalar-offset model `y_i = true + b_i`. Function name
+    retained for call-site compatibility; since `a ≡ 1` there's no
+    division to worry about.
     """
     out: dict[str, pd.DataFrame] = {}
     for name, df in live.items():
@@ -592,9 +604,8 @@ def _apply_ab_corrections(
         if align is None:
             out[name] = df.copy()
             continue
-        a = align.a if abs(align.a) > 1e-9 else 1.0
         corrected = df.copy()
-        corrected[TILT_COL] = (corrected[TILT_COL] - align.b) / a
+        corrected[TILT_COL] = corrected[TILT_COL] - align.b
         out[name] = corrected
     return out
 
@@ -642,14 +653,57 @@ def _merge_best_resolution(
         for name, align in alignments.items()
     }
 
-    # Tag every corrected row with its source + merge bucket + value.
+    # Tag every source's rows with both actual and densified-interpolated
+    # coverage. Densification is used for WINNER SELECTION only — it lets
+    # a low-stride, high-priority source (e.g. three_month every 3h) win
+    # every 15-min bucket in its window instead of losing intermittent
+    # buckets to a higher-stride, lower-priority peer (e.g.
+    # dec2024_to_now every 17h) just because the peer happened to sample
+    # closer to that exact bucket. Without this, the per-bucket winner
+    # rotated and produced the ~14 µrad Feb 2026 sawtooth between
+    # three_month and dec2024_to_now.
+    #
+    # But we emit only the ACTUAL-sample rows — interpolated rows are
+    # used to decide "who should own this bucket if they had a sample"
+    # and then the actual sample from the winner (or any other actual
+    # sample in the same bucket when the winner had none) carries the
+    # value. This keeps tilt_history and the downstream archive at the
+    # natural sample cadence of the sources rather than inflating to
+    # every 15-min slot across 16 months.
     tagged: list[pd.DataFrame] = []
     for name, df in corrected.items():
-        d = df[[DATE_COL, TILT_COL]].copy()
-        d["_source"] = name
-        d["_bucket"] = d[DATE_COL].dt.round(MERGE_BUCKET)
-        d["_res"] = resolutions.get(name, 1.0)
-        tagged.append(d)
+        d_actual = df[[DATE_COL, TILT_COL]].copy()
+        d_actual[DATE_COL] = pd.to_datetime(d_actual[DATE_COL])
+        d_actual = d_actual.dropna().sort_values(DATE_COL).reset_index(drop=True)
+        if len(d_actual) == 0:
+            continue
+        d_actual["_source"] = name
+        d_actual["_bucket"] = d_actual[DATE_COL].dt.round(MERGE_BUCKET)
+        d_actual["_res"] = resolutions.get(name, 1.0)
+        d_actual["_origin"] = "actual"
+        tagged.append(d_actual)
+
+        densified = _densify_to_merge_grid(df, MERGE_BUCKET)
+        if len(densified) == 0:
+            continue
+        # Drop grid rows that collide with an actual-sample bucket — we
+        # already have the actual for those; the interpolated copy would
+        # just duplicate.
+        actual_buckets = set(d_actual["_bucket"])
+        d_interp = densified.copy()
+        d_interp["_source"] = name
+        d_interp["_bucket"] = d_interp[DATE_COL].dt.round(MERGE_BUCKET)
+        d_interp = d_interp[~d_interp["_bucket"].isin(actual_buckets)].copy()
+        if len(d_interp) == 0:
+            continue
+        d_interp["_res"] = resolutions.get(name, 1.0)
+        d_interp["_origin"] = "interp"
+        tagged.append(d_interp)
+
+    if not tagged:
+        if archive_df is not None and len(archive_df) > 0:
+            return archive_df.sort_values(DATE_COL).reset_index(drop=True)
+        return _empty_history_df()
 
     combined = pd.concat(tagged, ignore_index=True)
     combined = combined.dropna(subset=[TILT_COL, "_bucket"])
@@ -668,28 +722,32 @@ def _merge_best_resolution(
     emitted_rows: list[tuple[pd.Timestamp, float, str]] = []
     for bucket, group in combined.groupby("_bucket", sort=True):
         values = group[TILT_COL].to_numpy(dtype=float)
-        sources = group["_source"].to_numpy(dtype=str)
+        sources_arr = group["_source"].to_numpy(dtype=str)
         resolutions_here = group["_res"].to_numpy(dtype=float)
         dates = group[DATE_COL].to_numpy()
+        origins = group["_origin"].to_numpy(dtype=str)
 
         if len(values) == 0:
             continue
 
-        # ── MAD outlier gate (DIAGNOSTIC-ONLY in Phase 4 Commit 4) ─────────
-        # Record outliers but DO NOT remove from winner selection —
-        # per-region determinism requires the rank-0 source to win every
-        # bucket it covers, regardless of momentary consensus.
-        if len(values) >= 2:
-            m = float(np.median(values))
-            mad = float(np.median(np.abs(values - m)))
+        # ── MAD outlier gate (diagnostic-only) ──────────────────────────────
+        # Only score actual-sample rows against each other; interpolated
+        # rows are driven from adjacent actuals so including them would
+        # double-count and deflate MAD.
+        actual_mask = origins == "actual"
+        if actual_mask.sum() >= 2:
+            actual_values = values[actual_mask]
+            actual_sources = sources_arr[actual_mask]
+            m = float(np.median(actual_values))
+            mad = float(np.median(np.abs(actual_values - m)))
             sigma = 1.4826 * mad
             threshold = max(
                 MAD_OUTLIER_SIGMA_FLOOR_MICRORAD,
                 MAD_OUTLIER_SIGMA_MULTIPLIER * sigma,
             )
-            outlier_mask = np.abs(values - m) > threshold
+            outlier_mask = np.abs(actual_values - m) > threshold
             if outlier_mask.any():
-                for v, s in zip(values[outlier_mask], sources[outlier_mask]):
+                for v, s in zip(actual_values[outlier_mask], actual_sources[outlier_mask]):
                     report.transcription_failures.append(
                         TranscriptionFailure(
                             bucket=bucket,
@@ -703,12 +761,44 @@ def _merge_best_resolution(
                     if align is not None:
                         align.rows_mad_rejected += 1
 
-        # ── Best-effective-resolution wins (deterministic, no MAD drop) ────
+        # ── Winner selection uses ALL rows (actual + interpolated) ──────────
+        # The best-resolution source in the coverage set wins the bucket
+        # deterministically — including interpolated coverage so a tight-
+        # cadence source (three_month) outranks a loose one (dec) even
+        # when only the loose one happens to have an actual sample in
+        # THIS bucket. The emission step below then picks the winner's
+        # actual row if any, else the best other actual row to carry
+        # the winner's value.
         winner_idx = int(np.argmin(resolutions_here))
-        winner_source = str(sources[winner_idx])
-        emitted_rows.append(
-            (pd.Timestamp(dates[winner_idx]), float(values[winner_idx]), winner_source)
-        )
+        winner_source = str(sources_arr[winner_idx])
+        winner_value = float(values[winner_idx])
+
+        # Emission priority:
+        #   1. If the winner has an actual sample here, emit it.
+        #   2. Else if SOME source has an actual here, emit the winner's
+        #      interpolated value at that actual's timestamp (so we
+        #      don't invent a timestamp).
+        #   3. Else emit the winner's interpolated value at the bucket
+        #      boundary (stops archive gap-fill from re-populating a
+        #      bucket that IS covered by a live source).
+        actual_rows_mask = origins == "actual"
+        winner_actual_mask = actual_rows_mask & (sources_arr == winner_source)
+        if winner_actual_mask.any():
+            k = int(np.where(winner_actual_mask)[0][0])
+            emitted_rows.append(
+                (pd.Timestamp(dates[k]), float(values[k]), winner_source)
+            )
+        elif actual_rows_mask.any():
+            k = int(np.where(actual_rows_mask)[0][0])
+            emitted_rows.append(
+                (pd.Timestamp(dates[k]), winner_value, winner_source)
+            )
+        else:
+            # No actual sample from any source in this bucket; emit the
+            # winner's interp at the bucket boundary.
+            emitted_rows.append(
+                (pd.Timestamp(bucket), winner_value, winner_source)
+            )
         report.winner_counts[winner_source] = (
             report.winner_counts.get(winner_source, 0) + 1
         )

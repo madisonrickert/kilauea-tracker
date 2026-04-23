@@ -125,21 +125,33 @@ def compute_intra_source_frame_offset(
 ) -> tuple[float, int]:
     """Densest-cluster (new − existing) y-delta across the overlap region.
 
-    Both inputs are bucketed to `DEDUPE_BUCKET` and reduced to one row
-    per bucket. Buckets present in BOTH frames contribute one delta each;
-    we return the CENTER of the tallest 0.2-µrad histogram bin, refined
-    by taking the median of deltas within ±0.2 µrad of that peak.
+    Pairs new samples to existing samples by nearest-neighbour in time,
+    within a tolerance scaled to the source's native sample stride.
+    Returns the CENTER of the tallest 0.2-µrad histogram bin over those
+    deltas, refined by taking the median of deltas within ±0.2 µrad of
+    that peak.
 
-    Why mode-of-histogram rather than plain median: when the existing
-    CSV already contains parallel-track contamination (two y-levels that
-    alternate bucket-to-bucket), a plain median lands between the two
-    tracks and produces an offset that's WRONG for both — which then
-    re-contaminates the next fetch and amplifies over time. The
-    densest-cluster estimator snaps to whichever track dominates the
-    overlap region, breaking the compounding feedback loop. For the
-    clean unimodal case it's numerically equivalent to the median.
+    The tolerance is `3 × median stride of the existing CSV`, bounded
+    to `[15 min, 6 h]`. A 15-min floor keeps tight-cadence sources like
+    `two_day` (sub-minute pixel jitter) from matching across unrelated
+    samples; a 6-h ceiling bounds how far we'll reach across sparse
+    long-window sources (e.g. `three_month` at ~4.3 h stride, where a
+    fresh fetch's sample timestamps offset by ~80 min from the existing
+    CSV's sample timestamps would otherwise round into disjoint 15-min
+    buckets and produce zero overlap — the bug that triggered the
+    2026-04 "appending in raw frame (drift risk)" warnings on month and
+    three_month).
 
-    Returns `(0.0, 0)` when there is no overlap.
+    Why densest-cluster rather than plain median: if the existing CSV
+    already contains parallel-track contamination (two y-levels that
+    alternate sample-to-sample), a plain median lands between the two
+    tracks and produces an offset that's WRONG for both — re-
+    contaminating the next fetch and amplifying over time. The mode
+    estimator snaps to whichever track dominates the overlap region,
+    breaking the compounding feedback loop. For the clean unimodal
+    case it's numerically equivalent to the median.
+
+    Returns `(0.0, 0)` when there is no overlap within tolerance.
     """
     if existing is None or new_rows is None:
         return 0.0, 0
@@ -148,21 +160,55 @@ def compute_intra_source_frame_offset(
 
     e = existing[[DATE_COL, TILT_COL]].copy()
     e[DATE_COL] = pd.to_datetime(e[DATE_COL])
-    e = e.dropna(subset=[DATE_COL, TILT_COL])
-    e["_bucket"] = e[DATE_COL].dt.round(DEDUPE_BUCKET)
-    e = e.sort_values(DATE_COL).drop_duplicates(subset="_bucket", keep="last")
+    e = e.dropna(subset=[DATE_COL, TILT_COL]).sort_values(DATE_COL).reset_index(drop=True)
 
     n = new_rows[[DATE_COL, TILT_COL]].copy()
     n[DATE_COL] = pd.to_datetime(n[DATE_COL])
-    n = n.dropna(subset=[DATE_COL, TILT_COL])
-    n["_bucket"] = n[DATE_COL].dt.round(DEDUPE_BUCKET)
-    n = n.sort_values(DATE_COL).drop_duplicates(subset="_bucket", keep="last")
+    n = n.dropna(subset=[DATE_COL, TILT_COL]).sort_values(DATE_COL).reset_index(drop=True)
 
-    merged = e.merge(n, on="_bucket", suffixes=("_existing", "_new"))
-    if len(merged) == 0:
+    if len(n) == 0:
         return 0.0, 0
 
-    deltas = (merged[f"{TILT_COL}_new"] - merged[f"{TILT_COL}_existing"]).to_numpy()
+    # Tolerance = 3× existing's median stride, clamped to [15min, 6h].
+    # When existing has only one sample, stride is undefined — fall back
+    # to 1h so we still try to match a single nearby new sample.
+    strides = e[DATE_COL].diff().dropna().dt.total_seconds()
+    if len(strides) == 0:
+        tolerance_s = 3600.0
+    else:
+        tolerance_s = max(900.0, min(float(strides.median()) * 3.0, 21600.0))
+    tolerance = pd.Timedelta(seconds=tolerance_s)
+
+    paired = pd.merge_asof(
+        n.rename(columns={TILT_COL: f"{TILT_COL}_new"}),
+        e.rename(columns={TILT_COL: f"{TILT_COL}_existing"}),
+        on=DATE_COL,
+        direction="nearest",
+        tolerance=tolerance,
+    ).dropna(subset=[f"{TILT_COL}_existing"])
+    # Restrict to new rows that fall inside existing's temporal span,
+    # with a ±(median stride) margin so edge samples still qualify.
+    # Without this clamp, `merge_asof` would latch the last existing
+    # sample onto every future new row within `tolerance`, biasing the
+    # offset with stale-neighbour matches (e.g. 3 "overlap" matches
+    # plus 3 extrapolated ones all pointing at the same e_max sample).
+    if len(strides) > 0:
+        edge_margin_s = float(strides.median()) / 2.0
+    else:
+        edge_margin_s = tolerance_s
+    edge_margin = pd.Timedelta(seconds=edge_margin_s)
+    e_min, e_max = e[DATE_COL].min(), e[DATE_COL].max()
+    paired = paired[
+        (paired[DATE_COL] >= e_min - edge_margin)
+        & (paired[DATE_COL] <= e_max + edge_margin)
+    ]
+    if len(paired) == 0:
+        return 0.0, 0
+
+    deltas = (
+        paired[f"{TILT_COL}_new"] - paired[f"{TILT_COL}_existing"]
+    ).to_numpy()
+    merged = paired
     if len(deltas) < 5:
         return float(np.median(deltas)), len(merged)
 

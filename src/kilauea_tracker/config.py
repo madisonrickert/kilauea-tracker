@@ -368,10 +368,18 @@ WIDE_COLUMN_THRESHOLD_PIXELS = 3
 # See `src/kilauea_tracker/reconcile.py` for the full algorithm and
 # `.claude/plans/foamy-yawning-horizon.md` for the design rationale.
 
-# Minimum bucket-aligned overlap per pair before its OLS fit is trusted.
-# Below this the pair contributes no constraint — too few points to
-# resolve slope (α_ij) from intercept (β_ij).
-PAIRWISE_MIN_OVERLAP_BUCKETS = 50
+# Minimum bucket-aligned overlap before a pair contributes a constraint.
+# Under the scalar-offset-only model this is "enough samples to trust a
+# median offset," not "enough to resolve slope from intercept," so it can
+# be lower than under the old OLS model.
+#
+# 20 chosen so that two_day ↔ month (47 in 2026-04 prod) and
+# two_day ↔ week (48) both qualify — at 50, two_day was left as a
+# disconnected component of the pair graph, collapsing its unknown to
+# zero in the min-norm lstsq solution and triggering the pathological
+# reset. With 20, the graph is guaranteed connected through dec2024_to_now
+# in every observed coverage regime.
+PAIRWISE_MIN_OVERLAP_BUCKETS = 20
 
 # Huber-like cutoff on the cross-source MAD outlier check at merge time.
 # A source's corrected value is dropped from the bucket's merge candidate

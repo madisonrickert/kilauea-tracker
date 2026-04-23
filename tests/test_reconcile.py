@@ -1,15 +1,16 @@
-"""Tests for `kilauea_tracker.reconcile` (Phase 2 pairwise calibration).
+"""Tests for `kilauea_tracker.reconcile` (pairwise scalar-offset model).
 
-The v3 alignment rewrite replaced the priority-merge + scalar-offset stack
-with pairwise self-consistency calibration. These tests cover:
+The v4 rewrite collapsed the earlier slope+intercept model `y_i =
+a_i · true + b_i` down to scalar-offset-only: `y_i = true + b_i`.
+Rationale is in the module docstring. These tests cover:
 
-  - Pairwise OLS fits correctly recover injected (a_i, b_i) under the
-    model y_i = a_i · true + b_i.
-  - Digital is pinned to (a=1, b=0) by the joint solve.
+  - Pair fits correctly recover the injected scalar offset.
+  - Digital is pinned to (a=1, b=0) by the joint solve (`a` is a schema
+    field retained for back-compat; it's always 1.0 in the new model).
   - A source with no direct digital overlap is recovered via the chain
     of pairwise constraints through intermediate sources.
-  - MAD outlier rejection drops a catastrophically-wrong sample at a
-    single bucket without dropping the entire source.
+  - MAD outlier rejection is diagnostic-only — it does not remove a
+    source from winner candidacy.
   - Archive is a pure gap-filler: it contributes only for buckets where
     no live source has coverage.
   - Continuity audit surfaces adjacent-bucket steps into the report.
@@ -75,24 +76,24 @@ def test_digital_is_pinned_to_identity():
     assert abs(digital_record.b) < 1e-9
 
 
-def test_pairwise_fit_recovers_injected_slope_and_intercept():
-    """A source with injected (a=1.25, b=3.0) against digital must be
-    solved to (a=1.25, b=3.0). The applied correction brings it back to
-    digital's frame exactly.
+def test_pairwise_fit_recovers_injected_scalar_offset():
+    """A source with an injected scalar offset `b=3.0` against digital
+    must be solved to `a=1.0, b=3.0`. The applied correction brings it
+    back to digital's frame exactly in the scalar-offset model.
     """
     n = PAIRWISE_MIN_OVERLAP_BUCKETS * 3
     truth = _series("2025-03-01", n=n, base=5.0, amplitude=8.0)
-    injected_a, injected_b = 1.25, 3.0
+    injected_b = 3.0
 
     sources = {
         "digital": truth,
-        "dec2024_to_now": _apply_linear(truth, injected_a, injected_b),
+        "dec2024_to_now": _apply_linear(truth, 1.0, injected_b),
     }
     merged, report = reconcile_sources(sources)
 
     dec_record = next(s for s in report.sources if s.name == "dec2024_to_now")
-    assert abs(dec_record.a - injected_a) < 1e-6, (
-        f"fit.a = {dec_record.a:.6f}, expected {injected_a}"
+    assert dec_record.a == 1.0, (
+        f"fit.a = {dec_record.a:.6f}; b-only model keeps a at exactly 1.0"
     )
     assert abs(dec_record.b - injected_b) < 1e-6, (
         f"fit.b = {dec_record.b:.6f}, expected {injected_b}"
@@ -100,6 +101,9 @@ def test_pairwise_fit_recovers_injected_slope_and_intercept():
     # With digital's higher effective resolution it wins every overlap bucket.
     # The merged curve must match truth to numerical precision.
     merged_vs_truth = merged.merge(truth, on=DATE_COL, suffixes=("_m", "_t"))
+    # In the densified merge, interpolated points at the ends of each
+    # source's window may round-trip with tiny timestamp drift. Match
+    # strictly on the original truth timestamps only.
     max_err = float(
         (merged_vs_truth[f"{TILT_COL}_m"] - merged_vs_truth[f"{TILT_COL}_t"]).abs().max()
     )
@@ -109,11 +113,11 @@ def test_pairwise_fit_recovers_injected_slope_and_intercept():
 def test_pairwise_chain_propagates_through_intermediate_source():
     """Source A and source C have NO direct temporal overlap, but both
     overlap with source B. The pairwise calibration must still recover
-    their (a, b) via the chain A↔B and B↔C.
+    A's scalar offset relative to C via the chain A↔B and B↔C.
 
     Concretely: digital covers Jan-Jun 2025; two_day covers only the last
     48 h; dec2024_to_now covers both. The solve should still produce
-    sensible corrections for two_day via its overlap with dec2024_to_now.
+    sensible b-offsets for two_day via its overlap with dec2024_to_now.
     """
     n = PAIRWISE_MIN_OVERLAP_BUCKETS * 3
     digital_truth = _series("2025-03-01", n=n, base=0.0, amplitude=10.0)
@@ -121,29 +125,28 @@ def test_pairwise_chain_propagates_through_intermediate_source():
     dec_truth_late = _series("2026-04-20 00:00:00", n=n, base=-5.0, amplitude=6.0)
     two_day_truth = _series("2026-04-20 00:00:00", n=n, base=-5.0, amplitude=6.0)
 
+    # Inject scalar offsets only (b-only model has no slope to recover).
+    dec_injected_b = 2.0
+    two_day_injected_b = -1.5
     sources = {
         "digital": digital_truth,
-        # dec2024_to_now spans both epochs — same truth in both regions
         "dec2024_to_now": pd.concat(
-            [_apply_linear(dec_truth_early, 1.2, 2.0),
-             _apply_linear(dec_truth_late, 1.2, 2.0)],
+            [_apply_linear(dec_truth_early, 1.0, dec_injected_b),
+             _apply_linear(dec_truth_late, 1.0, dec_injected_b)],
             ignore_index=True,
         ),
-        # two_day overlaps dec2024_to_now but not digital
-        "two_day": _apply_linear(two_day_truth, 0.9, -1.5),
+        "two_day": _apply_linear(two_day_truth, 1.0, two_day_injected_b),
     }
     merged, report = reconcile_sources(sources)
 
     two_day_record = next(s for s in report.sources if s.name == "two_day")
     dec_record = next(s for s in report.sources if s.name == "dec2024_to_now")
-    # Chain recovery: both should converge toward their injected values.
-    assert abs(dec_record.a - 1.2) < 0.01
-    assert abs(dec_record.b - 2.0) < 0.2
-    assert abs(two_day_record.a - 0.9) < 0.02, (
-        f"two_day.a = {two_day_record.a:.4f}, expected 0.9"
+    assert dec_record.a == 1.0 and two_day_record.a == 1.0
+    assert abs(dec_record.b - dec_injected_b) < 0.2, (
+        f"dec.b = {dec_record.b:.4f}, expected ~{dec_injected_b}"
     )
-    assert abs(two_day_record.b - (-1.5)) < 0.3, (
-        f"two_day.b = {two_day_record.b:.4f}, expected -1.5"
+    assert abs(two_day_record.b - two_day_injected_b) < 0.3, (
+        f"two_day.b = {two_day_record.b:.4f}, expected ~{two_day_injected_b}"
     )
 
 
@@ -282,8 +285,16 @@ def test_archive_loses_to_live_source_at_overlapping_bucket():
         "archive": stale_archive,
     }
     merged, _ = reconcile_sources(sources)
-    # Every merged value should come from digital, not archive.
-    assert abs(merged[TILT_COL].mean() - truth[TILT_COL].mean()) < 1e-6
+    # Densification interpolates digital onto the 15-min grid, so the merged
+    # output has more rows than `truth`. Compare on matched timestamps to
+    # verify digital (not archive) wins everywhere it covers.
+    matched = merged.merge(truth, on=DATE_COL, suffixes=("_m", "_t"))
+    max_err = (
+        matched[f"{TILT_COL}_m"] - matched[f"{TILT_COL}_t"]
+    ).abs().max()
+    assert max_err < 1e-6, (
+        f"merged diverges from truth by {max_err} — archive may be winning"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -359,27 +370,29 @@ def test_empty_sources_returns_empty_history():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase 4 Commit 1: hard-pin digital + pathological-a reset
+# v4 scalar-offset-only regression guards
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_digital_hard_pin_exact():
     """With many pair constraints, the digital pin MUST come out exactly
-    (1.0, 0.0), not approximately.
+    (a=1.0, b=0.0), not approximately.
 
     Regression guard for the Phase 2 soft-pin bug where the joint lstsq
     treated the pin as one equal-weight row and returned
-    `a_digital = 0.9622` in 2026-04 production data.
+    `a_digital = 0.9622` in 2026-04 production data. Under the v4
+    b-only model `a` is always exactly 1.0, but the test also exercises
+    the `b=0.0` invariant, which is still load-bearing.
     """
     n = PAIRWISE_MIN_OVERLAP_BUCKETS * 3
     truth = _series("2025-03-01", n=n, base=0.0, amplitude=10.0)
     sources = {
         "digital": truth,
-        "dec2024_to_now": _apply_linear(truth, 1.15, 2.0),
-        "three_month": _apply_linear(truth, 0.85, -1.5),
-        "month": _apply_linear(truth, 1.1, 0.5),
-        "week": _apply_linear(truth, 0.92, 0.8),
-        "two_day": _apply_linear(truth, 1.05, -2.0),
+        "dec2024_to_now": _apply_linear(truth, 1.0, 2.0),
+        "three_month": _apply_linear(truth, 1.0, -1.5),
+        "month": _apply_linear(truth, 1.0, 0.5),
+        "week": _apply_linear(truth, 1.0, 0.8),
+        "two_day": _apply_linear(truth, 1.0, -2.0),
     }
     _, report = reconcile_sources(sources)
     digital = next(s for s in report.sources if s.name == "digital")
@@ -388,32 +401,25 @@ def test_digital_hard_pin_exact():
     assert digital.is_anchor is True
 
 
-def test_pathological_a_resets_to_identity_with_scalar_b():
-    """A pair fit that returns pathological `a` (e.g. because the pair's
-    true signal is near-flat) must reset to `(a=1, b=median_offset)`
-    instead of applying the bad scaling. Amplifying noise by a factor
-    of 2-3 is worse than a constant offset.
+def test_every_source_has_a_equals_one_under_b_only_model():
+    """Schema invariant under the v4 model: `a` is always exactly 1.0
+    regardless of what the input looks like. Protects against a future
+    regression that reintroduces slope fitting without auditing
+    downstream consumers (pipeline JSON serializer, Streamlit).
     """
-    # Build a dataset where `month` disagrees with dec2024_to_now by a
-    # HUGE slope — exactly the 2026-04 prod pathology. The reset must
-    # fire and we expect the source to land at identity with a scalar
-    # offset estimated vs dec2024_to_now.
     n = PAIRWISE_MIN_OVERLAP_BUCKETS * 3
-    truth = _series("2025-03-01", n=n, base=-10.0, amplitude=8.0)
-    pathological_a = 0.3  # well outside PAIRWISE_MAX_A_DEVIATION_FRACTION (0.5)
-    pathological_b = 6.0
+    truth = _series("2025-03-01", n=n, base=0.0, amplitude=10.0)
+    # Inject data that would produce a meaningful OLS slope if we fit
+    # for one (actual slope = 1.5). Under b-only, `a` must stay at 1.
     sources = {
         "digital": truth,
-        "dec2024_to_now": _apply_linear(truth, 1.02, 0.1),
-        "month": _apply_linear(truth, pathological_a, pathological_b),
+        "dec2024_to_now": _apply_linear(truth, 1.5, 4.0),
     }
     _, report = reconcile_sources(sources)
-    month = next(s for s in report.sources if s.name == "month")
-    assert month.a == 1.0, f"a_month should reset to 1.0, got {month.a}"
-    assert month.note is not None and "pathological" in month.note
-    # b should be finite (not inf/NaN) and representative of the scalar
-    # offset the identity-reset mode tries to preserve.
-    assert np.isfinite(month.b)
+    for record in report.sources:
+        assert record.a == 1.0, (
+            f"{record.name}.a = {record.a}; b-only model forbids slope correction"
+        )
 
 
 def test_per_region_winner_deterministic_under_mad_pressure():
@@ -552,12 +558,10 @@ def test_winner_counts_populated():
     assert report.winner_counts.get("digital", 0) == len(merged)
 
 
-def test_huber_pair_fit_robust_to_outlier():
-    """Pairwise fits use Huber-robust regression so a small fraction of
-    gross-outlier samples doesn't swing the recovered slope.
-
-    OLS on the same data would be dragged several % off the true slope
-    by the outliers; Huber should stay within 1-2% of truth.
+def test_median_offset_robust_to_gross_outliers():
+    """Pair fits use `β = median(y_i - y_j)`, which is robust to a small
+    fraction of gross outliers. A mean-based estimator on the same data
+    would be dragged several µrad by ±30 µrad spikes.
     """
     from kilauea_tracker.reconcile import _compute_pairwise_fits, ReconcileReport
 
@@ -577,46 +581,33 @@ def test_huber_pair_fit_robust_to_outlier():
     )
     assert len(fits) == 1
     fit = fits[0]
-    # True relationship: source = 1.0 · digital + 0.0 (+ outliers).
-    # Huber should land near (1.0, 0.0).
-    assert abs(fit.alpha - 1.0) < 0.02, (
-        f"Huber α={fit.alpha} should be within 2% of 1.0 despite outliers"
-    )
+    # True relationship: source = digital + 0 (+ outliers). `alpha` is
+    # always 1.0 by schema; `beta` must stay near 0.
+    assert fit.alpha == 1.0
     assert abs(fit.beta) < 1.0, (
-        f"Huber β={fit.beta} should be near 0 despite outliers"
+        f"median β={fit.beta} should be near 0 despite {n_outliers} outliers"
     )
 
 
-def test_pathological_reset_uses_dec2024_to_now_when_digital_absent_in_overlap():
-    """When the pin is `digital` but the pathological source doesn't
-    temporally overlap digital, the reset's scalar offset comes from
-    the best available overlapping reference (typically
-    `dec2024_to_now`, which covers both digital's epoch and the rolling
-    sources').
+def test_disconnected_component_defaults_to_zero_offset():
+    """A source with no path to the pin in the pair graph cannot be
+    solved — the joint system is under-determined for its variable.
+    The fallback is `b=0` with a warning on the report, so downstream
+    merge policy can still use the source (best-effective-resolution
+    may prefer it) but the diagnostics panel flags the miscalibration.
     """
-    n = PAIRWISE_MIN_OVERLAP_BUCKETS * 3
-    # Digital covers Jan-Jun 2025.
-    digital_truth = _series("2025-03-01", n=n, base=0.0, amplitude=8.0)
-    # dec2024_to_now covers BOTH Jan-Jun 2025 AND 2026.
-    dec_jan = _apply_linear(digital_truth, 1.0, 0.0)
-    dec_2026 = _series("2026-04-01", n=n, base=-15.0, amplitude=4.0)
-    dec = pd.concat([dec_jan, dec_2026], ignore_index=True)
-    # `month` only covers 2026 (no digital overlap). Inject pathological a.
-    month_truth = _series("2026-04-01", n=n, base=-15.0, amplitude=4.0)
-    month = _apply_linear(month_truth, 0.2, 5.0)  # very pathological a
-    sources = {
-        "digital": digital_truth,
-        "dec2024_to_now": dec,
-        "month": month,
-    }
-    _, report = reconcile_sources(sources)
+    # Two disjoint temporal regions. `digital` covers Jan-Jun 2025;
+    # `month` covers Apr 2026. Their overlap is zero, so no pair
+    # constraint connects month to the pin.
+    digital = _series("2025-03-01", n=PAIRWISE_MIN_OVERLAP_BUCKETS * 3,
+                      base=0.0, amplitude=8.0)
+    month = _series("2026-04-01", n=PAIRWISE_MIN_OVERLAP_BUCKETS * 3,
+                    base=-10.0, amplitude=4.0)
+    _, report = reconcile_sources({"digital": digital, "month": month})
     month_rec = next(s for s in report.sources if s.name == "month")
     assert month_rec.a == 1.0
-    # b should be roughly median(month - dec) ≈ median(0.2·truth+5 - truth)
-    # ≈ 5 + 0.2·median(truth) - median(truth). For the 2026 segment
-    # median(truth) ≈ -15, so expected b ≈ 5 + 0.2·(-15) - (-15) = 17.
-    # Loose bound — exact value depends on bucket boundaries.
-    assert 10 < month_rec.b < 25, f"reset b = {month_rec.b}, expected ~15-20"
+    assert month_rec.b == 0.0
+    assert month_rec.note is not None and "no path to anchor" in month_rec.note
 
 
 def test_sources_unknown_to_priority_tuple_silently_ignored_for_fallback_resolution():
@@ -632,7 +623,14 @@ def test_sources_unknown_to_priority_tuple_silently_ignored_for_fallback_resolut
     }
     merged, report = reconcile_sources(sources)
     # digital wins every bucket (it's in the priority tuple with tight res).
-    assert abs(merged[TILT_COL].mean() - truth[TILT_COL].mean()) < 1e-6
+    matched = merged.merge(truth, on=DATE_COL, suffixes=("_m", "_t"))
+    max_err = (
+        matched[f"{TILT_COL}_m"] - matched[f"{TILT_COL}_t"]
+    ).abs().max()
+    assert max_err < 1e-6, (
+        f"merged diverges from truth by {max_err}; experimental_source may "
+        f"be winning due to a priority-tuple regression"
+    )
 
 
 def test_archive_in_source_priority_enumeration():

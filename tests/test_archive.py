@@ -247,7 +247,19 @@ def test_archive_immune_to_per_source_drift_across_multiple_runs(
     merged1, _ = reconcile_sources({"two_day": run1_two_day}, proximity_minutes=0)
     promote_to_archive(merged1, tmp_archive)
     archive_after_1 = load_archive(tmp_archive)
-    assert archive_after_1[TILT_COL].tolist() == [9.0, 9.2, 9.4]
+    # The actual (non-interpolated) two_day sample timestamps must be in
+    # the archive with their F0 values. Densification (added in v4)
+    # fills between-sample 15-min buckets with interpolated values so
+    # the winner is stable under coverage changes; those extra rows are
+    # legitimate but aren't what this test is asserting immutability
+    # over.
+    def _at(df, ts):
+        matching = df[df[DATE_COL] == pd.Timestamp(ts)]
+        assert len(matching) == 1, f"exactly one row expected at {ts}, got {len(matching)}"
+        return float(matching.iloc[0][TILT_COL])
+    assert _at(archive_after_1, "2026-01-01 00:00:00") == 9.0
+    assert _at(archive_after_1, "2026-01-01 06:00:00") == 9.2
+    assert _at(archive_after_1, "2026-01-01 12:00:00") == 9.4
 
     # Run 2: existing timestamps drifted, plus new timestamps
     run2_two_day = _df(
@@ -268,17 +280,21 @@ def test_archive_immune_to_per_source_drift_across_multiple_runs(
     promote_to_archive(merged2, tmp_archive)
     archive_after_2 = load_archive(tmp_archive)
 
-    # The first 3 rows must still be in the original F0 frame.
-    first_three = archive_after_2[
-        archive_after_2[DATE_COL] <= pd.Timestamp("2026-01-01 12:00:00")
-    ]
-    assert first_three[TILT_COL].tolist() == [9.0, 9.2, 9.4], (
-        "archive's first observations must be immutable across runs"
-    )
-    # The 2 new timestamps got captured this run. They were aligned
-    # against the archive (since archive is the anchor in this synthetic
-    # setup), so they should land in the archive's frame.
-    assert len(archive_after_2) == 5
+    # Actual-sample timestamps from Run 1 must still be in the archive
+    # at their original F0 values — drift in Run 2's per-source data
+    # must not overwrite them.
+    assert _at(archive_after_2, "2026-01-01 00:00:00") == 9.0
+    assert _at(archive_after_2, "2026-01-01 06:00:00") == 9.2
+    assert _at(archive_after_2, "2026-01-01 12:00:00") == 9.4
+    # Run 2 introduced new timestamps 18:00 and 02 00:00 — those must
+    # now be present in the archive. They were aligned against the
+    # existing archive (anchor in this synthetic setup) so the drift
+    # was absorbed and the stored values match the anchored (~F0) frame.
+    for new_ts in ("2026-01-01 18:00:00", "2026-01-02 00:00:00"):
+        matching = archive_after_2[
+            archive_after_2[DATE_COL] == pd.Timestamp(new_ts)
+        ]
+        assert len(matching) == 1, f"expected one row for {new_ts}"
 
     # Run 3: more drift, more new rows
     run3_two_day = _df(
@@ -301,12 +317,13 @@ def test_archive_immune_to_per_source_drift_across_multiple_runs(
     archive_after_3 = load_archive(tmp_archive)
 
     # Original 3 rows STILL in F0.
-    first_three = archive_after_3[
-        archive_after_3[DATE_COL] <= pd.Timestamp("2026-01-01 12:00:00")
-    ]
-    assert first_three[TILT_COL].tolist() == [9.0, 9.2, 9.4]
-    # 6 total rows now (the new 2026-01-02 06:00 row was added).
-    assert len(archive_after_3) == 6
+    assert _at(archive_after_3, "2026-01-01 00:00:00") == 9.0
+    assert _at(archive_after_3, "2026-01-01 06:00:00") == 9.2
+    assert _at(archive_after_3, "2026-01-01 12:00:00") == 9.4
+    # The new Run 3 timestamp 2026-01-02 06:00 is now present.
+    assert len(
+        archive_after_3[archive_after_3[DATE_COL] == pd.Timestamp("2026-01-02 06:00:00")]
+    ) == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
