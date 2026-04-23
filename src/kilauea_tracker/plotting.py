@@ -18,7 +18,6 @@ import plotly.graph_objects as go
 
 from .model import DATE_COL, TILT_COL, CurveBand, Prediction, from_days, to_days
 from .ui.palette import (
-    ASH,
     FLAME,
     HALO,
     LAVA,
@@ -28,7 +27,7 @@ from .ui.palette import (
 
 # Volcano palette applied to the chart. Locked to the UI palette so chip,
 # banner, and chart all speak the same color language.
-TILT_LINE_COLOR = ASH                       # muted neutral — raw history defers
+TILT_LINE_COLOR = "rgba(226, 232, 240, 0.85)"  # steam @ 85% — reads clean-white, not gray
 PEAK_FIT_COLOR = LAVA                       # peaks-in-fit: brand accent (hot)
 PEAK_OUT_COLOR = "rgba(100, 116, 139, 0.45)"  # ash, faded — peaks NOT in the fit
 TRENDLINE_COLOR_DEFAULT = LAVA              # overridden per-state in build_figure
@@ -397,18 +396,19 @@ def build_figure(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         hovermode="closest",
+        # Legend lives BELOW the plot (not floating over the data). When it
+        # sat top-right inside the plot it covered the rising tail of the
+        # history line — exactly the region the user is trying to read.
         legend=dict(
-            orientation="v",
+            orientation="h",
             yanchor="top",
-            y=0.98,
-            xanchor="right",
-            x=0.99,
-            bgcolor="rgba(30, 37, 55, 0.55)",
-            bordercolor="rgba(226, 232, 240, 0.1)",
-            borderwidth=1,
+            y=-0.18,
+            xanchor="left",
+            x=0,
+            bgcolor="rgba(0, 0, 0, 0)",
             font=dict(size=11),
         ),
-        margin=dict(l=60, r=30, t=40, b=60),
+        margin=dict(l=60, r=30, t=40, b=120),
         xaxis=dict(
             gridcolor=GRID_COLOR,
             showgrid=True,

@@ -85,6 +85,13 @@ from kilauea_tracker.ui import (
     hero,
     state_banner,
 )
+from kilauea_tracker.ui.diagnostics import (
+    episode_samples_tint,
+    exp_amplitude_tint,
+    exp_k_tint,
+    render_chip_html,
+    trendline_slope_tint,
+)
 from kilauea_tracker.ui.styles import build_style_block
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -95,7 +102,7 @@ st.set_page_config(
     page_title="Kīlauea Fountain Event Tracker",
     page_icon="🌋",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",  # sidebar retired; controls live in the top bar + tabs
 )
 
 # Inject the full volcano palette + typography + hero/chip/banner styles.
@@ -153,103 +160,32 @@ if "last_ingest_at" not in st.session_state:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Sidebar — controls
+# Session-state defaults for every widget in the app.
 # ─────────────────────────────────────────────────────────────────────────────
+# The sidebar was retired in favor of a compact top bar + per-tab controls
+# (chart-only controls live inside the Chart tab, overlay checkboxes inside
+# the Pipeline tab, etc.). Streamlit recomputes the entire script top-to-
+# bottom on every interaction, and the math that happens at module scope —
+# peak detection, prediction, figure construction — has to run BEFORE any
+# tab body renders. So we seed session_state with widget defaults here and
+# read the values back immediately; later when the user drags a slider or
+# clicks a toggle inside a tab, Streamlit writes the new value into the
+# same session_state key and reruns, and this block picks it up.
+#
+# `tw_*` — top-bar / chart-widget keys (tz, trendline window, per-source)
+# `adv_*` — advanced peak-detection sliders (Chart tab)
+# `ovl_*` — PNG inspector overlay layers (Pipeline tab)
 
-with st.sidebar:
-    st.header("Controls")
-
-    refresh_clicked = st.button(
-        "🔄 Refresh data from USGS",
-        width="stretch",
-        help="Re-fetch and re-trace all four USGS tilt PNGs.",
-    )
-    if refresh_clicked:
-        cached_ingest.clear()
-        cached_safety_alerts.clear()
-        st.session_state.last_ingest_at = None  # force the block below to re-run
-
-    st.divider()
-    st.subheader("Trendline window")
-    n_peaks_for_fit = st.slider(
-        "Number of recent peaks",
-        min_value=3,
-        max_value=20,
-        value=6,
-        step=1,
-        help=(
-            "How many of the most recent detected peaks to use for the linear "
-            "trendline fit. Smaller = more sensitive to recent shifts; larger "
-            "= smoother long-term trend."
-        ),
-    )
-
-    # Advanced peak-detection sliders moved to the Chart tab (co-located
-    # with the chart they affect). Session-state defaults are set at module
-    # scope BELOW this sidebar block so the initial prediction compute
-    # doesn't crash before the user visits the Chart tab.
-
-    st.divider()
-    st.subheader("Display")
-    timezone_choice = st.selectbox(
-        "Time zone",
-        options=["HST (Pacific/Honolulu)", "UTC"],
-        index=0,
-        help="All displayed dates use this time zone. HST is the local time at Kīlauea.",
-    )
-    DISPLAY_TZ = (
-        "Pacific/Honolulu" if timezone_choice.startswith("HST") else "UTC"
-    )
-    TZ_LABEL = "HST" if DISPLAY_TZ == "Pacific/Honolulu" else "UTC"
-
-    # Phase 4 Commit 5: per-source overlay toggle. Off by default so
-    # non-technical viewers see the clean merged line. Click on →
-    # overlay traces for each source appear in the legend and can be
-    # toggled individually by clicking the legend entries.
-    show_per_source = st.toggle(
-        "🔍 Show per-source traces",
-        value=False,
-        help=(
-            "Overlay each USGS source's calibrated trace beneath the "
-            "merged line. Useful for diagnosing apparent alignment "
-            "issues — you can see whether a visible step comes from "
-            "calibration drift, source handoff, or transcription noise. "
-            "Individual source traces are hidden by default; click the "
-            "legend entries to toggle them on."
-        ),
-    )
-
-    st.divider()
-    st.caption("**Data source**")
-    st.caption(
-        "Electronic tilt at the **UWD** station (Uēkahuna, summit), "
-        "**azimuth 300°**. Published by USGS Hawaiian Volcano Observatory — "
-        "see the "
-        "[Kīlauea monitoring data page]"
-        "(https://www.usgs.gov/volcanoes/kilauea/science/monitoring-data-kilauea) "
-        "for the user-friendly view."
-    )
-
-    # Inspector-overlay checkboxes moved to the Pipeline tab (co-located
-    # with the PNG overlays they control). The checkbox session_state keys
-    # are preserved so code that reads layer_* further down still resolves
-    # via the same keys after the user visits the Pipeline tab.
-
-    st.divider()
-    st.caption(
-        "Built by [Madison Rickert](https://github.com/madisonrickert) · "
-        "[source on GitHub](https://github.com/madisonrickert/kilauea-tracker)"
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Session-state defaults for widgets that moved out of the sidebar.
-# The advanced peak-detection sliders render inside the Chart tab and the
-# inspector-overlay checkboxes render inside the Pipeline tab. Both sets
-# are read HERE (above) to compute peaks/predictions and to drive the
-# PNG overlay generation. Defaults seed session_state so the initial
-# render works before the user ever visits those tabs.
-# ─────────────────────────────────────────────────────────────────────────────
+st.session_state.setdefault("tw_n_peaks_for_fit", 6)
+st.session_state.setdefault("tw_show_per_source", False)
+st.session_state.setdefault("tw_timezone_choice", "HST (Pacific/Honolulu)")
+n_peaks_for_fit = st.session_state["tw_n_peaks_for_fit"]
+show_per_source = st.session_state["tw_show_per_source"]
+timezone_choice = st.session_state["tw_timezone_choice"]
+DISPLAY_TZ = (
+    "Pacific/Honolulu" if timezone_choice.startswith("HST") else "UTC"
+)
+TZ_LABEL = "HST" if DISPLAY_TZ == "Pacific/Honolulu" else "UTC"
 
 st.session_state.setdefault("adv_min_prominence", PEAK_DEFAULTS.min_prominence)
 st.session_state.setdefault("adv_min_distance_days", PEAK_DEFAULTS.min_distance_days)
@@ -313,28 +249,10 @@ if reconcile_report is not None:
     for w in reconcile_report.warnings:
         ingest_warnings.append(("reconcile", w))
 
-total_notes = len(ingest_errors) + len(ingest_warnings)
-if total_notes > 0:
-    n_err = len(ingest_errors)
-    label_parts = []
-    if n_err:
-        label_parts.append(f"{n_err} error(s)")
-    if ingest_warnings:
-        label_parts.append(f"{len(ingest_warnings)} note(s)")
-    label = "ⓘ Ingest pipeline status — " + ", ".join(label_parts)
-    with st.expander(label, expanded=False):
-        st.caption(
-            "Non-fatal diagnostics from the ingest + reconcile pipeline. "
-            "Per-source errors mean ONE USGS PNG fetch failed (transient OCR "
-            "misread, network blip, etc.) — the reconcile layer falls back "
-            "to the other sources and the on-disk archive, so the chart "
-            "above is still using the freshest data we could get. Frame-"
-            "shift corrections and proximity-gate drops are normal."
-        )
-        for r in ingest_errors:
-            st.markdown(f"- ❌ **{r.source_name}** — {r.error}")
-        for src, w in ingest_warnings:
-            st.markdown(f"- **{src}** — {w}")
+# Diagnostics are collected here but rendered inside the Pipeline tab, not at
+# the top of the front page — they're a maintainer concern, not a visitor one.
+# The top-bar freshness caption conveys the "N/M sources fetched" summary that
+# casual visitors care about.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -541,7 +459,7 @@ eruption_state, eruption_state_info = _eruption_state(tilt_df, prediction)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Header + status banner
+# Header + top bar
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.title("🌋 Kīlauea Fountain Event Tracker")
@@ -596,93 +514,178 @@ def _fmt_band(band: tuple[pd.Timestamp, pd.Timestamp] | None) -> str:
     return f"{_fmt_short(lo)} → {_fmt_short(hi)}"
 
 
-# ── Hero block: one dramatic answer, not three equal metrics ────────────
-hero.show(eruption_state, prediction)
-
-# ── Meta row: compact freshness + sources indicator, below the hero ─────
-_last_data = tilt_df[DATE_COL].max()
-if _last_data is not None and pd.notna(_last_data):
-    _last_aware = (
-        _last_data.tz_localize("UTC") if _last_data.tzinfo is None else _last_data
+# ── Compact top bar — replaces the old sidebar. ──────────────────────────
+# Refresh button + tz selector + freshness caption, in a single row just
+# above the primary navigation. The refresh button clears both ingest and
+# safety-alert caches and calls st.rerun() so the next pass starts with an
+# empty cache and the user sees the fresh data without a second click.
+_tb_refresh, _tb_tz, _tb_meta = st.columns([1, 1.3, 2.5])
+with _tb_refresh:
+    if st.button(
+        "🔄 Refresh",
+        width="stretch",
+        help="Re-fetch and re-trace all USGS tilt PNGs + safety alerts.",
+    ):
+        cached_ingest.clear()
+        cached_safety_alerts.clear()
+        st.session_state.last_ingest_at = None
+        st.rerun()
+with _tb_tz:
+    st.selectbox(
+        "Time zone",
+        options=["HST (Pacific/Honolulu)", "UTC"],
+        key="tw_timezone_choice",
+        label_visibility="collapsed",
+        help="All displayed dates use this time zone. HST is local at Kīlauea.",
     )
-    _age_seconds = int((pd.Timestamp.now(tz="UTC") - _last_aware).total_seconds())
-    if _age_seconds < 3600:
-        _age = f"{_age_seconds // 60}m ago"
-    elif _age_seconds < 86400:
-        _age = f"{_age_seconds // 3600}h ago"
+with _tb_meta:
+    _last_data = tilt_df[DATE_COL].max()
+    if _last_data is not None and pd.notna(_last_data):
+        _last_aware = (
+            _last_data.tz_localize("UTC") if _last_data.tzinfo is None else _last_data
+        )
+        _age_seconds = int((pd.Timestamp.now(tz="UTC") - _last_aware).total_seconds())
+        if _age_seconds < 3600:
+            _age = f"{_age_seconds // 60}m ago"
+        elif _age_seconds < 86400:
+            _age = f"{_age_seconds // 3600}h ago"
+        else:
+            _age = f"{_age_seconds // 86400}d ago"
+        _sample_meta = f"latest sample {_fmt_date(_last_data)} ({_age})"
     else:
-        _age = f"{_age_seconds // 86400}d ago"
-    _sample_meta = f"latest sample {_fmt_date(_last_data)} ({_age})"
-else:
-    _sample_meta = "latest sample —"
+        _sample_meta = "latest sample —"
 
-if st.session_state.last_ingest_at is not None:
-    _successful = sum(1 for r in reports if r.error is None)
-    _total = len(reports)
-    _indicator = "🟢" if _successful == _total else ("🟡" if _successful else "🔴")
-    _poll_ts = pd.Timestamp(st.session_state.last_ingest_at)
-    _poll_meta = (
-        f"{_indicator} {_successful}/{_total} sources · "
-        f"last poll {_fmt_date(_poll_ts)}"
+    if st.session_state.last_ingest_at is not None:
+        _successful = sum(1 for r in reports if r.error is None)
+        _total = len(reports)
+        _indicator = "🟢" if _successful == _total else ("🟡" if _successful else "🔴")
+        _poll_ts = pd.Timestamp(st.session_state.last_ingest_at)
+        _poll_meta = (
+            f"{_indicator} {_successful}/{_total} sources · "
+            f"last poll {_fmt_date(_poll_ts)}"
+        )
+    else:
+        _poll_meta = "no polls yet this session"
+
+    st.markdown(
+        f'<div class="kt-topbar__meta">'
+        f'<div>{_sample_meta}</div>'
+        f'<div>{_poll_meta}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
     )
-else:
-    _poll_meta = "no polls yet this session"
-
-st.caption(f"{_sample_meta} &nbsp;·&nbsp; {_poll_meta}")
-
-# ── Interval-based sanity check (secondary forecast) ────────────────────
-if (
-    eruption_state != "active"
-    and prediction.interval_based_next_event_date is not None
-):
-    ib_date = prediction.interval_based_next_event_date
-    ib_band = prediction.interval_based_band
-    median_days = prediction.median_peak_interval_days or 0.0
-    ib_aware = ib_date.tz_localize("UTC") if ib_date.tzinfo is None else ib_date
-    delta_days = (pd.Timestamp.now(tz="UTC") - ib_aware).total_seconds() / 86400
-    overdue_str = (
-        f" · ⚠️ **{delta_days:.0f}d overdue** by this metric"
-        if delta_days > 0.5
-        else ""
-    )
-    band_str = f" &nbsp;·&nbsp; IQR {_fmt_band(ib_band)}" if ib_band is not None else ""
-    st.caption(
-        f"📊 Interval baseline (independent sanity check): "
-        f"{_fmt_short(ib_date)}{band_str}{overdue_str} — "
-        f"median cycle {median_days:.1f} days."
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Structured state banner + live camera strip
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Consistent 3-part banner (icon + headline, plain explainer, optional guidance)
-# rendered from the state_copy table. `calm` state renders nothing — the hero
-# above already conveys "no action needed" without adding visual noise.
-state_banner.show(eruption_state, eruption_state_info)
-
-# Four-camera strip immediately below the hero/banner — seeing the volcano
-# live is the second-most emotionally valuable thing on the page after the
-# prediction. Elevates the webcams from a buried expander to a top-of-page
-# affordance. Full 8-camera grid stays available on the Cameras tab below.
-with st.container():
-    st.markdown("#### 📷 Live cameras")
-    cameras.show_strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tabs — Now / Chart / Cameras / Data / Pipeline / About
 # ─────────────────────────────────────────────────────────────────────────────
 
-tab_now, tab_chart, tab_cameras, tab_data, tab_pipeline, tab_about = st.tabs([
+tab_now, tab_chart, tab_cameras, tab_pipeline, tab_about = st.tabs([
     "Now",
     "Chart",
     "Cameras",
-    "Data",
     "Pipeline",
     "About",
 ])
+
+# Tab ↔ URL sync. Streamlit's st.tabs has no Python-level "active tab"
+# API — the active panel is decided in the browser. So we bridge with a
+# tiny JS snippet:
+#   • On page load, read ``?tab=chart`` and click the matching tab button.
+#   • On any tab click, write ``?tab=<label>`` via history.pushState so the
+#     URL reflects the current view (shareable link, browser back/forward).
+# The polling loop handles the race where Streamlit mounts the tab buttons
+# a moment after this <script> runs; the 8-second timeout keeps us quiet
+# on the normal case where the tabs are already present.
+st.html(
+    """
+    <script>
+    (function() {
+      const TABS = ["now", "chart", "cameras", "pipeline", "about"];
+
+      function normalize(label) {
+        return (label || "").trim().toLowerCase();
+      }
+
+      function activateFromUrl() {
+        const params = new URLSearchParams(window.location.search);
+        const desired = normalize(params.get("tab"));
+        if (!desired || !TABS.includes(desired)) return false;
+        const buttons = document.querySelectorAll('button[role="tab"]');
+        for (const btn of buttons) {
+          if (normalize(btn.textContent) === desired) {
+            if (btn.getAttribute("aria-selected") !== "true") {
+              btn.click();
+            }
+            return true;
+          }
+        }
+        return false;
+      }
+
+      // Poll for up to 8 seconds waiting for tabs to render, then give up.
+      const iv = setInterval(() => {
+        if (activateFromUrl()) clearInterval(iv);
+      }, 120);
+      setTimeout(() => clearInterval(iv), 8000);
+
+      // Delegated click listener — capture ALL tab clicks and push the new
+      // tab name into ?tab=… so the URL stays in sync with what the user
+      // is looking at.
+      document.addEventListener("click", (ev) => {
+        const btn = ev.target.closest('button[role="tab"]');
+        if (!btn) return;
+        const label = normalize(btn.textContent);
+        if (!TABS.includes(label)) return;
+        const url = new URL(window.location);
+        if (url.searchParams.get("tab") === label) return;
+        url.searchParams.set("tab", label);
+        history.pushState({tab: label}, "", url);
+      }, true);
+
+      // In-page CTAs: any <a href="?tab=X"> anchor should activate that
+      // tab instead of reloading. This lets Now-tab buttons like "View
+      // full prediction model" jump straight to the Chart tab without
+      // a full page round-trip.
+      document.addEventListener("click", (ev) => {
+        const anchor = ev.target.closest('a[href^="?tab="]');
+        if (!anchor) return;
+        ev.preventDefault();
+        const href = anchor.getAttribute("href");
+        const target = new URLSearchParams(href.slice(1)).get("tab");
+        const label = normalize(target);
+        if (!TABS.includes(label)) return;
+        const url = new URL(window.location);
+        url.searchParams.set("tab", label);
+        history.pushState({tab: label}, "", url);
+        activateFromUrl();
+      }, true);
+
+      // Browser back/forward: re-run the URL-driven activation.
+      window.addEventListener("popstate", activateFromUrl);
+
+      // Inspector-overlay dock — tag the "Inspector overlay layers"
+      // expander with .kt-overlay-dock so CSS can float it on desktop
+      // (see styles.py). We identify the expander by its summary text
+      // because Streamlit doesn't expose a Python-level class hook on
+      // st.expander. Idempotent: skip if the class is already there.
+      function tagOverlayDock() {
+        document.querySelectorAll('[data-testid="stExpander"]').forEach(exp => {
+          if (exp.classList.contains("kt-overlay-dock")) return;
+          const summaryText = (exp.querySelector("summary") || exp).textContent || "";
+          if (summaryText.includes("Inspector overlay layers")) {
+            exp.classList.add("kt-overlay-dock");
+          }
+        });
+      }
+      tagOverlayDock();
+      const overlayObs = new MutationObserver(tagOverlayDock);
+      overlayObs.observe(document.body, {childList: true, subtree: true});
+    })();
+    </script>
+    """,
+    unsafe_allow_javascript=True,
+)
 
 with tab_now:
     # ─────────────────────────────────────────────────────────────────────────────
@@ -711,8 +714,11 @@ with tab_now:
         if status.sent_utc is not None:
             sent_local = pd.Timestamp(status.sent_utc).tz_convert(DISPLAY_TZ)
             sent_str = f" · issued {sent_local.strftime('%b %-d, %-I:%M %p')} {TZ_LABEL}"
+        # Inside a raw-HTML <div>, Streamlit doesn't re-parse markdown, so
+        # `[label](url)` would render as literal text. Emit an <a> tag.
         notice_link = (
-            f" &nbsp;[full notice ↗]({status.notice_url})"
+            f' &nbsp;<a href="{status.notice_url}" target="_blank" rel="noopener"'
+            f' style="color: inherit; text-decoration: underline;">full notice ↗</a>'
             if status.notice_url
             else ""
         )
@@ -768,7 +774,7 @@ with tab_now:
                 _render_nws_alert(alert)
             st.caption(
                 "Source: USGS Hazard Alert Notification System + NWS Honolulu. "
-                "Updated every 15 minutes; click the sidebar Refresh button to "
+                "Updated every 15 minutes; click the top-bar Refresh button to "
                 "force a fresh fetch."
             )
     elif safety.errors:
@@ -779,37 +785,99 @@ with tab_now:
             f"({len(safety.errors)} source(s) returned an error)."
         )
 
+    # ── Hero block: one dramatic answer + last-30-days sparkline ───────────
+    # Moved from above-the-tabs into tab_now so each tab is self-contained.
+    # The sparkline reads as a visual fingerprint of recent activity rather
+    # than a readable chart — axes are suppressed, hover disabled.
+    hero.show(eruption_state, prediction, tilt_df)
+
+    # CTA: jump to the full prediction model chart. Rendered as an anchor
+    # with ``?tab=chart`` so the JS tab router (injected near st.tabs below)
+    # intercepts the click and activates the Chart tab.
+    st.markdown(
+        '<div class="kt-cta-row">'
+        '<a class="kt-cta" href="?tab=chart">📈 View full prediction model →</a>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── State banner ──────────────────────────────────────────────────────
+    # Consistent 3-part banner (icon + headline, plain explainer, guidance)
+    # rendered from the state_copy table. `calm` skips rendering.
+    state_banner.show(eruption_state, eruption_state_info)
+
+    # ── Live camera strip ─────────────────────────────────────────────────
+    # Four-camera strip below the hero — seeing the volcano is the second-
+    # most emotionally valuable thing on the page after the prediction.
+    # Full 8-camera grid stays available on the Cameras tab.
+    st.markdown("#### 📷 Live cameras")
+    cameras.show_strip()
+
+    # CTA: jump to the full camera grid.
+    st.markdown(
+        '<div class="kt-cta-row">'
+        '<a class="kt-cta" href="?tab=cameras">📷 View all cameras →</a>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
 
 with tab_chart:
-    # Advanced model tuning — sliders migrated from the sidebar so they
-    # sit next to the chart they affect. Writes straight into session_state
-    # keys that the top-of-module setup block reads on the next rerun.
+    # Chart options — controls that only make sense next to the chart.
+    # `tw_*` session-state keys are seeded at module scope so the eager
+    # prediction compute above can read them before this expander renders.
+    _chart_opts_cols = st.columns([1.2, 1])
+    with _chart_opts_cols[0]:
+        st.slider(
+            "Trendline window — number of recent peaks",
+            min_value=3, max_value=20, step=1,
+            key="tw_n_peaks_for_fit",
+            help=(
+                "How many of the most recent detected peaks feed the linear "
+                "trendline fit. Smaller = more sensitive to recent shifts; "
+                "larger = smoother long-term trend."
+            ),
+        )
+    with _chart_opts_cols[1]:
+        st.toggle(
+            "🔍 Show per-source traces",
+            key="tw_show_per_source",
+            help=(
+                "Overlay each USGS source's calibrated trace beneath the "
+                "merged line. Useful for spotting calibration drift or "
+                "source handoff. Traces are off by default; click legend "
+                "entries to toggle individual sources."
+            ),
+        )
+
+    # Advanced model tuning — sliders that tune peak detection sensitivity.
+    # Writes directly into `adv_*` session_state keys that the top-of-module
+    # setup block reads on the next rerun.
     with st.expander("⚙️ Advanced model tuning", expanded=False):
         st.caption(
             "Nudge these if you want to see how peak detection and the "
             "trendline react to different sensitivities. Defaults are "
             "tuned for UWD Az 300°."
         )
+        # Sliders read their initial value from session_state via ``key=``.
+        # Passing ``value=`` alongside ``key=`` when the key is already seeded
+        # triggers Streamlit's widget-key-collision warning in 1.45+.
         st.slider(
             "Minimum prominence (µrad)",
-            min_value=1.0, max_value=15.0,
-            value=st.session_state["adv_min_prominence"],
-            step=0.5, key="adv_min_prominence",
+            min_value=1.0, max_value=15.0, step=0.5,
+            key="adv_min_prominence",
             help="How much a peak must rise above surrounding troughs.",
         )
         st.slider(
             "Minimum spacing (days)",
-            min_value=1.0, max_value=30.0,
-            value=st.session_state["adv_min_distance_days"],
-            step=0.5, key="adv_min_distance_days",
+            min_value=1.0, max_value=30.0, step=0.5,
+            key="adv_min_distance_days",
             help="Reject peaks within this many days of a stronger one.",
         )
         st.slider(
             "Minimum height (µrad)",
-            min_value=-20.0, max_value=20.0,
-            value=st.session_state["adv_min_height"],
-            step=0.5, key="adv_min_height",
+            min_value=-20.0, max_value=20.0, step=0.5,
+            key="adv_min_height",
             help="Absolute tilt floor for peaks. -10 effectively disables.",
         )
 
@@ -959,26 +1027,47 @@ with tab_chart:
     )
     st.caption(
         "Tip: hover a point and press ⌘C / Ctrl+C to copy it. "
-        "Or drag a box over the chart to set the CSV export range below."
+        "Or drag a box over the chart to set the CSV export range just below."
     )
 
+    # ── Interval-based sanity check (secondary forecast) ───────────────────
+    # Independent from the exp-fit prediction above. Uses the median gap
+    # between detected peaks as a crude "when was the last one + typical
+    # cycle length?" baseline. Lives here (with the chart) rather than above
+    # the fold — it's a technical cross-check, not the headline answer.
+    if (
+        eruption_state != "active"
+        and prediction.interval_based_next_event_date is not None
+    ):
+        ib_date = prediction.interval_based_next_event_date
+        ib_band = prediction.interval_based_band
+        median_days = prediction.median_peak_interval_days or 0.0
+        ib_aware = ib_date.tz_localize("UTC") if ib_date.tzinfo is None else ib_date
+        delta_days = (pd.Timestamp.now(tz="UTC") - ib_aware).total_seconds() / 86400
+        overdue_str = (
+            f" · ⚠️ **{delta_days:.0f}d overdue** by this metric"
+            if delta_days > 0.5
+            else ""
+        )
+        band_str = f" &nbsp;·&nbsp; IQR {_fmt_band(ib_band)}" if ib_band is not None else ""
+        st.caption(
+            f"📊 Interval baseline (independent sanity check): "
+            f"{_fmt_short(ib_date)}{band_str}{overdue_str} — "
+            f"median cycle {median_days:.1f} days."
+        )
 
-
-with tab_cameras:
-    cameras.show_grid()
-
-with tab_data:
-    # ─────────────────────────────────────────────────────────────────────────────
-    # CSV export (Phase 4 Commit 5)
-    # ─────────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    # CSV export — co-located with the chart so the box-select → export
+    # workflow is one tab, not two.
+    # ─────────────────────────────────────────────────────────────────────────
     #
     # Two modes. Simple: date + merged tilt + winning source + configurable
     # per-source corrected values. Debug: every column, everything, as a zip
     # bundle including pair fits + per-bucket MAD diagnostics.
     #
     # Range selection works three ways that all feed the same date pickers:
-    #   1. Box-select on the chart (see above) pre-populates the range.
-    #   2. Manual date pickers in the sidebar-style expander.
+    #   1. Box-select on the chart above pre-populates the range.
+    #   2. Manual date pickers inside the expander.
     #   3. "Export full history" button ignores the range entirely.
 
     with st.expander("📤 Export data as CSV"):
@@ -1215,11 +1304,47 @@ with tab_data:
                     help=f"Complete {len(full_df)}-row merged tilt history (all time).",
                 )
 
+    # ── Detected peaks ────────────────────────────────────────────────────
+    # Peaks depend on the prominence / spacing / height sliders in the
+    # Advanced model tuning expander above, so the table belongs here next
+    # to its controls — not on a separate "Data" tab.
+    with st.expander(
+        f"📍 Detected peaks ({len(all_peaks)} total, {len(recent_peaks)} used for fit)"
+    ):
+        if len(all_peaks) == 0:
+            st.info(
+                "No peaks detected at the current sensitivity. Try lowering the "
+                "prominence threshold."
+            )
+        else:
+            # Tag the rows that fed the trendline fit BEFORE sorting, so the flag
+            # survives the reverse-by-date sort below.
+            fit_dates = set(recent_peaks[DATE_COL])
+            display_peaks = all_peaks.copy()
+            display_peaks["used_for_fit"] = display_peaks[DATE_COL].isin(fit_dates)
+            display_peaks = display_peaks.sort_values(DATE_COL, ascending=False).reset_index(drop=True)
+            display_peaks = display_peaks.rename(
+                columns={
+                    DATE_COL: "Date",
+                    TILT_COL: "Tilt (µrad)",
+                    "prominence": "Prominence",
+                    "used_for_fit": "Used for fit",
+                }
+            )
+            st.dataframe(display_peaks, width="stretch", hide_index=True)
 
 
-    # ─────────────────────────────────────────────────────────────────────────────
-    # Reconcile diagnostics (Phase 4 Commit 5)
-    # ─────────────────────────────────────────────────────────────────────────────
+with tab_cameras:
+    cameras.show_grid()
+
+
+# The former "Data" tab was merged into the Pipeline tab. Reconcile + model
+# diagnostics are behind-the-scenes instrumentation, so they live alongside
+# the ingest/transcription inspector; detected peaks moved to the Chart tab.
+# Streamlit's tab containers can be re-entered, so this ``with tab_pipeline:``
+# simply streams the migrated expanders into the same Pipeline panel as the
+# main pipeline block further down.
+with tab_pipeline:
 
     with st.expander("🔎 Reconcile diagnostics"):
         st.caption(
@@ -1360,38 +1485,52 @@ with tab_data:
         if not diag:
             st.write("No diagnostics available.")
         else:
-            # ─── Trendline slope ──────────────────────────────────────────────
+            st.caption(
+                "These are the internals of the prediction model, shown as "
+                "tinted chips so you can see which readings are typical and "
+                "which are outside the normal range for the current eruptive "
+                "phase. The text below each chip explains the expected range."
+            )
+
+            # ─── Trendline slope + current-episode sample count ──────────────
             slope = diag.get("trendline_slope_per_day")
+            n_episode = diag.get("current_episode_n")
+            col_slope, col_n = st.columns(2)
             if slope is not None:
                 direction = "rising" if slope > 0 else "falling"
-                st.markdown(
-                    f"**Trendline slope** &nbsp;·&nbsp; "
-                    f"`{slope:+.4f} µrad/day` &nbsp;·&nbsp; "
-                    f"{direction} ~`{abs(slope) * 7:.2f}` µrad/week"
+                col_slope.markdown(
+                    render_chip_html(
+                        label="Trendline slope",
+                        value=f"{slope:+.3f}",
+                        unit="µrad/day",
+                        tint=trendline_slope_tint(slope),
+                    ),
+                    unsafe_allow_html=True,
                 )
-                st.caption(
-                    "How fast the peak heights are changing over time. Positive "
-                    "means the deformation episodes are getting more intense (more "
-                    "magma pressure builds before each release); negative means "
-                    "they're tapering off. The trendline is the linear regression "
-                    "through the last N peaks (slider-controlled)."
+                col_slope.caption(
+                    f"{direction.capitalize()} at ~{abs(slope)*7:.2f} µrad/week. "
+                    "How fast the peak heights are shifting. Positive = episodes "
+                    "getting more intense (more magma pressure per cycle); "
+                    "negative = tapering off. Linear regression through the last "
+                    "N peaks (Chart tab's Trendline window slider)."
                 )
-                st.markdown("&nbsp;")
-
-            # ─── Current episode sample count ────────────────────────────────
-            n_episode = diag.get("current_episode_n")
             if n_episode is not None:
-                st.markdown(
-                    f"**Current episode samples** &nbsp;·&nbsp; "
-                    f"`{n_episode}` tilt readings since the last detected peak"
+                col_n.markdown(
+                    render_chip_html(
+                        label="Current episode samples",
+                        value=str(n_episode),
+                        unit="readings",
+                        tint=episode_samples_tint(n_episode),
+                    ),
+                    unsafe_allow_html=True,
                 )
-                st.caption(
-                    "How many tilt samples fed the exponential saturation fit. "
-                    "The fit needs at least 4 to estimate its 3 parameters; more "
-                    "samples (and more variation across them) give a tighter fit "
-                    "and a narrower confidence band."
+                col_n.caption(
+                    "Tilt samples feeding the exponential saturation fit since "
+                    "the last detected peak. The fit needs ≥ 4 to estimate its "
+                    "three parameters; more samples with more variation across "
+                    "them tighten the confidence band."
                 )
-                st.markdown("&nbsp;")
+            st.markdown("&nbsp;")
 
             # ─── Exponential fit parameters ──────────────────────────────────
             if prediction.exp_params:
@@ -1400,26 +1539,54 @@ with tab_data:
                 tau_days = 1.0 / k if k > 0 else float("inf")
                 half_life = math.log(2) / k if k > 0 else float("inf")
                 st.markdown(
-                    f"**Exponential saturation fit** &nbsp;·&nbsp; "
-                    f"`tilt = A·(1 − exp(−k·t)) + C`"
+                    "**Exponential saturation fit** &nbsp;·&nbsp; "
+                    "`tilt = A·(1 − exp(−k·t)) + C`"
                 )
-                col_a, col_k, col_c, col_asym = st.columns(4)
-                col_a.metric("A (amplitude)", f"{A:.2f} µrad")
-                col_k.metric("k (rise rate)", f"{k:.4f} /day")
-                col_c.metric("C (baseline)", f"{C:.2f} µrad")
+                col_a, col_k, col_tau, col_asym = st.columns(4)
+                col_a.markdown(
+                    render_chip_html(
+                        label="A (amplitude)",
+                        value=f"{A:.1f}",
+                        unit="µrad",
+                        tint=exp_amplitude_tint(A),
+                    ),
+                    unsafe_allow_html=True,
+                )
+                col_k.markdown(
+                    render_chip_html(
+                        label="k (rise rate)",
+                        value=f"{k:.3f}",
+                        unit="/day",
+                        tint=exp_k_tint(k),
+                    ),
+                    unsafe_allow_html=True,
+                )
+                # Time-constant chip reuses the k tint — they're the same signal
+                # in different units (τ = 1/k). A second chip lets the user
+                # see the human-readable "days to 63% saturation" number directly.
+                col_tau.markdown(
+                    render_chip_html(
+                        label="τ (time const)",
+                        value=f"{tau_days:.1f}" if tau_days != float("inf") else "—",
+                        unit="days",
+                        tint=exp_k_tint(k),
+                    ),
+                    unsafe_allow_html=True,
+                )
+                # The asymptote isn't a teaching signal in itself — just show
+                # as a neutral metric.
                 col_asym.metric("A + C (asymptote)", f"{asymptote:.2f} µrad")
                 st.caption(
-                    f"Each parameter has a job. **A** is the total rise amplitude "
-                    f"this episode will gain if it's allowed to fully saturate. "
-                    f"**k** is how fast it rises — the time constant 1/k is "
-                    f"~{tau_days:.1f} days to reach 63% of A, and the half-time "
-                    f"ln(2)/k is ~{half_life:.1f} days to reach 50% of A. "
-                    f"**C** is the starting tilt offset where the episode began "
-                    f"(the trough after the previous eruption). **A + C** is the "
-                    f"asymptote — where tilt would settle if no eruption "
-                    f"interrupted the rise. The next fountain event is predicted "
-                    f"to happen well *before* this asymptote, when the rising "
-                    f"exp curve crosses the linear trendline through recent peaks."
+                    f"**A** = total rise amplitude the episode would gain at "
+                    f"full saturation. **k** = rise rate; the time constant "
+                    f"1/k (~{tau_days:.1f} days) is how long to reach 63% of A, "
+                    f"half-time ln(2)/k (~{half_life:.1f} days) is 50% of A. "
+                    f"**C** = starting tilt offset (the trough after the last "
+                    f"eruption, at {C:+.2f} µrad). **A + C** = asymptote — "
+                    f"where tilt would settle if no eruption interrupted the "
+                    f"rise. The next fountain event is predicted *before* this "
+                    f"asymptote, where the rising exp curve crosses the "
+                    f"linear trendline through recent peaks."
                 )
                 st.markdown("&nbsp;")
 
@@ -1434,7 +1601,7 @@ with tab_data:
             # ─── Footer: peaks in fit ────────────────────────────────────────
             st.markdown(
                 f"**Peaks in fit** &nbsp;·&nbsp; `{prediction.n_peaks_in_fit}` "
-                "(controlled by the sidebar's *Number of recent peaks* slider)"
+                "(controlled by the Chart tab's *Trendline window* slider)"
             )
 
 
@@ -1488,8 +1655,10 @@ with tab_pipeline:
     with st.expander("🔬 Transcription quality inspector"):
         st.caption(
             "Each USGS source is rendered once with the selected overlay "
-            "layers stacked on top. Layer toggles live in the sidebar under "
-            "**🔬 Inspector overlays** so they stay visible while you scroll."
+            "layers stacked on top. On desktop the **🔬 Inspector overlay "
+            "layers** panel docks to the top-right so toggles stay visible "
+            "as you scroll through the PNGs; on mobile it sits above the "
+            "inspector in-flow."
         )
 
         layers = {
@@ -2374,3 +2543,36 @@ with tab_pipeline:
 
 with tab_about:
     about_tab.show()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Footer — compact attribution strip below the tabs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+from kilauea_tracker import __version__ as _kt_version  # noqa: E402
+
+_GH_ICON = (
+    '<svg viewBox="0 0 16 16" aria-hidden="true">'
+    '<path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38 '
+    '0-.19-.01-.82-.01-1.49-2 .37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13'
+    '-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66'
+    '.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15'
+    '-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 '
+    '1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 '
+    '1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 '
+    '1.93-.01 2.2 0 .21.15.46.55.38A8 8 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>'
+    '</svg>'
+)
+
+st.markdown(
+    '<footer class="kt-footer">'
+    '<span class="kt-footer__inner">'
+    'Built by <a href="https://github.com/madisonrickert">Madison Rickert</a>'
+    '<span class="kt-footer__sep">·</span>'
+    f'<a href="https://github.com/madisonrickert/kilauea-tracker">{_GH_ICON} source</a>'
+    '<span class="kt-footer__sep">·</span>'
+    f'v{_kt_version}'
+    '</span>'
+    '</footer>',
+    unsafe_allow_html=True,
+)

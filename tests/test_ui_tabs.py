@@ -17,9 +17,27 @@ def test_about_tab_module_has_show():
 
 def test_about_tab_overview_mentions_key_anchors():
     """The About copy must mention the core concepts every visitor will ask about."""
-    body = about_tab._OVERVIEW_MARKDOWN
+    body = (
+        about_tab._ABOUT_PROJECT_MARKDOWN
+        + about_tab._HOW_IT_WORKS_MARKDOWN
+        + about_tab._AUTHOR_MARKDOWN
+    )
     for anchor in ("UWD", "azimuth 300°", "USGS", "trendline", "exponential"):
         assert anchor in body, f"About copy missing anchor {anchor!r}"
+
+
+def test_about_tab_introduces_project_and_author():
+    """Feedback-locked: the About tab must cover the project story AND the
+    author, not just the technical explanation of the model."""
+    body = (
+        about_tab._ABOUT_PROJECT_MARKDOWN
+        + about_tab._HOW_IT_WORKS_MARKDOWN
+        + about_tab._AUTHOR_MARKDOWN
+    )
+    assert "About this project" in body
+    assert "About the author" in body
+    assert "Madison Rickert" in body
+    assert "github.com/madisonrickert" in body
 
 
 def test_chart_tab_public_surface():

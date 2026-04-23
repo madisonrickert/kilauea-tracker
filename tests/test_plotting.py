@@ -303,18 +303,44 @@ def test_predicted_next_annotation_rendered(realistic_inputs):
 
 
 def test_palette_colors_applied_to_core_traces(realistic_inputs):
-    """History line is ash; peaks-in-fit are lava; confidence band is flame-tinted."""
-    from kilauea_tracker.ui.palette import ASH, LAVA
+    """History line is a tinted steam (bright, not gray); peaks-in-fit are lava."""
+    from kilauea_tracker.plotting import TILT_LINE_COLOR
+    from kilauea_tracker.ui.palette import LAVA
 
     df, all_peaks, fit_peaks, pred = realistic_inputs
     fig = build_figure(df, fit_peaks, pred, all_peaks_df=all_peaks)
     tilt_trace = next(t for t in fig.data if t.name == "Tilt")
-    assert tilt_trace.line.color == ASH
+    assert tilt_trace.line.color == TILT_LINE_COLOR
 
     peaks_trace = next(
         t for t in fig.data if t.name and t.name.startswith("Peaks in fit")
     )
     assert peaks_trace.marker.color == LAVA
+
+
+def test_tilt_line_is_not_flat_gray():
+    """The main history line was gray (--ash) in v2.1; user feedback moved it
+    to a brighter, non-gray color. Lock that: the color must read as a light
+    tone on dark, not a mid-gray neutral."""
+    from kilauea_tracker.plotting import TILT_LINE_COLOR
+
+    # Regression lock: the old ash value was exactly '#64748b'. Keep it out.
+    assert TILT_LINE_COLOR != "#64748b"
+    # Sanity: the new color is a light rgba (R+G+B of the steam-based value
+    # comfortably exceeds a mid-gray sum). This catches an accidental swap
+    # back to a darker neutral.
+    color = TILT_LINE_COLOR
+    assert color.startswith("rgba("), (
+        f"expected rgba(...) for TILT_LINE_COLOR, got {color!r}"
+    )
+    # Extract the R,G,B triplet and confirm each channel is >= 200.
+    import re
+    m = re.match(r"rgba\(\s*(\d+),\s*(\d+),\s*(\d+)", color)
+    assert m, f"malformed rgba string: {color!r}"
+    r, g, b = (int(m.group(i)) for i in (1, 2, 3))
+    assert r >= 200 and g >= 200 and b >= 200, (
+        f"expected a light (near-white) line color; got rgb({r}, {g}, {b})"
+    )
 
 
 def test_episode_shading_renders_alternating_bands(realistic_inputs):

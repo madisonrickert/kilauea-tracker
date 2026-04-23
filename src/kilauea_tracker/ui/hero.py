@@ -17,8 +17,13 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import pandas as pd
+import plotly.graph_objects as go
 
 from .palette import STATE_COLOR
+
+# Default lookback for the hero sparkline. 30 days gives the visitor one full
+# eruption cycle of context without needing to zoom.
+SPARKLINE_DAYS = 30
 
 
 @dataclass(frozen=True)
@@ -199,9 +204,222 @@ def render_html(copy: HeroCopy) -> str:
     )
 
 
-def show(state: str, prediction: Optional[object]) -> None:
-    """Render the hero inside the current Streamlit container."""
+def build_sparkline(
+    tilt_df: pd.DataFrame,
+    state: str,
+    prediction: Optional[object] = None,
+    *,
+    n_days: int = SPARKLINE_DAYS,
+    height: int = 240,
+) -> Optional[go.Figure]:
+    """Compact last-N-days tilt line + predicted next-event marker.
+
+    Reads as a visual fingerprint of recent activity rather than a
+    readable chart: the shape of the curve conveys "flat / rising /
+    just erupted" at a glance. Color picks up the current state so the
+    hero chip, banner accent, and sparkline all speak the same signal.
+
+    When ``prediction`` carries a ``next_event_date``, the x-axis extends
+    past the last sample, a faint confidence band shades the predicted
+    window, and a star marker pins the predicted date — so the "Next
+    pulse in N DAYS" headline is visibly tied to a point on the timeline
+    rather than just a number.
+
+    Returns None when there's nothing to plot (no history, or all
+    points fall outside the window).
+    """
+    from ..model import DATE_COL, TILT_COL
+
+    if tilt_df is None or len(tilt_df) == 0:
+        return None
+    last = pd.Timestamp(tilt_df[DATE_COL].max())
+    cutoff = last - pd.Timedelta(days=n_days)
+    window = tilt_df[tilt_df[DATE_COL] >= cutoff]
+    if len(window) < 2:
+        return None
+
+    line_color = STATE_COLOR.get(state, STATE_COLOR["calm"])
+    fill_color = _rgba(line_color, alpha=0.18)
+
+    fig = go.Figure(
+        data=[
+            go.Scatter(
+                x=window[DATE_COL],
+                y=window[TILT_COL],
+                mode="lines",
+                line=dict(color=line_color, width=2),
+                fill="tozeroy",
+                fillcolor=fill_color,
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        ]
+    )
+
+    # Predicted-event marker + confidence band, so the sparkline reads as
+    # a compact preview of the main chart. The main-chart prediction logic
+    # decides what to show based on eruption state; here we mirror that:
+    # while a fountain is ACTIVE we hide the "next event" marker (it's
+    # happening on screen right now) and the same field is also suppressed
+    # by the Prediction layer in that case.
+    next_date = getattr(prediction, "next_event_date", None) if prediction else None
+    conf_band = getattr(prediction, "confidence_band", None) if prediction else None
+    hide_prediction = state == "active"
+
+    last_y = float(window[TILT_COL].iloc[-1])
+    y_min = float(window[TILT_COL].min())
+    y_max = float(window[TILT_COL].max())
+    y_span = max(y_max - y_min, 1.0)
+
+    if not hide_prediction and next_date is not None:
+        last_date = pd.Timestamp(window[DATE_COL].iloc[-1])
+        next_ts = pd.Timestamp(next_date)
+
+        # Dashed "anticipated trajectory" from the last sample to the
+        # predicted pulse — communicates "the model expects the line to
+        # keep rising toward here." A 10% nudge upward reinforces the
+        # rising feel without pretending to be a real sample.
+        projected_y = last_y + 0.1 * y_span
+        fig.add_trace(
+            go.Scatter(
+                x=[last_date, next_ts],
+                y=[last_y, projected_y],
+                mode="lines",
+                line=dict(color=line_color, width=1.5, dash="dot"),
+                opacity=0.55,
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+
+        # Confidence band as a tapered lens (diamond) centered on the
+        # predicted date and the projected y. A flat rectangle reads like
+        # "it's some box" — a lens reads like "most likely here, less
+        # likely at the edges" which is the shape of the actual posterior.
+        if conf_band is not None:
+            lo = pd.Timestamp(conf_band[0])
+            hi = pd.Timestamp(conf_band[1])
+            bulge = 0.12 * y_span  # vertical extent at the lens center
+            # Polygon: (lo, mid_y) → (mid, top) → (hi, mid_y) → (mid, bottom) → close
+            # Two concentric lenses at different alpha simulate a soft edge.
+            for scale, alpha in ((1.0, 0.14), (0.6, 0.26)):
+                b = bulge * scale
+                x_poly = [lo, next_ts, hi, next_ts, lo]
+                y_poly = [
+                    projected_y,
+                    projected_y + b,
+                    projected_y,
+                    projected_y - b,
+                    projected_y,
+                ]
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_poly,
+                        y=y_poly,
+                        mode="lines",
+                        line=dict(color=line_color, width=0),
+                        fill="toself",
+                        fillcolor=_rgba(line_color, alpha=alpha),
+                        hoverinfo="skip",
+                        showlegend=False,
+                    )
+                )
+
+        # Star marker last so it sits on top of the lens + trajectory.
+        fig.add_trace(
+            go.Scatter(
+                x=[next_ts],
+                y=[projected_y],
+                mode="markers",
+                marker=dict(
+                    symbol="star",
+                    color=line_color,
+                    size=15,
+                    line=dict(color="rgba(15, 20, 25, 0.6)", width=1),
+                ),
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+
+    # Extend the x-axis forward so the prediction marker has room to sit
+    # past the last sample — otherwise Plotly's autorange clips it tight
+    # against the rising tail of the history line.
+    x_start = cutoff
+    x_end = last + pd.Timedelta(days=2)
+    if not hide_prediction:
+        if conf_band is not None:
+            x_end = max(x_end, pd.Timestamp(conf_band[1]) + pd.Timedelta(days=1))
+        if next_date is not None:
+            x_end = max(x_end, pd.Timestamp(next_date) + pd.Timedelta(days=1))
+
+    fig.update_layout(
+        height=height,
+        margin=dict(l=0, r=0, t=4, b=4),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(visible=False, fixedrange=True, range=[x_start, x_end]),
+        yaxis=dict(visible=False, fixedrange=True),
+    )
+    return fig
+
+
+def render_caption_html(copy: HeroCopy) -> str:
+    """Compact single-card caption rendered BELOW the sparkline hero.
+
+    Before: a 5rem headline dominated the page and the sparkline sat
+    below it as a subordinate. After the sparkline-as-hero redesign, the
+    visual is the curve; the text summarizes it on one line with a chip
+    for state color, an eyebrow label, and a condensed headline+subhead.
+    """
+    accent = STATE_COLOR.get(copy.state, STATE_COLOR["calm"])
+    return (
+        f'<div class="kt-hero-caption" role="status">'
+        f'<span class="kt-chip" style="--chip-bg: {accent};">{copy.state_label}</span>'
+        f'<span class="kt-hero-caption__eyebrow">{copy.eyebrow}</span>'
+        f'<span class="kt-hero-caption__headline">{copy.headline}</span>'
+        f'<span class="kt-hero-caption__subhead">{copy.subhead}</span>'
+        f'</div>'
+    )
+
+
+def _rgba(color: str, *, alpha: float) -> str:
+    """Convert a ``#rrggbb`` palette token into an ``rgba(r,g,b,a)`` string."""
+    c = color.lstrip("#")
+    if len(c) != 6:
+        return color  # already rgba(...) or unknown form — let Plotly handle it
+    r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {alpha:.3f})"
+
+
+def show(
+    state: str,
+    prediction: Optional[object],
+    tilt_df: Optional[pd.DataFrame] = None,
+    *,
+    sparkline_days: int = SPARKLINE_DAYS,
+) -> None:
+    """Render the hero — sparkline on top, compact caption beneath.
+
+    The sparkline is the visual hero now: ~240 px tall, state-colored line
+    with a tapered confidence lens + star marker + dashed trajectory. The
+    text is a one-line supporting caption underneath, with the state chip,
+    eyebrow label, condensed headline and subhead.
+    """
     import streamlit as st
 
     copy = compose(state, prediction)
-    st.markdown(render_html(copy), unsafe_allow_html=True)
+
+    # Sparkline first — it's the hero visual.
+    if tilt_df is not None:
+        spark = build_sparkline(tilt_df, state, prediction, n_days=sparkline_days)
+        if spark is not None:
+            st.plotly_chart(
+                spark,
+                width="stretch",
+                config={"displayModeBar": False, "staticPlot": True},
+                key="hero_sparkline",
+            )
+
+    # Supporting caption: chip + eyebrow + headline + subhead on one line.
+    st.markdown(render_caption_html(copy), unsafe_allow_html=True)
