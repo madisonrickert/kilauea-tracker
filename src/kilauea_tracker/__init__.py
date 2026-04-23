@@ -1,3 +1,3 @@
-"""Kīlauea fountain event tracker — v2.0."""
+"""Kīlauea fountain event tracker — v2.1."""
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
