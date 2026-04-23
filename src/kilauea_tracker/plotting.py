@@ -17,18 +17,29 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from .model import DATE_COL, TILT_COL, CurveBand, Prediction, from_days, to_days
+from .ui.palette import (
+    ASH,
+    FLAME,
+    HALO,
+    LAVA,
+    STATE_COLOR,
+    STEAM,
+)
 
-# Visual defaults — kept here so the Streamlit theme and the chart agree.
-TILT_LINE_COLOR = "#79b8ff"           # cool blue for raw tilt
-PEAK_FIT_COLOR = "#39d353"            # bright green X — peaks used for the fit
-PEAK_OUT_COLOR = "rgba(57, 211, 83, 0.35)"  # dimmed — peaks NOT in the fit
-TRENDLINE_COLOR = "#ff6b35"           # lava orange (matches .streamlit/config.toml)
-TRENDLINE_BAND_FILL = "rgba(255, 107, 53, 0.18)"
-EXP_COLOR = "#bc8cff"                 # violet for the exponential
-EXP_BAND_FILL = "rgba(188, 140, 255, 0.18)"
-NEXT_EVENT_COLOR = "#ff4d4d"
-CONFIDENCE_BAND_FILL = "rgba(255, 77, 77, 0.22)"
-CONFIDENCE_BAND_LINE = "rgba(255, 77, 77, 0.55)"
+# Volcano palette applied to the chart. Locked to the UI palette so chip,
+# banner, and chart all speak the same color language.
+TILT_LINE_COLOR = ASH                       # muted neutral — raw history defers
+PEAK_FIT_COLOR = LAVA                       # peaks-in-fit: brand accent (hot)
+PEAK_OUT_COLOR = "rgba(100, 116, 139, 0.45)"  # ash, faded — peaks NOT in the fit
+TRENDLINE_COLOR_DEFAULT = LAVA              # overridden per-state in build_figure
+TRENDLINE_BAND_FILL = HALO                  # transparent lava gradient
+EXP_COLOR = LAVA                            # dashed lava for current-episode fit
+EXP_BAND_FILL = HALO
+NEXT_EVENT_COLOR = FLAME                    # high-chroma red — the event itself
+CONFIDENCE_BAND_FILL = "rgba(224, 55, 42, 0.18)"   # flame at low alpha
+CONFIDENCE_BAND_LINE = "rgba(224, 55, 42, 0.55)"
+NOW_LINE_COLOR = "rgba(226, 232, 240, 0.45)"       # steam at medium alpha
+GRID_COLOR = "rgba(226, 232, 240, 0.07)"
 
 # Per-source overlay colors (Phase 4 Commit 5). Each source traces a
 # distinct translucent color on top of the merged line so the user can
@@ -62,6 +73,7 @@ def build_figure(
     show_current_episode: bool = True,
     show_next_event_prediction: bool = True,
     per_source_overlay: Optional[dict[str, pd.DataFrame]] = None,
+    state: Optional[str] = None,
 ) -> go.Figure:
     """Render the full prediction chart.
 
@@ -98,8 +110,19 @@ def build_figure(
                                     user can see which source contributed
                                     each region and where they disagree.
                                     Phase 4 Commit 5 observability feature.
+        state:                      Optional eruption state name (calm /
+                                    starting / imminent / overdue / active).
+                                    When provided, the trendline color shifts
+                                    to the matching palette token so the chart
+                                    echoes the hero chip's state color.
     """
     fig = go.Figure()
+    trendline_color = STATE_COLOR.get(state, TRENDLINE_COLOR_DEFAULT) if state else TRENDLINE_COLOR_DEFAULT
+
+    # ── 0a. episode shading: alternating subtle bands between consecutive
+    #       detected peaks, so each eruption cycle reads as a discrete
+    #       block of time. Drawn FIRST so everything else sits on top.
+    _add_episode_shading(fig, all_peaks_df)
 
     # ── 0. per-source overlay (drawn first so merged line sits on top) ──────
     if per_source_overlay:
@@ -218,7 +241,7 @@ def build_figure(
             curve=prediction.trendline,
             extent_end_day=extent_end_day,
             name=f"Trendline (last {n} peaks)",
-            color=TRENDLINE_COLOR,
+            color=trendline_color,
             dash="dash",
         )
 
@@ -292,25 +315,111 @@ def build_figure(
             )
         )
 
-    # ── 7. default zoom: recent history + projection horizon ────────────────
+    # ── 7a. vertical "now" line: strong past/future split ───────────────────
+    # Use a Scatter trace rather than add_vline + annotation_text, because
+    # the latter's shapeannotation helper averages two Timestamp endpoints
+    # via sum()/len() — which fails with recent pandas (Timestamp + int).
+    now = pd.Timestamp.now(tz="UTC").tz_localize(None)
+    if len(tilt_df) > 0:
+        fig.add_shape(
+            type="line",
+            xref="x",
+            yref="paper",
+            x0=now,
+            x1=now,
+            y0=0,
+            y1=1,
+            line=dict(color=NOW_LINE_COLOR, width=1.2, dash="dot"),
+            layer="below",
+        )
+        fig.add_annotation(
+            x=now,
+            y=1.0,
+            xref="x",
+            yref="paper",
+            text="now",
+            showarrow=False,
+            yanchor="bottom",
+            font=dict(color=STEAM, size=10),
+        )
+
+    # ── 7b. annotate the most recent peak and the predicted intersection ────
+    if len(fit_peaks_df) > 0:
+        last = fit_peaks_df.iloc[-1]
+        fig.add_annotation(
+            x=last[DATE_COL],
+            y=last[TILT_COL],
+            text=f"last pulse · {pd.Timestamp(last[DATE_COL]).strftime('%b %-d')}",
+            showarrow=True,
+            arrowhead=2,
+            arrowsize=1,
+            arrowcolor=LAVA,
+            ax=0,
+            ay=-28,
+            font=dict(color=STEAM, size=11),
+            bgcolor="rgba(30, 37, 55, 0.85)",  # basalt-ish
+            bordercolor=LAVA,
+            borderwidth=1,
+            borderpad=3,
+        )
+    if (
+        show_next_event_prediction
+        and prediction.next_event_date is not None
+        and prediction.next_event_tilt is not None
+    ):
+        fig.add_annotation(
+            x=prediction.next_event_date,
+            y=prediction.next_event_tilt,
+            text=(
+                f"predicted next · "
+                f"{pd.Timestamp(prediction.next_event_date).strftime('%b %-d')}"
+            ),
+            showarrow=True,
+            arrowhead=2,
+            arrowsize=1,
+            arrowcolor=NEXT_EVENT_COLOR,
+            ax=0,
+            ay=-36,
+            font=dict(color=STEAM, size=11),
+            bgcolor="rgba(30, 37, 55, 0.85)",
+            bordercolor=NEXT_EVENT_COLOR,
+            borderwidth=1,
+            borderpad=3,
+        )
+
+    # ── 7c. default zoom: recent history + projection horizon ───────────────
     x_range = _default_x_range(tilt_df, fit_peaks_df, prediction)
 
     layout_kwargs = dict(
         xaxis_title="Date",
         yaxis_title="Electronic tilt — UWD station, azimuth 300° (µrad)",
         template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
         hovermode="closest",
         legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
+            orientation="v",
+            yanchor="top",
+            y=0.98,
             xanchor="right",
-            x=1,
+            x=0.99,
+            bgcolor="rgba(30, 37, 55, 0.55)",
+            bordercolor="rgba(226, 232, 240, 0.1)",
+            borderwidth=1,
+            font=dict(size=11),
         ),
         margin=dict(l=60, r=30, t=40, b=60),
+        xaxis=dict(
+            gridcolor=GRID_COLOR,
+            showgrid=True,
+            tickformat="%b %-d",
+            minor=dict(showgrid=True, gridcolor=GRID_COLOR),
+        ),
+        yaxis=dict(gridcolor=GRID_COLOR),
     )
     if x_range is not None:
-        layout_kwargs["xaxis"] = dict(range=x_range)
+        # Preserve the dtick/minor/gridcolor config when we attach the range.
+        layout_kwargs["xaxis"] = {**layout_kwargs["xaxis"], "range": x_range}
     if title:
         layout_kwargs["title"] = title
     fig.update_layout(**layout_kwargs)
@@ -372,6 +481,38 @@ def _resolve_extent_end_day(
     if prediction.exp_curve is not None:
         candidates.append(prediction.exp_curve.domain[1])
     return max(candidates) if candidates else None
+
+
+EPISODE_SHADE_FILL = "rgba(226, 232, 240, 0.035)"  # steam @ 3.5% — very subtle
+
+
+def _add_episode_shading(
+    fig: go.Figure, all_peaks_df: Optional[pd.DataFrame]
+) -> None:
+    """Shade every-other span between consecutive detected peaks.
+
+    An episode runs peak-to-peak (each band is one inflation+deflation
+    cycle). Alternating shades delineate cycles without adding any new
+    legend entries or shouting over the data.
+    """
+    if all_peaks_df is None or len(all_peaks_df) < 2:
+        return
+    peak_dates = sorted(all_peaks_df[DATE_COL].tolist())
+    for i in range(len(peak_dates) - 1):
+        if i % 2 == 0:
+            continue  # un-shaded = even episodes; shaded = odd
+        fig.add_shape(
+            type="rect",
+            xref="x",
+            yref="paper",
+            x0=peak_dates[i],
+            x1=peak_dates[i + 1],
+            y0=0,
+            y1=1,
+            fillcolor=EPISODE_SHADE_FILL,
+            line_width=0,
+            layer="below",
+        )
 
 
 def _add_band(

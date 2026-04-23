@@ -236,3 +236,126 @@ def test_build_figure_empty_overlay_is_noop(realistic_inputs):
         per_source_overlay={},
     )
     assert len(fig_no.data) == len(fig_empty.data)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Palette / design tests added in the v2.2 UX overhaul
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_trendline_color_shifts_with_state(realistic_inputs):
+    """Passing a state name recolors the trendline to the matching palette token."""
+    from kilauea_tracker.ui.palette import STATE_COLOR
+
+    df, all_peaks, fit_peaks, pred = realistic_inputs
+    for state in ("calm", "starting", "imminent", "overdue", "active"):
+        fig = build_figure(df, fit_peaks, pred, all_peaks_df=all_peaks, state=state)
+        trendline_traces = [
+            t for t in fig.data if t.name and t.name.startswith("Trendline (last")
+        ]
+        assert trendline_traces, f"state {state}: trendline trace missing"
+        tr = trendline_traces[0]
+        expected = STATE_COLOR[state]
+        assert tr.line.color == expected, (
+            f"state {state}: trendline color {tr.line.color} != expected {expected}"
+        )
+
+
+def test_now_line_is_rendered(realistic_inputs):
+    """The vertical 'now' line (and its annotation) should appear when history exists."""
+    df, all_peaks, fit_peaks, pred = realistic_inputs
+    fig = build_figure(df, fit_peaks, pred, all_peaks_df=all_peaks)
+    # The now line is a line-shape on the paper yref.
+    now_shapes = [
+        s for s in (fig.layout.shapes or ())
+        if getattr(s, "type", None) == "line" and getattr(s, "yref", "") == "paper"
+    ]
+    assert now_shapes, "vertical 'now' line missing from layout shapes"
+    now_annotations = [
+        a for a in (fig.layout.annotations or ())
+        if getattr(a, "text", "") == "now"
+    ]
+    assert now_annotations, "'now' annotation missing"
+
+
+def test_last_pulse_annotation_rendered(realistic_inputs):
+    """The most-recent peak should carry a 'last pulse · <date>' annotation."""
+    df, all_peaks, fit_peaks, pred = realistic_inputs
+    fig = build_figure(df, fit_peaks, pred, all_peaks_df=all_peaks)
+    last_pulse = [
+        a for a in (fig.layout.annotations or ())
+        if "last pulse" in (getattr(a, "text", "") or "")
+    ]
+    assert last_pulse, "'last pulse' annotation missing"
+
+
+def test_predicted_next_annotation_rendered(realistic_inputs):
+    """When a prediction exists, a 'predicted next · <date>' annotation appears."""
+    df, all_peaks, fit_peaks, pred = realistic_inputs
+    if pred.next_event_date is None:
+        pytest.skip("no next_event_date in this fixture")
+    fig = build_figure(df, fit_peaks, pred, all_peaks_df=all_peaks)
+    predicted = [
+        a for a in (fig.layout.annotations or ())
+        if "predicted next" in (getattr(a, "text", "") or "")
+    ]
+    assert predicted, "'predicted next' annotation missing"
+
+
+def test_palette_colors_applied_to_core_traces(realistic_inputs):
+    """History line is ash; peaks-in-fit are lava; confidence band is flame-tinted."""
+    from kilauea_tracker.ui.palette import ASH, LAVA
+
+    df, all_peaks, fit_peaks, pred = realistic_inputs
+    fig = build_figure(df, fit_peaks, pred, all_peaks_df=all_peaks)
+    tilt_trace = next(t for t in fig.data if t.name == "Tilt")
+    assert tilt_trace.line.color == ASH
+
+    peaks_trace = next(
+        t for t in fig.data if t.name and t.name.startswith("Peaks in fit")
+    )
+    assert peaks_trace.marker.color == LAVA
+
+
+def test_episode_shading_renders_alternating_bands(realistic_inputs):
+    """With N detected peaks, every other peak→peak span is shaded.
+
+    `(N - 1) // 2` bands when the first gap is un-shaded.
+    """
+    df, all_peaks, fit_peaks, pred = realistic_inputs
+    fig = build_figure(df, fit_peaks, pred, all_peaks_df=all_peaks)
+    episode_rects = [
+        s for s in (fig.layout.shapes or ())
+        if getattr(s, "type", None) == "rect"
+        and getattr(s, "yref", "") == "paper"
+        and getattr(s, "fillcolor", "")
+        and "226, 232, 240" in str(s.fillcolor)
+    ]
+    n_peaks = len(all_peaks)
+    expected = (n_peaks - 1) // 2
+    assert len(episode_rects) == expected, (
+        f"expected {expected} episode bands for {n_peaks} peaks, got {len(episode_rects)}"
+    )
+
+
+def test_episode_shading_noop_without_peaks():
+    """No peaks → no shading rects; must not crash."""
+    from kilauea_tracker.model import predict
+
+    empty_tilt = pd.DataFrame(
+        {DATE_COL: pd.Series(dtype="datetime64[ns]"), TILT_COL: []}
+    )
+    empty_peaks = pd.DataFrame(
+        {
+            DATE_COL: pd.Series(dtype="datetime64[ns]"),
+            TILT_COL: [],
+            "prominence": [],
+        }
+    )
+    pred = predict(empty_tilt, empty_peaks)
+    fig = build_figure(empty_tilt, empty_peaks, pred, all_peaks_df=empty_peaks)
+    episode_rects = [
+        s for s in (fig.layout.shapes or ())
+        if getattr(s, "fillcolor", "") and "226, 232, 240" in str(s.fillcolor)
+    ]
+    assert episode_rects == []
