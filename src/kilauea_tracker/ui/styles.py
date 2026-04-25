@@ -265,19 +265,17 @@ html, body, [class*="css"] {{
     margin-top: 4px;
 }}
 
-/* CTA row — button-styled links in the Now tab that jump to other tabs
-   via the JS tab router (``?tab=chart`` etc). Renders as a filled lava
-   button with obsidian text — easier to read than an outlined variant
-   and high-specificity enough to beat Streamlit's default link color
-   (which would otherwise render the text blue). */
-.kt-cta-row {{
+/* In-content page-link CTAs (the Now page's "View full prediction model"
+   and "View all cameras" jumps). Streamlit's default st.page_link is a
+   small underlined-text link; we re-skin it as a centered lava pill so it
+   reads as a primary CTA against the volcano palette. The selector targets
+   stPageLink (in-content) — NOT stPageLink-NavLink (the nav-bar variant),
+   which is styled by Streamlit's header CSS. */
+[data-testid="stPageLink"] {{
     margin: var(--space-md) 0 var(--space-lg);
     text-align: center;
 }}
-a.kt-cta,
-a.kt-cta:link,
-a.kt-cta:visited,
-[data-testid="stMarkdownContainer"] a.kt-cta {{
+[data-testid="stPageLink"] a {{
     display: inline-flex;
     align-items: center;
     gap: var(--space-sm);
@@ -292,13 +290,18 @@ a.kt-cta:visited,
     text-decoration: none !important;
     transition: background 140ms ease, border-color 140ms ease;
 }}
-a.kt-cta:hover,
-a.kt-cta:focus,
-[data-testid="stMarkdownContainer"] a.kt-cta:hover,
-[data-testid="stMarkdownContainer"] a.kt-cta:focus {{
+[data-testid="stPageLink"] a:hover,
+[data-testid="stPageLink"] a:focus {{
     background: rgba(255, 107, 53, 0.18);
     border-color: var(--lava);
     color: var(--lava) !important;
+}}
+[data-testid="stPageLink"] a span,
+[data-testid="stPageLink"] a p {{
+    color: inherit;
+    font-weight: inherit;
+    font-size: inherit;
+    margin: 0;
 }}
 
 /* Compact camera strip on the Now tab. */
@@ -309,34 +312,23 @@ a.kt-cta:focus,
     margin-top: var(--space-lg);
 }}
 
-/* Primary navigation — Streamlit tabs upgraded to look like a nav bar.
-   Streamlit's default tab labels are small and the active underline is
-   narrow, so first-time visitors didn't read them as primary nav. */
-[data-testid="stTabs"] > div > div[role="tablist"] {{
-    gap: var(--space-lg);
-    border-bottom: 1px solid rgba(226, 232, 240, 0.08);
-    padding: 0 var(--space-xs);
-    margin-bottom: var(--space-lg);
-}}
-[data-testid="stTabs"] button[role="tab"] {{
-    font-size: 1.0625rem;
+/* Primary navigation — Streamlit's top-positioned st.navigation renders
+   inside the header bar as ``[data-testid="stTopNavLink"]``. The defaults
+   look fine; this block bumps the font weight and active-state contrast
+   so the current page reads clearly against the obsidian background. */
+[data-testid="stTopNavLink"] a {{
     font-weight: 600;
     letter-spacing: 0.01em;
-    padding: var(--space-md) var(--space-sm);
     color: var(--steam);
-    opacity: 0.6;
-    transition: opacity 120ms ease, color 120ms ease;
-    border-bottom: 3px solid transparent;
-    margin-bottom: -1px;  /* overlap the tablist's bottom border */
+    opacity: 0.7;
+    transition: opacity 120ms ease;
 }}
-[data-testid="stTabs"] button[role="tab"]:hover {{
-    opacity: 0.85;
-    color: var(--steam);
+[data-testid="stTopNavLink"] a:hover {{
+    opacity: 0.95;
 }}
-[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {{
+[data-testid="stTopNavLink"] a[aria-current="page"] {{
     opacity: 1;
-    color: var(--steam);
-    border-bottom-color: var(--lava);
+    color: var(--lava);
 }}
 
 /* Top bar — compact always-visible header strip above the tabs.
@@ -539,13 +531,11 @@ a.kt-cta:focus,
 @media (max-width: 1024px) {{
     .kt-cam-strip {{ grid-template-columns: repeat(2, 1fr); }}
     .kt-hero__headline {{ font-size: 4rem; }}
-    [data-testid="stTabs"] > div > div[role="tablist"] {{ gap: var(--space-md); }}
 }}
 @media (max-width: 640px) {{
     .kt-cam-strip {{ grid-template-columns: 1fr; }}
     .kt-hero {{ padding: var(--space-md); }}
     .kt-hero__headline {{ font-size: 3rem; }}
-    [data-testid="stTabs"] button[role="tab"] {{ font-size: 0.9375rem; }}
     .kt-topbar {{ flex-direction: column; align-items: stretch; }}
     [data-testid="stSpinner"] > div,
     [data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) [data-testid="stMarkdownContainer"] p {{ font-size: 1.25rem; }}
