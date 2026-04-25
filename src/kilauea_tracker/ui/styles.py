@@ -434,39 +434,105 @@ a.kt-cta:focus,
     margin-bottom: var(--space-xs);
 }}
 
-/* Loading spinner — big, centered, volcano-tinted.
-   Streamlit's default ``st.cache_data(show_spinner="…")`` renders a small
-   inline row that reads like a micro toast. Both spinners in this app fire
-   at module scope (before any content is on screen), so we let the spinner
-   own the viewport while the cache misses: large headline text, vertically
-   centered via ``min-height: 60vh``, with a lava-tinted glow on the native
-   spinner icon so it feels on-theme. */
-[data-testid="stSpinner"] {{
+/* Loading spinner / status overlay — viewport-centered, volcano-tinted.
+   Two cache-miss surfaces fire here: ``st.cache_data(show_spinner="…")``
+   for the fast tilt-history CSV read, and an ``st.status`` widget for the
+   slow ``cached_ingest`` path that walks five USGS sources and reconciles.
+   Both render at module scope before any content is on screen. Streamlit's
+   default placement honors the wide-layout column (which makes the inline
+   placeholder land middle-LEFT, not viewport-center), so we promote the
+   element to a fixed full-viewport overlay with a dim+blur backdrop. The
+   icon keeps its lava drop-shadow and gets a slow pulsing ring for a touch
+   of life without crossing into ``cute``. */
+/* The running st.status widget is rendered as an expander whose summary
+   contains an ``<i data-testid="stExpanderIconSpinner">`` Material Symbols
+   icon. That icon only exists while the status is in the "running" state —
+   Streamlit swaps it for a check / cross when the state flips to complete
+   or error. The ``:has()`` guard means our overlay only covers the viewport
+   while ingest is actually working, and stops matching the moment work
+   finishes — regular expanders elsewhere in the app are left untouched.
+   The toolbar running indicator (``stStatusWidget``) is a different element
+   and we deliberately do NOT target it here. */
+[data-testid="stSpinner"],
+[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) {{
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    min-height: 60vh;
-    padding: var(--space-xl) var(--space-lg);
     gap: var(--space-lg);
+    padding: var(--space-xl) var(--space-lg);
     text-align: center;
+    background: rgba(15, 20, 25, 0.92);
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
 }}
-[data-testid="stSpinner"] > div {{
+/* Inner <details> stretches to full width by default; force it to shrink
+   to its content so the summary lands in the true horizontal center. */
+[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) > details {{
+    width: auto;
+    max-width: 90vw;
+    border: none;
+    background: transparent;
+    box-shadow: none;
+}}
+/* The visible row: spinner icon + status label. Render as an inline flex
+   so the icon and label sit side-by-side and the whole thing is sized to
+   content (centerable by the parent overlay's flex layout). */
+[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) > details > summary {{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-md);
+    padding: var(--space-sm) var(--space-md);
+    background: transparent;
+    border: none;
+    list-style: none;
+    cursor: default;
+}}
+[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) > details > summary::-webkit-details-marker {{ display: none; }}
+[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) > details > summary::marker {{ content: ""; }}
+/* Hide the collapsed body region — when expanded=False there's nothing
+   useful in it and we don't want it adding stray whitespace below the
+   centered summary. */
+[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) [data-testid="stExpanderDetails"] {{
+    display: none !important;
+}}
+[data-testid="stSpinner"] > div,
+[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) [data-testid="stMarkdownContainer"] p {{
     font-size: 1.5rem;
     font-weight: 600;
     color: var(--steam);
     letter-spacing: 0.01em;
-    gap: var(--space-md);
+    margin: 0;
 }}
-/* Streamlit's own spinner icon — bump its size and tint the glow. */
-[data-testid="stSpinner"] svg {{
-    width: 44px !important;
-    height: 44px !important;
-    filter: drop-shadow(0 0 14px rgba(255, 107, 53, 0.55));
+@keyframes kt-spin {{
+    from {{ transform: rotate(0deg); }}
+    to   {{ transform: rotate(360deg); }}
 }}
-[data-testid="stSpinner"] i {{
+@keyframes kt-spinner-pulse {{
+    0%, 100% {{ box-shadow: 0 0 0 0 rgba(255, 107, 53, 0.55); }}
+    50%      {{ box-shadow: 0 0 0 18px rgba(255, 107, 53, 0); }}
+}}
+/* Spin + pulse compose because they target separate properties (transform
+   vs box-shadow). The bg/border/padding resets clear whatever the
+   underlying Streamlit emotion classes were drawing on the <i> — that
+   was the rectangular "bounding box" visible behind a non-spinning glyph
+   in the broken-state screenshot. */
+[data-testid="stSpinner"] svg,
+[data-testid="stSpinner"] i,
+[data-testid="stExpanderIconSpinner"] {{
+    color: var(--lava) !important;
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    border-radius: 50%;
     font-size: 2.25rem !important;
     filter: drop-shadow(0 0 14px rgba(255, 107, 53, 0.55));
+    animation: kt-spin 1s linear infinite,
+               kt-spinner-pulse 2s ease-out infinite;
 }}
 
 /* Breakpoints — explicit, not Streamlit defaults. */
@@ -481,6 +547,7 @@ a.kt-cta:focus,
     .kt-hero__headline {{ font-size: 3rem; }}
     [data-testid="stTabs"] button[role="tab"] {{ font-size: 0.9375rem; }}
     .kt-topbar {{ flex-direction: column; align-items: stretch; }}
-    [data-testid="stSpinner"] > div {{ font-size: 1.25rem; }}
+    [data-testid="stSpinner"] > div,
+    [data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) [data-testid="stMarkdownContainer"] p {{ font-size: 1.25rem; }}
 }}
 </style>"""

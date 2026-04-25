@@ -23,6 +23,7 @@ import io
 import logging
 import math
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -75,7 +76,13 @@ from kilauea_tracker.config import (
     TILT_SOURCE_NAME,
     USGS_TILT_URLS,
 )
-from kilauea_tracker.ingest.pipeline import IngestRunResult, ingest_all
+from kilauea_tracker.ingest.pipeline import (
+    IngestRunResult,
+    data_age_seconds,
+    ingest_all,
+    load_latest_run_report,
+    try_acquire_refresh_slot,
+)
 from kilauea_tracker.model import DATE_COL, TILT_COL, predict
 from kilauea_tracker.peaks import detect_peaks
 from kilauea_tracker.plotting import build_figure
@@ -111,23 +118,70 @@ st.markdown(build_style_block(), unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Cached ingest — at most once per 15 minutes regardless of widget activity
+# Ingest — non-blocking. Page renders from on-disk CSVs; a background thread
+# refreshes if data is stale; the manual Refresh button is the only path that
+# shows a spinner.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Re-poll USGS if on-disk data is older than this. Background thread fires
+# on page load when this threshold is crossed. 10 min matches USGS's typical
+# publish cadence for the rolling-window PNGs.
+STALE_THRESHOLD_SECONDS = 10 * 60
 
-@st.cache_data(ttl=INGEST_CACHE_TTL_SECONDS, show_spinner="Fetching latest USGS tilt data…")
-def cached_ingest() -> IngestRunResult:
-    """Run all USGS sources through the ingest pipeline and reconcile.
+# Don't fire the background refresh more than once per this window —
+# coordinates concurrent users via the file lock so N users → 1 fetch.
+BACKGROUND_REFRESH_COOLDOWN_SECONDS = 5 * 60
 
-    Wrapped in `st.cache_data` so the same browser session reuses results
-    until the TTL expires (15 minutes by default — USGS updates these PNGs
-    on roughly that cadence). Clearing the cache via `cached_ingest.clear()`
-    forces a fresh fetch the next time this function runs.
+# Tighter cooldown for the manual Refresh button — explicit clicks should
+# feel responsive, but spam-clicks still get gated.
+USER_REFRESH_COOLDOWN_SECONDS = 30
 
-    Returns the full `IngestRunResult` with per-source reports AND the
-    reconciliation summary (per-source y-offsets, conflicts, warnings).
+
+def _run_ingest_with_spinner() -> None:
+    """Synchronous ingest with a staged-status spinner overlay.
+
+    Used only by the manual Refresh button. The spinner walks through the
+    pipeline's natural stage boundaries via the `on_stage` callback so the
+    user sees "Fetching week…", "Reconciling sources…", "Updating archive…"
+    instead of a single static label. The placeholder is drained on
+    completion so it doesn't leave a persistent collapsed panel above the
+    rest of the page.
+
+    The returned data isn't used directly — `ingest_all()` writes fresh
+    CSVs and a new run report to disk, and the next script rerun (via
+    `st.rerun()` after this returns) picks them up via
+    `load_latest_run_report()` at module scope.
     """
-    return ingest_all()
+    placeholder = st.empty()
+    with placeholder.container():
+        with st.status("Fetching latest USGS tilt data…", expanded=False) as status:
+            ingest_all(on_stage=lambda msg: status.update(label=msg))
+            status.update(label="Up to date", state="complete")
+    placeholder.empty()
+
+
+def _maybe_kick_background_refresh() -> None:
+    """Fire a background ingest if on-disk data is stale AND no other
+    session/thread already refreshed within the cooldown window.
+
+    Silent: never blocks the page render, never raises, never touches
+    Streamlit widgets or session_state. The thread writes to disk only;
+    the chart fragment (running every 30s) picks up the new mtime and
+    re-renders automatically.
+    """
+    if data_age_seconds() < STALE_THRESHOLD_SECONDS:
+        return
+    acquired, _ = try_acquire_refresh_slot(BACKGROUND_REFRESH_COOLDOWN_SECONDS)
+    if not acquired:
+        return  # someone else is on it
+
+    def _worker() -> None:
+        try:
+            ingest_all()
+        except Exception:
+            logging.getLogger(__name__).exception("background refresh failed")
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 # Safety alert sources (USGS HANS aviation color code + NWS Hawaii
@@ -224,14 +278,23 @@ layer_csv = st.session_state["ovl_csv"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Run ingest — populates `data/tilt_history.csv`
+# Always-fresh data: page renders from on-disk CSVs immediately. A background
+# thread refreshes if the data is stale (gated by the file-lock cooldown so
+# concurrent users don't multiply USGS calls). The chart fragment polls
+# every 30s for new file mtimes so users see fresh data without clicking.
 # ─────────────────────────────────────────────────────────────────────────────
 
-ingest_result = cached_ingest()
+_maybe_kick_background_refresh()
+
+ingest_result = load_latest_run_report() or IngestRunResult()
 reports = ingest_result.per_source
 reconcile_report = ingest_result.reconcile
 if st.session_state.last_ingest_at is None:
-    st.session_state.last_ingest_at = datetime.now(tz=timezone.utc)
+    st.session_state.last_ingest_at = (
+        ingest_result.run_finished_at_utc
+        if ingest_result.run_finished_at_utc is not None
+        else datetime.now(tz=timezone.utc)
+    )
 
 # Surface ingest errors and warnings in a single collapsed "ingest pipeline
 # status" panel. Per-source ingest failures are NOT fatal — the reconcile
@@ -269,6 +332,32 @@ def _load_cached_tilt(path_str: str, mtime: float) -> pd.DataFrame:
 
 def _cache_mtime() -> float:
     return HISTORY_CSV.stat().st_mtime if HISTORY_CSV.exists() else 0.0
+
+
+@st.fragment(run_every="30s")
+def _watch_for_fresh_data() -> None:
+    """Polling fragment: every 30s, check whether the tilt history CSV has
+    been refreshed by the background ingest thread. If yes, trigger a full
+    app rerun so the chart and "last update" caption reflect the fresh data
+    without any user click.
+
+    Renders no visible output — fragments are normally tied to a UI region,
+    but here we use it purely for its `run_every` ticker. The mtime
+    comparison + early-return ensures we only call `st.rerun(scope="app")`
+    when the file actually changed, so we're not thrashing the whole page
+    on every 30s tick.
+    """
+    current = _cache_mtime()
+    last_seen = st.session_state.get("_last_data_mtime")
+    if last_seen is None:
+        st.session_state["_last_data_mtime"] = current
+        return
+    if current > last_seen:
+        st.session_state["_last_data_mtime"] = current
+        st.rerun(scope="app")
+
+
+_watch_for_fresh_data()
 
 
 tilt_df = _load_cached_tilt(str(HISTORY_CSV), _cache_mtime())
@@ -526,10 +615,14 @@ with _tb_refresh:
         width="stretch",
         help="Re-fetch and re-trace all USGS tilt PNGs + safety alerts.",
     ):
-        cached_ingest.clear()
-        cached_safety_alerts.clear()
-        st.session_state.last_ingest_at = None
-        st.rerun()
+        _acquired, _retry_in = try_acquire_refresh_slot(USER_REFRESH_COOLDOWN_SECONDS)
+        if _acquired:
+            _run_ingest_with_spinner()
+            cached_safety_alerts.clear()
+            st.session_state.last_ingest_at = None
+            st.rerun()
+        else:
+            st.toast(f"Just refreshed — try again in {int(_retry_in)}s")
 with _tb_tz:
     st.selectbox(
         "Time zone",

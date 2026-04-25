@@ -31,12 +31,16 @@ Usage from the Streamlit app:
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
+import math
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import cv2
 import numpy as np
@@ -266,6 +270,7 @@ def ingest_all(
     *,
     sources_dir: Optional[Path] = None,
     archive_path: Path = ARCHIVE_CSV,
+    on_stage: Optional[Callable[[str], None]] = None,
 ) -> IngestRunResult:
     """Run the per-source ingest for every USGS source, reconcile all raw
     sources into the merged tilt history, then promote any new rows into
@@ -289,11 +294,18 @@ def ingest_all(
     result = IngestRunResult(history_path=history_path, archive_path=archive_path)
     result.run_started_at_utc = datetime.now(tz=timezone.utc)
 
+    def _emit(msg: str) -> None:
+        if on_stage is not None:
+            on_stage(msg)
+
     # 1. Per-source ingest. Order doesn't matter for correctness anymore —
     #    each ingest writes to its own file. Iterate ALL_SOURCES purely for
     #    a deterministic report ordering.
     for s in ALL_SOURCES:
+        _emit(f"Fetching {TILT_SOURCE_NAME[s]}…")
         result.per_source.append(ingest(s, sources_dir=sources_dir))
+
+    _emit("Loading source files…")
 
     # 2. Read every per-source CSV that exists into the reconcile inputs.
     #    Sources whose ingest just failed will still have their previously-
@@ -337,6 +349,7 @@ def ingest_all(
     #     correction layer that can be tuned without touching the raw data.
     digital_df = sources_for_reconcile.get(DIGITAL_SOURCE_NAME)
     if digital_df is not None and len(digital_df) > 0:
+        _emit("Calibrating against digital reference…")
         for source_name in list(sources_for_reconcile.keys()):
             if source_name in (DIGITAL_SOURCE_NAME, ARCHIVE_SOURCE_NAME):
                 continue
@@ -355,12 +368,16 @@ def ingest_all(
                 if matched is not None:
                     matched.warnings.append(fit.warning)
 
+    _emit("Reconciling sources…")
+
     # 5. Reconcile and write the merged history.
     merged, reconcile_report = reconcile_sources(sources_for_reconcile)
     result.reconcile = reconcile_report
 
     history_path.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(history_path, index=False)
+
+    _emit("Updating archive…")
 
     # 6. Promote any new merged rows into the archive (keep-first dedupe
     #    + quorum gate). We pass the reconcile inputs through so
@@ -839,6 +856,251 @@ def _dt_str(value) -> Optional[str]:
             return value.strftime("%Y-%m-%dT%H:%M:%S")
         return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return str(value)
+
+
+def load_latest_run_report() -> Optional[IngestRunResult]:
+    """Read the newest `data/run_reports/*.json` and reconstruct the
+    `IngestRunResult` it describes.
+
+    Used by the Streamlit app at module scope to keep Pipeline-tab
+    diagnostics populated without firing a fresh ingest on every page load.
+
+    Best-effort: returns None on missing directory, no JSON files, or any
+    parse error — the caller is expected to fall back to an empty
+    `IngestRunResult()`. Lossy fields in the JSON (e.g., transcription
+    failures are truncated to top 20 in the on-disk shape) round-trip with
+    that same truncation; the diagnostics surfaces only show the top-20
+    anyway, so this is fine.
+    """
+    if not RUN_REPORTS_DIR.exists():
+        return None
+    files = sorted(RUN_REPORTS_DIR.glob("*.json"))
+    if not files:
+        return None
+    latest = files[-1]
+    try:
+        payload = json.loads(latest.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    return _deserialize_run_report(payload)
+
+
+def data_age_seconds() -> float:
+    """Age in seconds of the freshest on-disk USGS source.
+
+    Reads the per-source `Last-Modified` headers persisted to
+    `data/last_modified.json` by `_save_cached_last_modified`. Returns the
+    age of the newest of those headers (the most recently-published source
+    on USGS's side, not the most-recently-fetched). Returns `math.inf` if
+    the file is missing, unparseable, or empty — the caller treats that as
+    "stale, please refresh."
+    """
+    if not LAST_MODIFIED_FILE.exists():
+        return math.inf
+    try:
+        data = json.loads(LAST_MODIFIED_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return math.inf
+    newest: Optional[datetime] = None
+    for value in (data or {}).values():
+        if not value:
+            continue
+        try:
+            ts = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if newest is None or ts > newest:
+            newest = ts
+    if newest is None:
+        return math.inf
+    return (datetime.now(tz=timezone.utc) - newest).total_seconds()
+
+
+REFRESH_TIMESTAMP_FILE = LAST_GOOD_CALIBRATION.parent / "last_refresh.json"
+
+
+def try_acquire_refresh_slot(cooldown_seconds: int) -> tuple[bool, float]:
+    """File-coordinated cooldown for ingest runs.
+
+    Returns `(acquired, seconds_until_next_allowed)`. If `acquired` is True,
+    the caller may proceed with a real ingest and the timestamp file has
+    been updated to reflect this run. If False, a recent refresh already
+    covered the window — the caller should skip the fetch and reuse the
+    on-disk data.
+
+    Coordinates across all sessions in one Streamlit Cloud container via an
+    `fcntl.flock` exclusive lock on `data/last_refresh.json`. Linux/macOS
+    only — Streamlit Cloud is Linux. Windows portability would require a
+    swap to `portalocker`.
+    """
+    REFRESH_TIMESTAMP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    REFRESH_TIMESTAMP_FILE.touch(exist_ok=True)
+    with open(REFRESH_TIMESTAMP_FILE, "r+") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            raw = fh.read().strip()
+            try:
+                last_at = float(json.loads(raw).get("last_refresh_utc", 0)) if raw else 0.0
+            except (json.JSONDecodeError, ValueError, TypeError):
+                last_at = 0.0
+            now = time.time()
+            elapsed = now - last_at
+            if elapsed < cooldown_seconds:
+                return False, cooldown_seconds - elapsed
+            fh.seek(0)
+            fh.truncate()
+            json.dump({"last_refresh_utc": now}, fh)
+            return True, 0.0
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _deserialize_run_report(payload: dict) -> IngestRunResult:
+    """Inverse of `_write_run_report` — best-effort reconstruction."""
+    result = IngestRunResult()
+    result.run_started_at_utc = _parse_dt(payload.get("run_started_at_utc"))
+    result.run_finished_at_utc = _parse_dt(payload.get("run_finished_at_utc"))
+    result.per_source = [
+        _deserialize_source_report(p) for p in payload.get("per_source") or []
+    ]
+    if payload.get("reconcile"):
+        result.reconcile = _deserialize_reconcile(payload["reconcile"])
+    if payload.get("archive"):
+        a = payload["archive"]
+        result.archive = ArchivePromotionReport(
+            rows_in_archive_before=int(a.get("rows_in_archive_before") or 0),
+            rows_in_archive_after=int(a.get("rows_in_archive_after") or 0),
+            rows_promoted=int(a.get("rows_promoted") or 0),
+            rows_already_archived=int(a.get("rows_already_archived") or 0),
+            rows_deferred_by_quorum=int(a.get("rows_deferred_by_quorum") or 0),
+            warnings=list(a.get("warnings") or []),
+        )
+    for f in payload.get("anchor_fits") or []:
+        result.anchor_fits.append(
+            AnchorFitResult(
+                source_name=f.get("source_name") or "",
+                ran=bool(f.get("ran")),
+                overlap_buckets=int(f.get("overlap_buckets") or 0),
+                a=float(f.get("a") or 1.0),
+                b=float(f.get("b") or 0.0),
+                residual_std_microrad=float(f.get("residual_std_microrad") or 0.0),
+                warning=f.get("warning"),
+                note=f.get("note") or "",
+            )
+        )
+    return result
+
+
+def _deserialize_source_report(p: dict) -> IngestReport:
+    r = IngestReport(source=None, source_name=p.get("source_name") or "")
+    r.fetched = bool(p.get("fetched"))
+    r.rows_raw = int(p.get("rows_raw") or 0)
+    r.rows_outlier_dropped = int(p.get("rows_outlier_dropped") or 0)
+    r.rows_traced = int(p.get("rows_traced") or 0)
+    r.rows_appended = int(p.get("rows_appended") or 0)
+    r.frame_offset_microrad = float(p.get("frame_offset_microrad") or 0.0)
+    r.frame_overlap_buckets = int(p.get("frame_overlap_buckets") or 0)
+    r.last_modified = p.get("last_modified")
+    r.title_psm_used = p.get("title_psm_used")
+    r.title_raw_text = p.get("title_raw_text")
+    r.warnings = list(p.get("warnings") or [])
+    r.error = p.get("error")
+    return r
+
+
+def _deserialize_reconcile(p: dict) -> ReconcileReport:
+    from ..reconcile import (
+        ContinuityViolation,
+        PairwiseFit,
+        ReconcileConflict,
+        SourceAlignment,
+        TranscriptionFailure,
+    )
+    rep = ReconcileReport()
+    rep.rows_out = int(p.get("rows_out") or 0)
+    rep.warnings = list(p.get("warnings") or [])
+    rep.winner_counts = dict(p.get("winner_counts") or {})
+    for s in p.get("sources") or []:
+        rep.sources.append(
+            SourceAlignment(
+                name=s.get("name") or "",
+                rows_in=int(s.get("rows_in") or 0),
+                a=float(s.get("a") or 1.0),
+                b=float(s.get("b") or 0.0),
+                pairs_used=int(s.get("pairs_used") or 0),
+                is_anchor=bool(s.get("is_anchor")),
+                note=s.get("note"),
+                rows_mad_rejected=int(s.get("rows_mad_rejected") or 0),
+                effective_resolution_microrad_per_pixel=float(
+                    s.get("effective_resolution_microrad_per_pixel") or 0.0
+                ),
+                offset_microrad=s.get("offset_microrad"),
+                overlap_buckets=int(s.get("overlap_buckets") or 0),
+                rows_proximity_dropped=int(s.get("rows_proximity_dropped") or 0),
+                piecewise_residuals=dict(s.get("piecewise_residuals") or {}),
+            )
+        )
+    for f in p.get("pairs") or []:
+        rep.pairs.append(
+            PairwiseFit(
+                source_i=f.get("source_i") or "",
+                source_j=f.get("source_j") or "",
+                alpha=float(f.get("alpha") or 1.0),
+                beta=float(f.get("beta") or 0.0),
+                overlap_buckets=int(f.get("overlap_buckets") or 0),
+                residual_std_microrad=float(f.get("residual_std_microrad") or 0.0),
+            )
+        )
+    for tf in p.get("transcription_failures_top") or []:
+        bucket = _parse_dt(tf.get("bucket_utc"))
+        rep.transcription_failures.append(
+            TranscriptionFailure(
+                bucket=pd.Timestamp(bucket) if bucket else pd.Timestamp(0),
+                source=tf.get("source") or "",
+                value_corrected=float(tf.get("value_corrected") or 0.0),
+                bucket_median=float(tf.get("bucket_median") or 0.0),
+                delta_microrad=float(tf.get("delta_microrad") or 0.0),
+            )
+        )
+    for cv in p.get("continuity_violations") or []:
+        rep.continuity_violations.append(
+            ContinuityViolation(
+                bucket_before=pd.Timestamp(_parse_dt(cv.get("bucket_before")) or 0),
+                bucket_after=pd.Timestamp(_parse_dt(cv.get("bucket_after")) or 0),
+                tilt_before=float(cv.get("tilt_before") or 0.0),
+                tilt_after=float(cv.get("tilt_after") or 0.0),
+                delta_microrad=float(cv.get("delta_microrad") or 0.0),
+            )
+        )
+    for c in p.get("conflicts_top") or []:
+        rep.conflicts.append(
+            ReconcileConflict(
+                bucket=pd.Timestamp(_parse_dt(c.get("bucket_utc")) or 0),
+                winning_source=c.get("winning_source") or "",
+                losing_source=c.get("losing_source") or "",
+                winning_tilt=float(c.get("winning_tilt") or 0.0),
+                losing_tilt=float(c.get("losing_tilt") or 0.0),
+                delta=float(c.get("delta") or 0.0),
+            )
+        )
+    return rep
+
+
+def _parse_dt(value) -> Optional[datetime]:
+    """Inverse of `_dt_str` — tolerant of trailing 'Z' and missing tz."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    s = str(value)
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
 
 
 def _prune_old_run_reports(
