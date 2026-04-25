@@ -8,13 +8,17 @@ shell around them).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
-from typing import Optional
 
 import pandas as pd
 
-from ..model import DATE_COL, TILT_COL
+from ..model import DATE_COL
+
+# Callback signature shared by the simple/debug/ZIP CSV builders. Each takes
+# (start, end, include_sources) and returns (filename, bytes).
+CsvBuilder = Callable[[date, date, list[str]], tuple[str, bytes]]
 
 
 @dataclass
@@ -71,12 +75,12 @@ def _sources_checkbox_grid(available_sources: list[str]) -> list[str]:
 def show(
     *,
     tilt_df: pd.DataFrame,
-    all_peaks_df: Optional[pd.DataFrame],
+    all_peaks_df: pd.DataFrame | None,
     available_sources: list[str],
-    simple_csv_builder,
-    debug_csv_builder,
-    zip_builder,
-    reconciliation_renderer: Optional[callable] = None,
+    simple_csv_builder: CsvBuilder,
+    debug_csv_builder: CsvBuilder,
+    zip_builder: CsvBuilder,
+    reconciliation_renderer: Callable[[], None] | None = None,
 ) -> None:
     """Render the Data tab.
 

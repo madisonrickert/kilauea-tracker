@@ -10,13 +10,11 @@ The Streamlit layer is responsible for embedding it via `st.plotly_chart`.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-from .model import DATE_COL, TILT_COL, CurveBand, Prediction, from_days, to_days
+from .model import DATE_COL, TILT_COL, Curve, CurveBand, Prediction, from_days, to_days
 from .ui.palette import (
     FLAME,
     HALO,
@@ -67,12 +65,12 @@ def build_figure(
     fit_peaks_df: pd.DataFrame,
     prediction: Prediction,
     *,
-    all_peaks_df: Optional[pd.DataFrame] = None,
+    all_peaks_df: pd.DataFrame | None = None,
     title: str = "",
     show_current_episode: bool = True,
     show_next_event_prediction: bool = True,
-    per_source_overlay: Optional[dict[str, pd.DataFrame]] = None,
-    state: Optional[str] = None,
+    per_source_overlay: dict[str, pd.DataFrame] | None = None,
+    state: str | None = None,
 ) -> go.Figure:
     """Render the full prediction chart.
 
@@ -135,7 +133,7 @@ def build_figure(
                     y=src_df[TILT_COL],
                     mode="lines",
                     name=f"source: {name}",
-                    line=dict(color=color, width=1.0, dash="dot"),
+                    line={"color": color, "width": 1.0, "dash": "dot"},
                     visible="legendonly",  # opt-in via legend click; off by default
                     hovertemplate=(
                         f"<b>{name}</b><br>"
@@ -154,8 +152,8 @@ def build_figure(
                 y=tilt_df[TILT_COL],
                 mode="lines+markers",
                 name="Tilt",
-                line=dict(color=TILT_LINE_COLOR, width=1.5),
-                marker=dict(size=3),
+                line={"color": TILT_LINE_COLOR, "width": 1.5},
+                marker={"size": 3},
                 hovertemplate=(
                     "%{x|%Y-%m-%d %H:%M}<br>"
                     "<b>%{y:.2f}</b> µrad"
@@ -177,12 +175,12 @@ def build_figure(
                     y=excluded[TILT_COL],
                     mode="markers",
                     name="Excluded peaks",
-                    marker=dict(
-                        symbol="x",
-                        color=PEAK_OUT_COLOR,
-                        size=10,
-                        line=dict(width=1.5, color=PEAK_OUT_COLOR),
-                    ),
+                    marker={
+                        "symbol": "x",
+                        "color": PEAK_OUT_COLOR,
+                        "size": 10,
+                        "line": {"width": 1.5, "color": PEAK_OUT_COLOR},
+                    },
                     hovertemplate=(
                         "Peak (excluded from fit): %{x|%Y-%m-%d %H:%M}<br>"
                         "<b>%{y:.2f}</b> µrad"
@@ -198,12 +196,12 @@ def build_figure(
                 y=fit_peaks_df[TILT_COL],
                 mode="markers",
                 name=f"Peaks in fit ({len(fit_peaks_df)})",
-                marker=dict(
-                    symbol="x",
-                    color=PEAK_FIT_COLOR,
-                    size=14,
-                    line=dict(width=2, color=PEAK_FIT_COLOR),
-                ),
+                marker={
+                    "symbol": "x",
+                    "color": PEAK_FIT_COLOR,
+                    "size": 14,
+                    "line": {"width": 2, "color": PEAK_FIT_COLOR},
+                },
                 hovertemplate=(
                     "Peak: %{x|%Y-%m-%d %H:%M}<br>"
                     "<b>%{y:.2f}</b> µrad"
@@ -270,7 +268,7 @@ def build_figure(
         for x_edge in (lo, hi):
             fig.add_vline(
                 x=x_edge,
-                line=dict(color=CONFIDENCE_BAND_LINE, width=1, dash="dot"),
+                line={"color": CONFIDENCE_BAND_LINE, "width": 1, "dash": "dot"},
                 layer="below",
             )
         # Phantom trace so the band shows up in the legend with a width label.
@@ -281,7 +279,7 @@ def build_figure(
                 y=[None, None],
                 mode="lines",
                 name=f"80% confidence ({band_width_days:.0f} days)",
-                line=dict(color=CONFIDENCE_BAND_LINE, width=8),
+                line={"color": CONFIDENCE_BAND_LINE, "width": 8},
                 showlegend=True,
                 hoverinfo="skip",
             )
@@ -299,12 +297,12 @@ def build_figure(
                 y=[prediction.next_event_tilt],
                 mode="markers",
                 name="Next fountain event",
-                marker=dict(
-                    symbol="star",
-                    color=NEXT_EVENT_COLOR,
-                    size=22,
-                    line=dict(width=2, color="black"),
-                ),
+                marker={
+                    "symbol": "star",
+                    "color": NEXT_EVENT_COLOR,
+                    "size": 22,
+                    "line": {"width": 2, "color": "black"},
+                },
                 hovertemplate=(
                     f"<b>Next fountain event</b><br>"
                     f"{prediction.next_event_date.strftime('%Y-%m-%d %H:%M')}<br>"
@@ -328,7 +326,7 @@ def build_figure(
             x1=now,
             y0=0,
             y1=1,
-            line=dict(color=NOW_LINE_COLOR, width=1.2, dash="dot"),
+            line={"color": NOW_LINE_COLOR, "width": 1.2, "dash": "dot"},
             layer="below",
         )
         fig.add_annotation(
@@ -339,7 +337,7 @@ def build_figure(
             text="now",
             showarrow=False,
             yanchor="bottom",
-            font=dict(color=STEAM, size=10),
+            font={"color": STEAM, "size": 10},
         )
 
     # ── 7b. annotate the most recent peak and the predicted intersection ────
@@ -355,7 +353,7 @@ def build_figure(
             arrowcolor=LAVA,
             ax=0,
             ay=-28,
-            font=dict(color=STEAM, size=11),
+            font={"color": STEAM, "size": 11},
             bgcolor="rgba(30, 37, 55, 0.85)",  # basalt-ish
             bordercolor=LAVA,
             borderwidth=1,
@@ -379,7 +377,7 @@ def build_figure(
             arrowcolor=NEXT_EVENT_COLOR,
             ax=0,
             ay=-36,
-            font=dict(color=STEAM, size=11),
+            font={"color": STEAM, "size": 11},
             bgcolor="rgba(30, 37, 55, 0.85)",
             bordercolor=NEXT_EVENT_COLOR,
             borderwidth=1,
@@ -389,34 +387,34 @@ def build_figure(
     # ── 7c. default zoom: recent history + projection horizon ───────────────
     x_range = _default_x_range(tilt_df, fit_peaks_df, prediction)
 
-    layout_kwargs = dict(
-        xaxis_title="Date",
-        yaxis_title="Electronic tilt — UWD station, azimuth 300° (µrad)",
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        hovermode="closest",
+    layout_kwargs = {
+        "xaxis_title": "Date",
+        "yaxis_title": "Electronic tilt — UWD station, azimuth 300° (µrad)",
+        "template": "plotly_dark",
+        "paper_bgcolor": "rgba(0,0,0,0)",
+        "plot_bgcolor": "rgba(0,0,0,0)",
+        "hovermode": "closest",
         # Legend lives BELOW the plot (not floating over the data). When it
         # sat top-right inside the plot it covered the rising tail of the
         # history line — exactly the region the user is trying to read.
-        legend=dict(
-            orientation="h",
-            yanchor="top",
-            y=-0.18,
-            xanchor="left",
-            x=0,
-            bgcolor="rgba(0, 0, 0, 0)",
-            font=dict(size=11),
-        ),
-        margin=dict(l=60, r=30, t=40, b=120),
-        xaxis=dict(
-            gridcolor=GRID_COLOR,
-            showgrid=True,
-            tickformat="%b %-d",
-            minor=dict(showgrid=True, gridcolor=GRID_COLOR),
-        ),
-        yaxis=dict(gridcolor=GRID_COLOR),
-    )
+        "legend": {
+            "orientation": "h",
+            "yanchor": "top",
+            "y": -0.18,
+            "xanchor": "left",
+            "x": 0,
+            "bgcolor": "rgba(0, 0, 0, 0)",
+            "font": {"size": 11},
+        },
+        "margin": {"l": 60, "r": 30, "t": 40, "b": 120},
+        "xaxis": {
+            "gridcolor": GRID_COLOR,
+            "showgrid": True,
+            "tickformat": "%b %-d",
+            "minor": {"showgrid": True, "gridcolor": GRID_COLOR},
+        },
+        "yaxis": {"gridcolor": GRID_COLOR},
+    }
     if x_range is not None:
         # Preserve the dtick/minor/gridcolor config when we attach the range.
         layout_kwargs["xaxis"] = {**layout_kwargs["xaxis"], "range": x_range}
@@ -435,7 +433,7 @@ def _default_x_range(
     tilt_df: pd.DataFrame,
     fit_peaks_df: pd.DataFrame,
     prediction: Prediction,
-) -> Optional[list]:
+) -> list | None:
     """Pick a sensible default zoom: enough recent history to show every peak
     that's currently feeding the trendline, plus the projected event window.
 
@@ -469,7 +467,7 @@ def _default_x_range(
 
 def _resolve_extent_end_day(
     tilt_df: pd.DataFrame, prediction: Prediction
-) -> Optional[float]:
+) -> float | None:
     """Choose how far forward in time the trendline curves should extend."""
     candidates: list[float] = []
     if len(tilt_df) > 0:
@@ -487,7 +485,7 @@ EPISODE_SHADE_FILL = "rgba(226, 232, 240, 0.035)"  # steam @ 3.5% — very subtl
 
 
 def _add_episode_shading(
-    fig: go.Figure, all_peaks_df: Optional[pd.DataFrame]
+    fig: go.Figure, all_peaks_df: pd.DataFrame | None
 ) -> None:
     """Shade every-other span between consecutive detected peaks.
 
@@ -532,7 +530,7 @@ def _add_band(
             y=list(band.hi) + list(band.lo)[::-1],
             fill="toself",
             fillcolor=fillcolor,
-            line=dict(width=0),
+            line={"width": 0},
             name=name,
             hoverinfo="skip",
             showlegend=True,
@@ -543,8 +541,8 @@ def _add_band(
 def _add_curve(
     fig: go.Figure,
     *,
-    curve,
-    extent_end_day: Optional[float],
+    curve: Curve,
+    extent_end_day: float | None,
     name: str,
     color: str,
     dash: str,
@@ -564,7 +562,7 @@ def _add_curve(
             y=values,
             mode="lines",
             name=name,
-            line=dict(color=color, dash=dash, width=width),
+            line={"color": color, "dash": dash, "width": width},
             hovertemplate=(
                 f"<b>{name}</b><br>"
                 "%{x|%Y-%m-%d %H:%M}<br>"

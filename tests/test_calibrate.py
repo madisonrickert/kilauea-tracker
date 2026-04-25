@@ -79,7 +79,7 @@ def test_ocr_y_axis_labels_recovers_at_least_three_ticks(fixture_img):
 
     # Pixel positions should be monotonic with the OCR'd values:
     # higher pixel_y == lower numeric value (matplotlib y-axis is inverted).
-    sorted_by_pixel = sorted(zip(pixels, values))
+    sorted_by_pixel = sorted(zip(pixels, values, strict=False))
     sorted_pixels = [p for p, _ in sorted_by_pixel]
     sorted_values = [v for _, v in sorted_by_pixel]
     # Values must be strictly decreasing as pixel_y increases.
@@ -233,7 +233,7 @@ def test_try_parse_title_at_psm_returns_error_on_invalid_day():
     # can build a fake OCR-output image of pure white and verify the
     # helper returns (None, raw_text, error_str) instead of raising.
     fake_strip = np.full((50, 400, 3), 255, dtype=np.uint8)
-    result, text, err = _try_parse_title_at_psm(fake_strip, "--psm 7")
+    result, _text, err = _try_parse_title_at_psm(fake_strip, "--psm 7")
     assert result is None
     assert err  # non-empty error message
     # Pure white → either no regex match or unparseable; both are

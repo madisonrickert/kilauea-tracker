@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import re
 
-import pytest
-
 from kilauea_tracker.ui.cameras import STRIP_NAMES, WEBCAMS, strip_cameras
 
 

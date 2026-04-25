@@ -24,7 +24,7 @@ import logging
 import math
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Emit pipeline warnings/errors to stderr so Streamlit Cloud's log viewer
@@ -76,14 +76,16 @@ from kilauea_tracker.config import (
     TILT_SOURCE_NAME,
     USGS_TILT_URLS,
 )
+from kilauea_tracker.ingest.calibrate import AxisCalibration
 from kilauea_tracker.ingest.pipeline import (
+    IngestReport,
     IngestRunResult,
     data_age_seconds,
     ingest_all,
     load_latest_run_report,
     try_acquire_refresh_slot,
 )
-from kilauea_tracker.model import DATE_COL, TILT_COL, predict
+from kilauea_tracker.model import DATE_COL, TILT_COL, Prediction, predict
 from kilauea_tracker.peaks import detect_peaks
 from kilauea_tracker.plotting import build_figure
 from kilauea_tracker.ui import (
@@ -153,10 +155,12 @@ def _run_ingest_with_spinner() -> None:
     `load_latest_run_report()` at module scope.
     """
     placeholder = st.empty()
-    with placeholder.container():
-        with st.status("Fetching latest USGS tilt data…", expanded=False) as status:
-            ingest_all(on_stage=lambda msg: status.update(label=msg))
-            status.update(label="Up to date", state="complete")
+    with (
+        placeholder.container(),
+        st.status("Fetching latest USGS tilt data…", expanded=False) as status,
+    ):
+        ingest_all(on_stage=lambda msg: status.update(label=msg))
+        status.update(label="Up to date", state="complete")
     placeholder.empty()
 
 
@@ -189,8 +193,10 @@ def _maybe_kick_background_refresh() -> None:
 # ingest pipeline and have their own cache TTL. 15 minutes matches the
 # tilt cache so a single Refresh-button click busts both caches via
 # `cached_safety_alerts.clear()` below.
-from kilauea_tracker.safety_alerts import (  # noqa: E402
+from kilauea_tracker.safety_alerts import (
+    NWSAlert,
     SafetyAlertSummary,
+    USGSVolcanoStatus,
     fetch_safety_alerts,
 )
 
@@ -293,7 +299,7 @@ if st.session_state.last_ingest_at is None:
     st.session_state.last_ingest_at = (
         ingest_result.run_finished_at_utc
         if ingest_result.run_finished_at_utc is not None
-        else datetime.now(tz=timezone.utc)
+        else datetime.now(tz=UTC)
     )
 
 # Surface ingest errors and warnings in a single collapsed "ingest pipeline
@@ -460,7 +466,7 @@ def _drop_from_recent_max(df: pd.DataFrame, lookback_hours: float) -> float | No
 
 def _eruption_state(
     tilt_df: pd.DataFrame,
-    prediction,
+    prediction: Prediction | None,
 ) -> tuple[str, dict]:
     """Classify the current point in the eruption lifecycle.
 
@@ -585,7 +591,7 @@ def _fmt_short(ts: pd.Timestamp | None) -> str:
 
 
 def _ago(ts: datetime) -> str:
-    delta = datetime.now(tz=timezone.utc) - ts
+    delta = datetime.now(tz=UTC) - ts
     seconds = int(delta.total_seconds())
     if seconds < 60:
         return f"{seconds}s ago"
@@ -794,7 +800,7 @@ with tab_now:
     safety = cached_safety_alerts()
 
 
-    def _render_usgs_color_badge(status) -> None:
+    def _render_usgs_color_badge(status: USGSVolcanoStatus) -> None:
         """Render the USGS aviation color code as a colored markdown badge."""
         color_map = {
             "GREEN": "#1e8e3e",
@@ -830,7 +836,7 @@ with tab_now:
         )
 
 
-    def _render_nws_alert(alert) -> None:
+    def _render_nws_alert(alert: NWSAlert) -> None:
         """Render one filtered NWS alert as a compact info card."""
         severity_icon = {
             "Extreme": "🛑",
@@ -1005,7 +1011,7 @@ with tab_chart:
         Best-effort: a missing CSV or malformed row report returns an
         empty dict so overlay mode silently falls back to no overlay.
         """
-        from kilauea_tracker.config import source_csv_path, ALL_SOURCES, TILT_SOURCE_NAME
+        from kilauea_tracker.config import ALL_SOURCES, TILT_SOURCE_NAME, source_csv_path
 
         if reconcile_report is None:
             return {}
@@ -1067,10 +1073,11 @@ with tab_chart:
         and isinstance(chart_selection, dict)
         and chart_selection.get("selection", {}).get("box")
     )
-    if _has_chart_selection:
-        if st.button("✕ Clear chart selection", key="clear_chart_selection"):
-            st.session_state.pop("main_chart", None)
-            st.rerun()
+    if _has_chart_selection and st.button(
+        "✕ Clear chart selection", key="clear_chart_selection"
+    ):
+        st.session_state.pop("main_chart", None)
+        st.rerun()
 
     # Hover-to-clipboard: press ⌘C / Ctrl+C while hovering a datapoint on the
     # chart to copy "YYYY-MM-DD HH:MM | X.XX µrad" to the clipboard. Uses
@@ -1250,7 +1257,7 @@ with tab_chart:
                 corrected_map = (
                     _load_per_source_corrected_for_overlay() if inc_corrected else {}
                 )
-                from kilauea_tracker.config import source_csv_path, ALL_SOURCES, TILT_SOURCE_NAME
+                from kilauea_tracker.config import ALL_SOURCES, TILT_SOURCE_NAME, source_csv_path
                 for s in ALL_SOURCES:
                     name = TILT_SOURCE_NAME[s]
                     if inc_corrected and name in corrected_map:
@@ -1289,7 +1296,9 @@ with tab_chart:
             with col_debug:
                 # Debug bundle: simple CSV + pair fits + alignments + full run
                 # report JSON, zipped in-memory.
-                import io, zipfile, json as _json_dbg
+                import io
+                import json as _json_dbg
+                import zipfile
 
                 def _build_debug_zip() -> bytes:
                     buf = io.BytesIO()
@@ -1797,8 +1806,8 @@ with tab_pipeline:
 
         def _build_overlay_png(
             raw_bytes: bytes,
-            calibration,
-            report,
+            calibration: AxisCalibration | None,
+            report: IngestReport | None,
             layers: dict,
             display_tz: str = "UTC",
         ) -> tuple[bytes | None, dict]:
@@ -1816,13 +1825,16 @@ with tab_pipeline:
             try:
                 import cv2
                 import numpy as np
-                from kilauea_tracker.ingest.trace import (
-                    BLUE_HUE_MIN, BLUE_HUE_MAX,
-                    SATURATION_FLOOR, VALUE_FLOOR,
-                    LEGEND_EXCLUSION_PLOT_RELATIVE,
-                )
-                from kilauea_tracker.ingest.trace import trace_curve
+
                 from kilauea_tracker.config import CURVE_MAX_COLUMN_WIDTH_PIXELS
+                from kilauea_tracker.ingest.trace import (
+                    BLUE_HUE_MAX,
+                    BLUE_HUE_MIN,
+                    LEGEND_EXCLUSION_PLOT_RELATIVE,
+                    SATURATION_FLOOR,
+                    VALUE_FLOOR,
+                    trace_curve,
+                )
             except ImportError:
                 return None, {}
 
@@ -1839,13 +1851,13 @@ with tab_pipeline:
             span_seconds = (calibration.x_end - calibration.x_start).total_seconds()
             px_span = max(1.0, float(x1 - x0))
 
-            def date_to_px(ts) -> float:
+            def date_to_px(ts: pd.Timestamp) -> float:
                 return x0 + (ts - calibration.x_start).total_seconds() * px_span / span_seconds
 
-            def val_to_py(val) -> float:
+            def val_to_py(val: float) -> float:
                 return (val - calibration.y_intercept) / calibration.y_slope
 
-            def fmt_dt_tz(ts) -> str:
+            def fmt_dt_tz(ts: pd.Timestamp) -> str:
                 """Format a naive-UTC timestamp in the user's display timezone."""
                 try:
                     return (
@@ -1866,7 +1878,7 @@ with tab_pipeline:
                     traced = None
 
             img = Image.open(io.BytesIO(raw_bytes)).convert("RGBA")
-            W, H = img.size
+            _W, _H = img.size
             overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
             draw = ImageDraw.Draw(overlay)
             try:
@@ -1899,14 +1911,14 @@ with tab_pipeline:
             if layers.get("blue") and blue_mask is not None:
                 ys, xs = np.where(blue_mask)
                 stats["blue_px"] = int(ys.size)
-                for py, px in zip(ys, xs):
+                for py, px in zip(ys, xs, strict=False):
                     overlay.putpixel((int(px + x0), int(py + y0)), (0, 200, 255, 140))
 
             # ── Green-mask highlight (magenta for high contrast vs green) ─
             if layers.get("green") and green_mask is not None:
                 ys, xs = np.where(green_mask)
                 stats["green_px"] = int(ys.size)
-                for py, px in zip(ys, xs):
+                for py, px in zip(ys, xs, strict=False):
                     overlay.putpixel((int(px + x0), int(py + y0)), (255, 20, 220, 180))
 
             # ── Legend-exclusion rectangle ────────────────────────────────
@@ -1961,7 +1973,7 @@ with tab_pipeline:
                 # printed ticks exactly.
                 start = np.ceil(lo / step) * step
                 end = np.floor(hi / step) * step
-                n_lines = int(round((end - start) / step)) + 1
+                n_lines = round((end - start) / step) + 1
                 grid_values = [start + i * step for i in range(max(0, n_lines))]
 
                 for val in grid_values:
@@ -1979,7 +1991,7 @@ with tab_pipeline:
                         # steps as "+N.N"/"-N.N" so two_day's "0.5" doesn't
                         # render as "+0".
                         if abs(step - round(step)) < 1e-6:
-                            label = f"{int(round(val)):+d}"
+                            label = f"{round(val):+d}"
                         else:
                             label = f"{val:+.1f}"
                         lw = (
@@ -2019,8 +2031,8 @@ with tab_pipeline:
             # so you can tell whether the window's right edge = now or
             # whether x_end has drifted significantly from wall-clock.
             if layers.get("now"):
-                from datetime import datetime as _dt, timezone as _tz
-                now = pd.Timestamp(_dt.now(tz=_tz.utc)).tz_localize(None)
+                from datetime import datetime as _dt
+                now = pd.Timestamp(_dt.now(tz=UTC)).tz_localize(None)
                 px_now_raw = date_to_px(now)
                 clamped = not (x0 <= px_now_raw <= x1)
                 px_now = int(max(x0, min(px_now_raw, x1)))
@@ -2201,7 +2213,9 @@ with tab_pipeline:
         # mapping in the USGS-source-plots expander is built further down.
         _inspector_url_map = {TILT_SOURCE_NAME[s]: USGS_TILT_URLS[s] for s in ALL_SOURCES}
 
-        def _inspector_calibrate(raw_bytes: bytes, source_name: str):
+        def _inspector_calibrate(
+            raw_bytes: bytes, source_name: str
+        ) -> tuple[AxisCalibration | None, str | None]:
             """Decode raw PNG bytes and run the calibration pipeline.
 
             The pipeline's `ingest()` skips calibration on 304 Not Modified
@@ -2224,6 +2238,7 @@ with tab_pipeline:
             try:
                 import cv2
                 import numpy as np
+
                 from kilauea_tracker.ingest.calibrate import calibrate_axes
                 arr = np.frombuffer(raw_bytes, dtype=np.uint8)
                 img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -2331,6 +2346,7 @@ with tab_pipeline:
                     try:
                         import cv2 as _cv2
                         import numpy as _np
+
                         from kilauea_tracker.ingest.calibrate import (
                             ocr_x_axis_ticks as _ocr_x_ticks,
                         )
@@ -2642,7 +2658,7 @@ with tab_about:
 # Footer — compact attribution strip below the tabs.
 # ─────────────────────────────────────────────────────────────────────────────
 
-from kilauea_tracker import __version__ as _kt_version  # noqa: E402
+from kilauea_tracker import __version__ as _kt_version
 
 _GH_ICON = (
     '<svg viewBox="0 0 16 16" aria-hidden="true">'

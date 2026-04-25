@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from .. import __version__ as _KT_VERSION
 
-
 _ABOUT_PROJECT_MARKDOWN = f"""
 ### About this project
 

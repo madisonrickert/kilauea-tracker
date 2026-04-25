@@ -9,11 +9,14 @@ users who are actively reading it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
-
-import pandas as pd
+from typing import TYPE_CHECKING
 
 from ..plotting import build_figure
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from ..model import Prediction
 
 
 @dataclass
@@ -75,10 +78,10 @@ def show(
     *,
     tilt_df: pd.DataFrame,
     fit_peaks_df: pd.DataFrame,
-    prediction,
-    all_peaks_df: Optional[pd.DataFrame],
-    per_source_overlay: Optional[dict[str, pd.DataFrame]],
-    state: Optional[str] = None,
+    prediction: Prediction | None,
+    all_peaks_df: pd.DataFrame | None,
+    per_source_overlay: dict[str, pd.DataFrame] | None,
+    state: str | None = None,
     show_current_episode: bool = True,
     show_next_event_prediction: bool = True,
 ) -> None:

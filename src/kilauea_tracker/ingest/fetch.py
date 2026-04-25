@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 import requests
 
@@ -51,15 +50,15 @@ _RETRY_BACKOFFS_SECONDS = [1.0, 3.0, 6.0]
 class FetchResult:
     """Outcome of a single PNG fetch."""
 
-    body: Optional[bytes]            # the PNG bytes, or None on 304 Not Modified
-    last_modified: Optional[str]     # the server's Last-Modified header
+    body: bytes | None            # the PNG bytes, or None on 304 Not Modified
+    last_modified: str | None     # the server's Last-Modified header
     changed: bool                    # True iff body is fresh; False on 304
     status_code: int
 
 
 def fetch_tilt_png(
     url: str,
-    cached_last_modified: Optional[str] = None,
+    cached_last_modified: str | None = None,
     *,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> FetchResult:
@@ -85,7 +84,7 @@ def fetch_tilt_png(
     if cached_last_modified:
         headers["If-Modified-Since"] = cached_last_modified
 
-    last_err: Optional[str] = None
+    last_err: str | None = None
     for attempt in range(_RETRY_ATTEMPTS + 1):
         try:
             response = requests.get(url, headers=headers, timeout=timeout)

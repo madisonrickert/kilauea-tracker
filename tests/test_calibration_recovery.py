@@ -20,7 +20,7 @@ reduces-residuals smoke test that accepts a non-zero irreducible floor.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -32,6 +32,9 @@ from kilauea_tracker.ingest.calibrate import (
     recalibrate_by_anchor_fit,
 )
 from kilauea_tracker.model import DATE_COL, TILT_COL
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 DEC_CSV = SOURCES_DIR / "dec2024_to_now.csv"
 

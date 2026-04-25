@@ -44,6 +44,80 @@ packages = ["src/kilauea_tracker"]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
 
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["legacy"]
+
+[tool.ruff.lint]
+# Strict standards. See CLAUDE.md → "Coding conventions" for the rationale.
+# Each rule group is enabled deliberately:
+#   E/F/W   pycodestyle + pyflakes (defaults; basic correctness)
+#   I       isort — stdlib / third-party / local grouping
+#   UP      pyupgrade — auto-rewrite Optional[X]→X|None, List→list, etc.
+#   FA      flake8-future-annotations — require `from __future__ import annotations`
+#   B       flake8-bugbear — mutable defaults, bare except, etc.
+#   C4      comprehensions
+#   SIM     simplifications
+#   RET     return-statement hygiene
+#   PIE     misc anti-patterns
+#   RUF     ruff-specific
+#   LOG/G   logging usage + format
+#   TC      type-checking imports
+#   PTH     pathlib over os.path
+#   T20     no print() in src/
+#   ANN     flake8-annotations — type hint completeness on public APIs
+select = [
+    "E", "F", "W",
+    "I",
+    "UP",
+    "FA",
+    "B",
+    "C4",
+    "SIM",
+    "RET",
+    "PIE",
+    "RUF",
+    "LOG", "G",
+    "TC",
+    "PTH",
+    "T20",
+    "ANN",
+]
+ignore = [
+    "ANN401",  # `Any` is allowed at boundaries where it's genuinely dynamic
+    "E501",    # line length is a soft target, not an error
+    "B008",    # function calls in default args are fine for FastAPI/Streamlit-style code
+    "SIM108",  # ternary isn't always clearer than if/else
+    "RET504",  # explicit `x = ...; return x` is sometimes clearer than inline return
+    # The codebase intentionally uses non-ASCII characters: µ (microradian),
+    # Ī/ē/ā (Kīlauea, Uēkahuna), em/en-dashes for typography. These rules
+    # treat them as ambiguous, but they are correct here.
+    "RUF001",  # ambiguous unicode in strings
+    "RUF002",  # ambiguous unicode in docstrings
+    "RUF003",  # ambiguous unicode in comments
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests can use prints, don't require type hints, and import fixtures freely
+"tests/**" = ["ANN", "T20", "B011"]
+# Scripts are one-shot tooling — relaxed standards
+"scripts/**" = ["T20", "ANN"]
+# Streamlit entrypoint: the sys.path shim must run before importing
+# kilauea_tracker.* (see file header for the dataclass-pickle incident),
+# so E402 is structural, not lazy. T20 is allowed for stderr-style logs.
+"streamlit_app.py" = ["E402", "T20"]
+# pipeline.py's _cli_main intentionally prints to stdout (it's the CLI
+# entry for `python -m kilauea_tracker.ingest.pipeline`).
+"src/kilauea_tracker/ingest/pipeline.py" = ["T20"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["kilauea_tracker"]
+
+[tool.ruff.lint.flake8-type-checking]
+# Don't move runtime-needed imports into TYPE_CHECKING blocks (e.g. dataclass fields)
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
+
 [dependency-groups]
 dev = [
     "watchdog>=6.0.0",

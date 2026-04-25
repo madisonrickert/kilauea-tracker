@@ -19,7 +19,6 @@ from scipy.signal import find_peaks
 from .config import PEAK_DEFAULTS
 from .model import DATE_COL, TILT_COL
 
-
 _UNSET = object()  # sentinel so callers can pass min_height=None to disable it
 
 
@@ -27,7 +26,7 @@ def detect_peaks(
     tilt_df: pd.DataFrame,
     min_prominence: float | None = None,
     min_distance_days: float | None = None,
-    min_height=_UNSET,
+    min_height: float | None | object = _UNSET,
 ) -> pd.DataFrame:
     """Detect episodic tilt peaks.
 
@@ -80,7 +79,7 @@ def detect_peaks(
         return _empty_peaks_df()
 
     y = resampled[TILT_COL].to_numpy()
-    distance_samples = max(int(round(min_distance_days * 24)), 1)
+    distance_samples = max(round(min_distance_days * 24), 1)
 
     indices, props = find_peaks(
         y,

@@ -16,11 +16,14 @@ The math is preserved verbatim; only the structure changes:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import brentq, curve_fit
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 DATE_COL = "Date"
 TILT_COL = "Tilt (microradians)"
@@ -85,16 +88,16 @@ class CurveBand:
 class Prediction:
     """Result of `predict()`. Any field can be `None` if the underlying fit failed."""
 
-    next_event_date: Optional[pd.Timestamp]
-    next_event_tilt: Optional[float]
-    trendline: Optional[Curve]          # linear fit through the fit-window peaks
-    exp_curve: Optional[Curve]          # current-episode exponential saturation fit
-    exp_params: Optional[tuple[float, float, float]]  # (A, k, C)
-    exp_x0: Optional[float]             # the date offset baked into the exp fit
-    exp_covariance: Optional[np.ndarray]  # for confidence band
-    confidence_band: Optional[tuple[pd.Timestamp, pd.Timestamp]]
-    trendline_band: Optional[CurveBand]   # 80% CI ribbon around the trendline
-    exp_band: Optional[CurveBand]         # 80% CI ribbon around the exp curve
+    next_event_date: pd.Timestamp | None
+    next_event_tilt: float | None
+    trendline: Curve | None          # linear fit through the fit-window peaks
+    exp_curve: Curve | None          # current-episode exponential saturation fit
+    exp_params: tuple[float, float, float] | None  # (A, k, C)
+    exp_x0: float | None             # the date offset baked into the exp fit
+    exp_covariance: np.ndarray | None  # for confidence band
+    confidence_band: tuple[pd.Timestamp, pd.Timestamp] | None
+    trendline_band: CurveBand | None   # 80% CI ribbon around the trendline
+    exp_band: CurveBand | None         # 80% CI ribbon around the exp curve
     n_peaks_in_fit: int                 # count of peaks that fed the trendline
     fit_diagnostics: dict
 
@@ -105,9 +108,9 @@ class Prediction:
     # against the model-based prediction. If both predictions agree, we have
     # higher confidence; if they diverge significantly, the model may be
     # struggling with the current regime.
-    interval_based_next_event_date: Optional[pd.Timestamp] = None
-    interval_based_band: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None
-    median_peak_interval_days: Optional[float] = None
+    interval_based_next_event_date: pd.Timestamp | None = None
+    interval_based_band: tuple[pd.Timestamp, pd.Timestamp] | None = None
+    median_peak_interval_days: float | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -119,7 +122,9 @@ _EPOCH = pd.Timestamp("1970-01-01")
 _SECONDS_PER_DAY = 86400.0
 
 
-def to_days(t):
+def to_days(
+    t: pd.Timestamp | pd.Series | pd.DatetimeIndex,
+) -> float | np.ndarray:
     """Convert Timestamp/Series/DatetimeIndex to float days since the Unix epoch.
 
     Implementation note: modern pandas (>=2.x) chose `datetime64[us]` as the
@@ -149,7 +154,9 @@ def from_days(d: float) -> pd.Timestamp:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def exp_saturation(x, A: float, k: float, C: float, x0: float):
+def exp_saturation(
+    x: float | np.ndarray, A: float, k: float, C: float, x0: float
+) -> float | np.ndarray:
     """Exponential saturation curve.
 
     Same as v1.0:128 — the x0 shift makes the k parameter easier to fit by
@@ -196,9 +203,9 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
     # intervals, giving a roughly interquartile range around the point
     # estimate. With ~38 peaks in our current dataset that's well over the
     # ~5-sample minimum needed for the percentiles to mean anything.
-    interval_based_date: Optional[pd.Timestamp] = None
-    interval_based_band: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None
-    median_interval_days: Optional[float] = None
+    interval_based_date: pd.Timestamp | None = None
+    interval_based_band: tuple[pd.Timestamp, pd.Timestamp] | None = None
+    median_interval_days: float | None = None
     if n_peaks_in_fit >= 2:
         intervals_days = peaks_df["_day"].diff().dropna().to_numpy()
         if len(intervals_days) >= 1:
@@ -259,7 +266,7 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
         current = post_peak
 
     current["_day"] = to_days(current[DATE_COL])
-    diagnostics["current_episode_n"] = int(len(current))
+    diagnostics["current_episode_n"] = len(current)
     if len(current) > 0:
         diagnostics["current_episode_start"] = str(current[DATE_COL].iloc[0])
 
@@ -328,7 +335,13 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
     A_exp, k_exp, C_exp = float(params[0]), float(params[1]), float(params[2])
     diagnostics.update({"exp_A": A_exp, "exp_k": k_exp, "exp_C": C_exp})
 
-    def _exp_eval(x, _A=A_exp, _k=k_exp, _C=C_exp, _x0=x0_fit):
+    def _exp_eval(
+        x: float,
+        _A: float = A_exp,
+        _k: float = k_exp,
+        _C: float = C_exp,
+        _x0: float = x0_fit,
+    ) -> float:
         # Vectorized — accepts scalar or array, returns same shape.
         return exp_saturation(np.asarray(x, dtype=float), _A, _k, _C, _x0)
 
@@ -388,7 +401,7 @@ def predict(tilt_df: pd.DataFrame, peaks_df: pd.DataFrame) -> Prediction:
 
 
 def _monte_carlo_bands(
-    next_event_date: Optional[pd.Timestamp],
+    next_event_date: pd.Timestamp | None,
     exp_params: np.ndarray,
     exp_covariance: np.ndarray,
     x0_fit: float,
@@ -403,9 +416,9 @@ def _monte_carlo_bands(
     seed: int = 0,
     n_grid: int = 200,
 ) -> tuple[
-    Optional[tuple[pd.Timestamp, pd.Timestamp]],
-    Optional[CurveBand],
-    Optional[CurveBand],
+    tuple[pd.Timestamp, pd.Timestamp] | None,
+    CurveBand | None,
+    CurveBand | None,
 ]:
     """Joint Monte Carlo: returns (date_band, trendline_band, exp_band).
 
@@ -458,10 +471,16 @@ def _monte_carlo_bands(
         exp_samples.append(exp_saturation(exp_x, A, k, C, x0_fit))
 
         # Solve the intersection for the date band
-        def f_lin_b(x, _s=slope_b, _i=intercept_b):
+        def f_lin_b(x: float, _s: float = slope_b, _i: float = intercept_b) -> float:
             return _s * np.asarray(x, dtype=float) + _i
 
-        def f_exp_b(x, _A=A, _k=k, _C=C, _x0=x0_fit):
+        def f_exp_b(
+            x: float,
+            _A: float = A,
+            _k: float = k,
+            _C: float = C,
+            _x0: float = x0_fit,
+        ) -> float:
             return exp_saturation(np.asarray(x, dtype=float), _A, _k, _C, _x0)
 
         if next_event_date is not None:
@@ -502,7 +521,7 @@ def _monte_carlo_bands(
 
 
 def _confidence_band(
-    next_event_date: Optional[pd.Timestamp],
+    next_event_date: pd.Timestamp | None,
     params: np.ndarray,
     covariance: np.ndarray,
     x0_fit: float,
@@ -513,7 +532,7 @@ def _confidence_band(
     n_samples: int = 200,
     quantiles: tuple[float, float] = (0.10, 0.90),
     seed: int = 0,
-) -> Optional[tuple[pd.Timestamp, pd.Timestamp]]:
+) -> tuple[pd.Timestamp, pd.Timestamp] | None:
     """10th-90th percentile dates from a joint Monte Carlo over BOTH fits.
 
     Each draw independently:
@@ -569,10 +588,16 @@ def _confidence_band(
         except (np.linalg.LinAlgError, ValueError):
             continue
 
-        def f_lin_b(x, _s=slope_b, _i=intercept_b):
+        def f_lin_b(x: float, _s: float = slope_b, _i: float = intercept_b) -> float:
             return _s * np.asarray(x, dtype=float) + _i
 
-        def f_exp_b(x, _A=A, _k=k, _C=C, _x0=x0_fit):
+        def f_exp_b(
+            x: float,
+            _A: float = A,
+            _k: float = k,
+            _C: float = C,
+            _x0: float = x0_fit,
+        ) -> float:
             return exp_saturation(np.asarray(x, dtype=float), _A, _k, _C, _x0)
 
         date, _ = _find_intersection(
@@ -607,7 +632,7 @@ def _make_linear_curve(
 ) -> Curve:
     poly = np.poly1d([float(slope), float(intercept)])
 
-    def _eval(x, _p=poly):
+    def _eval(x: float, _p: np.poly1d = poly) -> float:
         # Vectorized via np.poly1d — accepts scalar or array.
         return _p(np.asarray(x, dtype=float))
 
@@ -619,7 +644,7 @@ def _find_intersection(
     f_lin: Callable[[float], float],
     last_current_day: float,
     last_peak_day: float,
-) -> tuple[Optional[pd.Timestamp], Optional[float]]:
+) -> tuple[pd.Timestamp | None, float | None]:
     """Solve `f_exp(x) == f_lin(x)` in the future projection window.
 
     Strategy:

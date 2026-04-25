@@ -52,4 +52,4 @@ def test_explainer_handles_missing_numbers_gracefully():
         # Simulate a malformed info dict — None values, missing keys, NaN.
         for bad_info in ({}, {"short_slope_microrad_per_hour": None}):
             rendered = STATE_COPY[state].explainer(bad_info)
-            assert rendered and "?" in rendered or "None" not in rendered
+            assert (rendered and "?" in rendered) or "None" not in rendered

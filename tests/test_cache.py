@@ -16,7 +16,7 @@ fallback for an empty cache.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 import pytest
@@ -28,6 +28,9 @@ from kilauea_tracker.cache import (
     load_history,
 )
 from kilauea_tracker.model import DATE_COL, TILT_COL
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture

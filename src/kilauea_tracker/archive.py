@@ -62,7 +62,6 @@ just another aligned source named `"archive"`.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
@@ -117,7 +116,7 @@ def promote_to_archive(
     merged_df: pd.DataFrame,
     path: Path = ARCHIVE_CSV,
     *,
-    sources: Optional[dict[str, pd.DataFrame]] = None,
+    sources: dict[str, pd.DataFrame] | None = None,
 ) -> ArchivePromotionReport:
     """Append rows from `merged_df` to the archive with keep-first dedupe
     and an optional multi-source quorum gate.

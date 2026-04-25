@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -50,7 +49,7 @@ def _read_canonical_csv(path: Path) -> pd.DataFrame:
 
 
 def main(
-    source: str, out_path: Optional[Path], bucket_freq: str
+    source: str, out_path: Path | None, bucket_freq: str
 ) -> int:
     src_csv = SOURCES_DIR / f"{source}.csv"
     if not src_csv.exists():

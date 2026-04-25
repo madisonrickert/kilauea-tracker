@@ -16,6 +16,7 @@ shows the same kind of mid-drop noise).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -29,8 +30,10 @@ from ..config import (
     WIDE_COLUMN_THRESHOLD_PIXELS,
 )
 from ..model import DATE_COL, TILT_COL
-from .calibrate import AxisCalibration
 from .exceptions import TraceError
+
+if TYPE_CHECKING:
+    from .calibrate import AxisCalibration
 
 # Hue ranges in OpenCV HSV (H ∈ [0, 180]).
 # Tuned against `tests/fixtures/UWD-TILT-3month_2026-04-08.png` — pure blue is
@@ -317,7 +320,7 @@ def _filter_rolling_median_outliers(
     if n_dropped == 0:
         return df, report
 
-    dropped_rows = df.loc[~keep_mask]
+    df.loc[~keep_mask]
     report.dropped_rows = [
         (row[DATE_COL], float(row[TILT_COL]), float(rolling[idx]))
         for idx, (_, row) in enumerate(df.iterrows())

@@ -11,10 +11,8 @@ emits the HTML through Streamlit.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -36,7 +34,7 @@ class HeroCopy:
 
 
 def _now_utc() -> pd.Timestamp:
-    return pd.Timestamp(datetime.now(timezone.utc)).tz_localize(None)
+    return pd.Timestamp(datetime.now(UTC)).tz_localize(None)
 
 
 def _fmt_date_short(ts: pd.Timestamp) -> str:
@@ -59,7 +57,7 @@ def _days_until(ts: pd.Timestamp, now: pd.Timestamp) -> float:
 
 def _days_phrase(days: float) -> str:
     """``5 days`` / ``1 day`` / ``0 days`` (today) / ``tomorrow``."""
-    whole = int(round(days))
+    whole = round(days)
     if whole < 0:
         return f"{abs(whole)} days"
     if whole == 0:
@@ -76,9 +74,9 @@ def _band_half_width_days(band: tuple[pd.Timestamp, pd.Timestamp]) -> float:
 
 def compose(
     state: str,
-    prediction: Optional[object],
+    prediction: object | None,
     *,
-    now: Optional[pd.Timestamp] = None,
+    now: pd.Timestamp | None = None,
 ) -> HeroCopy:
     """Pure formatter: state + prediction → (eyebrow, headline, subhead, state).
 
@@ -207,11 +205,11 @@ def render_html(copy: HeroCopy) -> str:
 def build_sparkline(
     tilt_df: pd.DataFrame,
     state: str,
-    prediction: Optional[object] = None,
+    prediction: object | None = None,
     *,
     n_days: int = SPARKLINE_DAYS,
     height: int = 240,
-) -> Optional[go.Figure]:
+) -> go.Figure | None:
     """Compact last-N-days tilt line + predicted next-event marker.
 
     Reads as a visual fingerprint of recent activity rather than a
@@ -247,7 +245,7 @@ def build_sparkline(
                 x=window[DATE_COL],
                 y=window[TILT_COL],
                 mode="lines",
-                line=dict(color=line_color, width=2),
+                line={"color": line_color, "width": 2},
                 fill="tozeroy",
                 fillcolor=fill_color,
                 hoverinfo="skip",
@@ -285,7 +283,7 @@ def build_sparkline(
                 x=[last_date, next_ts],
                 y=[last_y, projected_y],
                 mode="lines",
-                line=dict(color=line_color, width=1.5, dash="dot"),
+                line={"color": line_color, "width": 1.5, "dash": "dot"},
                 opacity=0.55,
                 hoverinfo="skip",
                 showlegend=False,
@@ -317,7 +315,7 @@ def build_sparkline(
                         x=x_poly,
                         y=y_poly,
                         mode="lines",
-                        line=dict(color=line_color, width=0),
+                        line={"color": line_color, "width": 0},
                         fill="toself",
                         fillcolor=_rgba(line_color, alpha=alpha),
                         hoverinfo="skip",
@@ -331,12 +329,12 @@ def build_sparkline(
                 x=[next_ts],
                 y=[projected_y],
                 mode="markers",
-                marker=dict(
-                    symbol="star",
-                    color=line_color,
-                    size=15,
-                    line=dict(color="rgba(15, 20, 25, 0.6)", width=1),
-                ),
+                marker={
+                    "symbol": "star",
+                    "color": line_color,
+                    "size": 15,
+                    "line": {"color": "rgba(15, 20, 25, 0.6)", "width": 1},
+                },
                 hoverinfo="skip",
                 showlegend=False,
             )
@@ -355,11 +353,11 @@ def build_sparkline(
 
     fig.update_layout(
         height=height,
-        margin=dict(l=0, r=0, t=4, b=4),
+        margin={"l": 0, "r": 0, "t": 4, "b": 4},
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(visible=False, fixedrange=True, range=[x_start, x_end]),
-        yaxis=dict(visible=False, fixedrange=True),
+        xaxis={"visible": False, "fixedrange": True, "range": [x_start, x_end]},
+        yaxis={"visible": False, "fixedrange": True},
     )
     return fig
 
@@ -394,8 +392,8 @@ def _rgba(color: str, *, alpha: float) -> str:
 
 def show(
     state: str,
-    prediction: Optional[object],
-    tilt_df: Optional[pd.DataFrame] = None,
+    prediction: object | None,
+    tilt_df: pd.DataFrame | None = None,
     *,
     sparkline_days: int = SPARKLINE_DAYS,
 ) -> None:

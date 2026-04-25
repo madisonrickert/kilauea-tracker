@@ -82,12 +82,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
 
 import numpy as np
 import pandas as pd
-
-logger = logging.getLogger(__name__)
 
 from .config import (
     ARCHIVE_SOURCE_NAME,
@@ -101,6 +98,8 @@ from .config import (
     PAIRWISE_MIN_OVERLAP_BUCKETS,
 )
 from .model import DATE_COL, TILT_COL
+
+logger = logging.getLogger(__name__)
 
 # Bucket size for pairwise OLS fits. Coarser than the 15-min merge bucket
 # because per-source sampling is variable and coarser buckets yield
@@ -126,13 +125,13 @@ class SourceAlignment:
     b: float = 0.0                         # recovered scalar offset
     pairs_used: int = 0                    # pair constraints involving this source
     is_anchor: bool = False                # True for the pinned source (digital)
-    note: Optional[str] = None             # human-readable diagnostic
+    note: str | None = None             # human-readable diagnostic
     rows_mad_rejected: int = 0             # dropped by per-bucket MAD outlier gate
     effective_resolution_microrad_per_pixel: float = 0.0
 
     # Back-compat fields consumed by `ingest.pipeline._serialize_reconcile`
     # and the legacy CLI print loop.
-    offset_microrad: Optional[float] = None  # = b for back-compat display
+    offset_microrad: float | None = None  # = b for back-compat display
     overlap_buckets: int = 0
     rows_proximity_dropped: int = 0  # always 0 — proximity gate was removed
     piecewise_residuals: dict[str, float] = field(default_factory=dict)
@@ -234,7 +233,7 @@ def reconcile_sources(
 
     # Normalize every input DataFrame and split off the archive.
     live: dict[str, pd.DataFrame] = {}
-    archive_df: Optional[pd.DataFrame] = None
+    archive_df: pd.DataFrame | None = None
     for name, raw in sources.items():
         if raw is None or len(raw) == 0:
             continue
@@ -378,7 +377,7 @@ def _solve_pairwise_calibration(
     uidx = {name: i for i, name in enumerate(unknowns)}
     m = len(unknowns)
 
-    pair_counts: dict[str, int] = {name: 0 for name in names}
+    pair_counts: dict[str, int] = dict.fromkeys(names, 0)
     for f in fits:
         pair_counts[f.source_i] += 1
         pair_counts[f.source_j] += 1
@@ -460,7 +459,7 @@ def _solve_pairwise_calibration(
     for name in unknowns:
         if name in connected_to_pin:
             b = float(b_vec[uidx[name]])
-            note: Optional[str] = None
+            note: str | None = None
         else:
             # Disconnected from pin: no evidence to set b. Default to 0
             # and let the effective-resolution merge-winner pick it up
@@ -619,7 +618,7 @@ def _merge_best_resolution(
     corrected: dict[str, pd.DataFrame],
     alignments: dict[str, SourceAlignment],
     report: ReconcileReport,
-    archive_df: Optional[pd.DataFrame],
+    archive_df: pd.DataFrame | None,
 ) -> pd.DataFrame:
     """Walk every 15-min bucket in the union of corrected sources and emit
     one row per bucket, chosen by best-effective-resolution over the
@@ -747,7 +746,7 @@ def _merge_best_resolution(
             )
             outlier_mask = np.abs(actual_values - m) > threshold
             if outlier_mask.any():
-                for v, s in zip(actual_values[outlier_mask], actual_sources[outlier_mask]):
+                for v, s in zip(actual_values[outlier_mask], actual_sources[outlier_mask], strict=False):
                     report.transcription_failures.append(
                         TranscriptionFailure(
                             bucket=bucket,

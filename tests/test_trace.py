@@ -65,7 +65,7 @@ def test_trace_dates_within_calibration_range(fixture_img, fixture_calib):
 
 def test_trace_tilts_within_calibration_y_range(fixture_img, fixture_calib):
     df = trace_curve(fixture_img, fixture_calib)
-    x0, y0, x1, y1 = fixture_calib.plot_bbox
+    _x0, y0, _x1, y1 = fixture_calib.plot_bbox
     top = fixture_calib.pixel_to_microradians(y0)
     bot = fixture_calib.pixel_to_microradians(y1)
     assert df[TILT_COL].min() >= bot - 1.0  # 1 µrad tolerance for line thickness

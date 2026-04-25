@@ -12,7 +12,7 @@ If a future palette tweak breaks any of these, CI catches it before merge.
 
 from __future__ import annotations
 
-import colorsys
+import itertools
 import math
 
 import pytest
@@ -25,7 +25,6 @@ from kilauea_tracker.ui.palette import (
     STATE_RAMP_ORDER,
 )
 from kilauea_tracker.ui.styles import build_style_block
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Color math (kept local — pulling in `colour` or `coloraide` for two formulas
@@ -57,7 +56,10 @@ def _contrast(fg: str, bg: str) -> float:
 def _rgb_to_oklab(r: float, g: float, b: float) -> tuple[float, float, float]:
     """sRGB (0-1) → OKLab. Reference: Ottosson, bottosson.github.io."""
     r_lin, g_lin, b_lin = (_srgb_to_linear(c) for c in (r, g, b))
-    l = 0.4122214708 * r_lin + 0.5363325363 * g_lin + 0.0514459929 * b_lin
+    # `l` is the LMS-long-cone intermediate per Ottosson's published reference;
+    # ruff's E741 flags the lowercase name but renaming would break the canonical
+    # `l/m/s` LMS naming used throughout the OKLab literature.
+    l = 0.4122214708 * r_lin + 0.5363325363 * g_lin + 0.0514459929 * b_lin  # noqa: E741
     m = 0.2119034982 * r_lin + 0.6806995451 * g_lin + 0.1073969566 * b_lin
     s = 0.0883024619 * r_lin + 0.2817188376 * g_lin + 0.6299787005 * b_lin
     l_, m_, s_ = l ** (1 / 3), m ** (1 / 3), s ** (1 / 3)
@@ -124,7 +126,7 @@ def test_state_ramp_hue_is_monotonic_toward_red():
     # Calm is blueish (~250°); once we cross into the warm half (hue ≤ 80°),
     # every subsequent step must bring hue closer to 0°/red.
     warm_hues = [h for h in hues if h <= 180]
-    for prev, nxt in zip(warm_hues, warm_hues[1:]):
+    for prev, nxt in itertools.pairwise(warm_hues):
         assert nxt <= prev, (
             f"hue reversal in state ramp: {warm_hues} (expect monotonic toward 0°)"
         )

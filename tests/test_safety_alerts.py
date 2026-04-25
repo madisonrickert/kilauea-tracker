@@ -25,23 +25,18 @@ Coverage:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import patch
-
-import pytest
 
 from kilauea_tracker import safety_alerts
 from kilauea_tracker.safety_alerts import (
-    NWSAlert,
     SafetyAlertSummary,
     USGSVolcanoStatus,
     _is_volcano_relevant,
     _parse_iso_utc,
-    _parse_nws_record,
     _parse_usgs_record,
     fetch_safety_alerts,
 )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ISO timestamp parser
@@ -50,12 +45,12 @@ from kilauea_tracker.safety_alerts import (
 
 def test_parse_iso_utc_handles_z_suffix():
     out = _parse_iso_utc("2026-04-09T19:30:00Z")
-    assert out == datetime(2026, 4, 9, 19, 30, tzinfo=timezone.utc)
+    assert out == datetime(2026, 4, 9, 19, 30, tzinfo=UTC)
 
 
 def test_parse_iso_utc_handles_offset():
     out = _parse_iso_utc("2026-04-09T09:30:00-10:00")
-    assert out == datetime(2026, 4, 9, 19, 30, tzinfo=timezone.utc)
+    assert out == datetime(2026, 4, 9, 19, 30, tzinfo=UTC)
 
 
 def test_parse_iso_utc_returns_none_on_garbage():
@@ -85,7 +80,7 @@ def test_parse_usgs_record_normalizes_fields():
     assert status.volcano_name == "Kilauea"
     assert status.color_code == "RED"
     assert status.alert_level == "WARNING"
-    assert status.sent_utc == datetime(2026, 4, 10, 0, 27, 56, tzinfo=timezone.utc)
+    assert status.sent_utc == datetime(2026, 4, 10, 0, 27, 56, tzinfo=UTC)
     assert status.notice_url == "https://example.test/notice"
 
 

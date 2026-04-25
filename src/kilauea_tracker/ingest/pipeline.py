@@ -31,16 +31,16 @@ Usage from the Streamlit app:
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import logging
 import math
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -72,7 +72,11 @@ from .calibrate import (
 )
 from .exceptions import CalibrationError, FetchError, IngestError, TraceError
 from .fetch import fetch_tilt_png
-from .trace import trace_curve
+from .trace import TraceReport, trace_curve
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -96,15 +100,15 @@ MAX_RUN_REPORTS = 90
 class IngestReport:
     """Outcome of one `ingest(source)` call. Always populated, even on failure."""
 
-    source: Optional[TiltSource]                # None for the digital source
+    source: TiltSource | None                # None for the digital source
     source_name: str                            # canonical name in SOURCE_PRIORITY
     fetched: bool = False                       # True iff a fresh PNG arrived
     rows_traced: int = 0                        # rows produced by trace_curve (after outlier filter)
     rows_raw: int = 0                           # raw samples from the HSV mask before filtering
     rows_outlier_dropped: int = 0               # rows the rolling-median filter removed
     rows_appended: int = 0                      # net new rows in the per-source CSV
-    last_modified: Optional[str] = None
-    calibration: Optional[AxisCalibration] = None
+    last_modified: str | None = None
+    calibration: AxisCalibration | None = None
     # Intra-source frame alignment diagnostics — populated from the
     # AppendReport returned by cache.append_history. A non-zero offset
     # means Part 1 of the 2026-04 drift fix corrected for a y-axis shift
@@ -112,12 +116,12 @@ class IngestReport:
     frame_offset_microrad: float = 0.0
     frame_overlap_buckets: int = 0
     warnings: list[str] = field(default_factory=list)
-    error: Optional[str] = None
+    error: str | None = None
     # PSM mode that succeeded on the title OCR ("psm7" or "psm6"), plus the
     # raw title text Tesseract returned. Useful for post-hoc diagnosis when
     # a calibration produces wrong timestamps.
-    title_psm_used: Optional[str] = None
-    title_raw_text: Optional[str] = None
+    title_psm_used: str | None = None
+    title_raw_text: str | None = None
     # Rows dropped by the per-row outlier filter, each as (timestamp, value,
     # local_median). Kept terse; full detail goes to the JSON run report.
     dropped_outlier_samples: list[tuple[pd.Timestamp, float, float]] = field(
@@ -130,13 +134,13 @@ class IngestRunResult:
     """Outcome of an `ingest_all()` call: per-source reports + reconciliation."""
 
     per_source: list[IngestReport] = field(default_factory=list)
-    reconcile: Optional[ReconcileReport] = None
-    history_path: Optional[Path] = None         # where the merged CSV was written
-    archive: Optional[ArchivePromotionReport] = None
-    archive_path: Optional[Path] = None         # where the archive CSV was written
-    run_report_path: Optional[Path] = None       # where the diagnostic JSON was written
-    run_started_at_utc: Optional[datetime] = None
-    run_finished_at_utc: Optional[datetime] = None
+    reconcile: ReconcileReport | None = None
+    history_path: Path | None = None         # where the merged CSV was written
+    archive: ArchivePromotionReport | None = None
+    archive_path: Path | None = None         # where the archive CSV was written
+    run_report_path: Path | None = None       # where the diagnostic JSON was written
+    run_started_at_utc: datetime | None = None
+    run_finished_at_utc: datetime | None = None
     # Phase 1c: per-source anchor cross-check results. Empty unless digital
     # is present AND at least one rolling source overlaps digital's Jan-Jun
     # 2025 window (today: dec2024_to_now only).
@@ -146,7 +150,7 @@ class IngestRunResult:
 def ingest(
     source: TiltSource,
     *,
-    sources_dir: Optional[Path] = None,
+    sources_dir: Path | None = None,
 ) -> IngestReport:
     """Run the fetch → calibrate → trace pipeline for ONE USGS source and
     append the result to that source's per-source CSV.
@@ -268,9 +272,9 @@ def ingest(
 def ingest_all(
     history_path: Path = HISTORY_CSV,
     *,
-    sources_dir: Optional[Path] = None,
+    sources_dir: Path | None = None,
     archive_path: Path = ARCHIVE_CSV,
-    on_stage: Optional[Callable[[str], None]] = None,
+    on_stage: Callable[[str], None] | None = None,
 ) -> IngestRunResult:
     """Run the per-source ingest for every USGS source, reconcile all raw
     sources into the merged tilt history, then promote any new rows into
@@ -292,7 +296,7 @@ def ingest_all(
         ingest_all() run will source it from there forever.
     """
     result = IngestRunResult(history_path=history_path, archive_path=archive_path)
-    result.run_started_at_utc = datetime.now(tz=timezone.utc)
+    result.run_started_at_utc = datetime.now(tz=UTC)
 
     def _emit(msg: str) -> None:
         if on_stage is not None:
@@ -331,7 +335,7 @@ def ingest_all(
             if len(digital) > 0:
                 sources_for_reconcile[DIGITAL_SOURCE_NAME] = digital
         except Exception as e:
-            print(f"WARNING: could not load digital CSV: {e}")
+            logger.warning("could not load digital CSV: %s", e)
 
     # 4. Read the append-only archive. On first run after a fresh checkout
     #    this is empty; subsequent runs see whatever rows have already been
@@ -388,7 +392,7 @@ def ingest_all(
         merged, archive_path, sources=sources_for_reconcile
     )
 
-    result.run_finished_at_utc = datetime.now(tz=timezone.utc)
+    result.run_finished_at_utc = datetime.now(tz=UTC)
 
     # 7. Write a structured JSON diagnostic per-run for persistent
     #    prod observability. Best-effort: a write failure here must never
@@ -397,7 +401,7 @@ def ingest_all(
         result.run_report_path = _write_run_report(result)
         _prune_old_run_reports(RUN_REPORTS_DIR)
     except Exception as e:  # pragma: no cover — defensive
-        print(f"WARNING: could not write run report: {e}")
+        logger.warning("could not write run report: %s", e)
 
     return result
 
@@ -458,9 +462,9 @@ _QUALITY_CSV_COLUMNS = [
 def _append_quality_row(
     *,
     source_name: str,
-    sources_dir: Optional[Path],
+    sources_dir: Path | None,
     report: IngestReport,
-    trace_report,
+    trace_report: TraceReport | None,
 ) -> None:
     """Append a single row to `data/sources/<source>_quality.csv`.
 
@@ -477,7 +481,7 @@ def _append_quality_row(
     quality_path.parent.mkdir(parents=True, exist_ok=True)
 
     row: dict[str, object] = {
-        "run_timestamp_utc": datetime.now(tz=timezone.utc).isoformat(),
+        "run_timestamp_utc": datetime.now(tz=UTC).isoformat(),
         "y_slope": getattr(calib, "y_slope", ""),
         "y_intercept": getattr(calib, "y_intercept", ""),
         "y_max_residual_microrad": (
@@ -563,7 +567,7 @@ def _append_quality_row(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _load_cached_last_modified(source: TiltSource) -> Optional[str]:
+def _load_cached_last_modified(source: TiltSource) -> str | None:
     if not LAST_MODIFIED_FILE.exists():
         return None
     try:
@@ -573,7 +577,7 @@ def _load_cached_last_modified(source: TiltSource) -> Optional[str]:
     return data.get(source.value)
 
 
-def _save_cached_last_modified(source: TiltSource, value: Optional[str]) -> None:
+def _save_cached_last_modified(source: TiltSource, value: str | None) -> None:
     if value is None:
         return
     LAST_MODIFIED_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -677,7 +681,7 @@ def _write_run_report(result: IngestRunResult) -> Path:
     any filesystem: `YYYY-MM-DDTHH-MM-SSZ.json`.
     """
     RUN_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    ts = result.run_finished_at_utc or datetime.now(tz=timezone.utc)
+    ts = result.run_finished_at_utc or datetime.now(tz=UTC)
     stem = ts.strftime("%Y-%m-%dT%H-%M-%SZ")
     out_path = RUN_REPORTS_DIR / f"{stem}.json"
 
@@ -834,7 +838,7 @@ def _serialize_reconcile(rep: ReconcileReport) -> dict:
     }
 
 
-def _dt_str(value) -> Optional[str]:
+def _dt_str(value: pd.Timestamp | datetime | None) -> str | None:
     """ISO-8601 serialization for datetime-like values.
 
     Handles both pd.Timestamp (nanosecond-precision) and stdlib datetime
@@ -854,11 +858,11 @@ def _dt_str(value) -> Optional[str]:
     if isinstance(value, datetime):
         if value.tzinfo is None:
             return value.strftime("%Y-%m-%dT%H:%M:%S")
-        return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     return str(value)
 
 
-def load_latest_run_report() -> Optional[IngestRunResult]:
+def load_latest_run_report() -> IngestRunResult | None:
     """Read the newest `data/run_reports/*.json` and reconstruct the
     `IngestRunResult` it describes.
 
@@ -901,7 +905,7 @@ def data_age_seconds() -> float:
         data = json.loads(LAST_MODIFIED_FILE.read_text())
     except (json.JSONDecodeError, OSError):
         return math.inf
-    newest: Optional[datetime] = None
+    newest: datetime | None = None
     for value in (data or {}).values():
         if not value:
             continue
@@ -910,12 +914,12 @@ def data_age_seconds() -> float:
         except (TypeError, ValueError):
             continue
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+            ts = ts.replace(tzinfo=UTC)
         if newest is None or ts > newest:
             newest = ts
     if newest is None:
         return math.inf
-    return (datetime.now(tz=timezone.utc) - newest).total_seconds()
+    return (datetime.now(tz=UTC) - newest).total_seconds()
 
 
 REFRESH_TIMESTAMP_FILE = LAST_GOOD_CALIBRATION.parent / "last_refresh.json"
@@ -937,7 +941,7 @@ def try_acquire_refresh_slot(cooldown_seconds: int) -> tuple[bool, float]:
     """
     REFRESH_TIMESTAMP_FILE.parent.mkdir(parents=True, exist_ok=True)
     REFRESH_TIMESTAMP_FILE.touch(exist_ok=True)
-    with open(REFRESH_TIMESTAMP_FILE, "r+") as fh:
+    with REFRESH_TIMESTAMP_FILE.open("r+") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
             raw = fh.read().strip()
@@ -1088,7 +1092,7 @@ def _deserialize_reconcile(p: dict) -> ReconcileReport:
     return rep
 
 
-def _parse_dt(value) -> Optional[datetime]:
+def _parse_dt(value: str | datetime | None) -> datetime | None:
     """Inverse of `_dt_str` — tolerant of trailing 'Z' and missing tz."""
     if value is None:
         return None
@@ -1118,10 +1122,8 @@ def _prune_old_run_reports(
     if excess <= 0:
         return
     for old in files[:excess]:
-        try:
+        with contextlib.suppress(OSError):
             old.unlink()
-        except OSError:
-            pass
 
 
 if __name__ == "__main__":

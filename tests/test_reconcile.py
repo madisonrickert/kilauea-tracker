@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from kilauea_tracker.config import (
     CONTINUITY_WARNING_THRESHOLD_MICRORAD,
@@ -69,7 +68,7 @@ def test_digital_is_pinned_to_identity():
         "digital": truth,
         "dec2024_to_now": _apply_linear(truth, 1.25, 3.0),
     }
-    merged, report = reconcile_sources(sources)
+    _merged, report = reconcile_sources(sources)
     digital_record = next(s for s in report.sources if s.name == "digital")
     assert digital_record.is_anchor is True
     assert abs(digital_record.a - 1.0) < 1e-9
@@ -137,7 +136,7 @@ def test_pairwise_chain_propagates_through_intermediate_source():
         ),
         "two_day": _apply_linear(two_day_truth, 1.0, two_day_injected_b),
     }
-    merged, report = reconcile_sources(sources)
+    _merged, report = reconcile_sources(sources)
 
     two_day_record = next(s for s in report.sources if s.name == "two_day")
     dec_record = next(s for s in report.sources if s.name == "dec2024_to_now")
@@ -511,8 +510,8 @@ def test_mad_floor_does_not_reject_well_calibrated_outlier():
     zigzag. Floor raised to 5 µrad in Phase 4 Commit 3 fixes this while
     still catching genuine OCR-glitch outliers (typically 10+ µrad off).
     """
-    from kilauea_tracker.reconcile import reconcile_sources as _rs
     from kilauea_tracker.config import MAD_OUTLIER_SIGMA_FLOOR_MICRORAD
+    from kilauea_tracker.reconcile import reconcile_sources as _rs
 
     assert MAD_OUTLIER_SIGMA_FLOOR_MICRORAD >= 3.0, (
         "MAD floor regression: Phase 4 raised this to 5 to stop sawtooth"
@@ -563,7 +562,7 @@ def test_median_offset_robust_to_gross_outliers():
     fraction of gross outliers. A mean-based estimator on the same data
     would be dragged several µrad by ±30 µrad spikes.
     """
-    from kilauea_tracker.reconcile import _compute_pairwise_fits, ReconcileReport
+    from kilauea_tracker.reconcile import ReconcileReport, _compute_pairwise_fits
 
     n = PAIRWISE_MIN_OVERLAP_BUCKETS * 4
     rng = np.random.default_rng(seed=42)
@@ -621,7 +620,7 @@ def test_sources_unknown_to_priority_tuple_silently_ignored_for_fallback_resolut
         "digital": truth,
         "experimental_source": _apply_linear(truth, 1.0, 0.0),
     }
-    merged, report = reconcile_sources(sources)
+    merged, _report = reconcile_sources(sources)
     # digital wins every bucket (it's in the priority tuple with tight res).
     matched = merged.merge(truth, on=DATE_COL, suffixes=("_m", "_t"))
     max_err = (

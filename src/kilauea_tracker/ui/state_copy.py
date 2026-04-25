@@ -13,7 +13,10 @@ the classification can land inline.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Mapping
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
 
 
 @dataclass(frozen=True)
@@ -24,7 +27,7 @@ class StateCopy:
     guidance: str                          # "what this means for you", plain text
 
 
-def _fmt(value, spec: str, fallback: str = "?") -> str:
+def _fmt(value: float | int | None, spec: str, fallback: str = "?") -> str:
     """Format a value through ``spec``; return fallback if value is None/NaN."""
     if value is None:
         return fallback

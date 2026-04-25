@@ -20,7 +20,7 @@ Coverage:
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 import pytest
@@ -33,6 +33,9 @@ from kilauea_tracker.archive import (
 from kilauea_tracker.config import ARCHIVE_SOURCE_NAME, SOURCE_PRIORITY
 from kilauea_tracker.model import DATE_COL, TILT_COL
 from kilauea_tracker.reconcile import reconcile_sources
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture
@@ -203,7 +206,7 @@ def test_live_source_wins_over_drifted_archive_under_phase_2(tmp_archive: Path):
     )
 
     sources = {"archive": archive_df, "two_day": two_day_df}
-    merged, report = reconcile_sources(sources, proximity_minutes=0)
+    merged, _report = reconcile_sources(sources, proximity_minutes=0)
 
     # T1: live (two_day) wins, archive does NOT contribute.
     t1_row = merged[merged[DATE_COL] == pd.Timestamp("2026-01-01 00:00:00")]

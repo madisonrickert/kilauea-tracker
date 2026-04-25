@@ -15,7 +15,6 @@ URLs last HEAD-checked 2026-04-09 against the USGS HVO site.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
 
 
 @dataclass(frozen=True)
@@ -98,7 +97,7 @@ def show_strip() -> None:
 
     cams = strip_cameras()
     cols = st.columns(len(cams))
-    for col, cam in zip(cols, cams):
+    for col, cam in zip(cols, cams, strict=False):
         with col:
             _render_one(cam)
 
@@ -118,6 +117,6 @@ def show_grid() -> None:
     rows = [WEBCAMS[i : i + 2] for i in range(0, len(WEBCAMS), 2)]
     for pair in rows:
         cols = st.columns(2)
-        for col, cam in zip(cols, pair):
+        for col, cam in zip(cols, pair, strict=False):
             with col:
                 _render_one(cam)

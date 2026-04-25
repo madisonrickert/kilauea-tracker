@@ -6,8 +6,6 @@ their public symbols exist, and simple pure helpers behave.
 
 from __future__ import annotations
 
-import pytest
-
 from kilauea_tracker.ui import about_tab, chart_tab, data_tab, pipeline_tab
 
 

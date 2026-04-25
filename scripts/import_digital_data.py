@@ -131,7 +131,7 @@ def main() -> int:
         seg = _read_segment(f, segment_id=i)
         print(
             f"  segment {i}: {f.name}  "
-            f"raw rows ≈ {sum(1 for _ in open(f)) - 1}, "
+            f"raw rows ≈ {sum(1 for _ in f.open()) - 1}, "
             f"resampled rows = {len(seg)}, "
             f"range {seg['Date'].min()} → {seg['Date'].max()}, "
             f"tilt(Az300°) {seg['Tilt (microradians)'].min():.2f} → {seg['Tilt (microradians)'].max():.2f}"

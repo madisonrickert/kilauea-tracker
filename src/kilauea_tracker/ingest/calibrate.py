@@ -32,8 +32,6 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -135,7 +133,7 @@ class AxisCalibration:
     # fallback instead of this run's labels.
     y_label_confidences: list[float] = field(default_factory=list)
     y_slope_fallback_used: bool = False
-    y_slope_history_median: Optional[float] = None
+    y_slope_history_median: float | None = None
     # X-axis tick cross-check: OCRs the upper text row (MM/DD, HH:MM,
     # MMM-YYYY labels depending on source), parses each hit, compares
     # its UTC to the time-range linear interpolation at the same
@@ -144,8 +142,8 @@ class AxisCalibration:
     # text we treat as authoritative). Populated even when no ticks
     # were parsed so run reports can track OCR-accessibility over time.
     x_tick_cross_check_count: int = 0
-    x_tick_cross_check_median_err_px: Optional[float] = None
-    x_tick_cross_check_max_err_px: Optional[float] = None
+    x_tick_cross_check_median_err_px: float | None = None
+    x_tick_cross_check_max_err_px: float | None = None
 
     def pixel_to_microradians(self, py: float) -> float:
         return float(self.y_slope * float(py) + self.y_intercept)
@@ -163,7 +161,7 @@ class AxisCalibration:
 
     def microradians_per_pixel(self) -> float:
         """How many µrad each vertical pixel represents (positive number)."""
-        x0, y0, x1, y1 = self.plot_bbox
+        _x0, y0, _x1, y1 = self.plot_bbox
         top_value = self.pixel_to_microradians(y0)
         bot_value = self.pixel_to_microradians(y1)
         return abs(top_value - bot_value) / max(1, (y1 - y0))
@@ -241,7 +239,7 @@ def ocr_y_axis_labels_with_conf(
     to weight the linear fit (`calibrate_axes`) use the confidence squared
     so a 95%-confident label dominates a 72%-confident one by ~1.7×.
     """
-    x0, y0, x1, y1 = plot_bbox
+    x0, y0, _x1, y1 = plot_bbox
 
     # Strip just left of the plot, with a small vertical bleed so we don't
     # clip labels whose centers are near the bbox edges.
@@ -295,7 +293,7 @@ def ocr_y_axis_labels_with_conf(
                 continue
             upscaled_center_y = data["top"][i] + data["height"][i] / 2.0
             original_y = (upscaled_center_y / OCR_UPSCALE) + strip_top_in_original
-            out.append((int(round(original_y)), value, conf))
+            out.append((round(original_y), value, conf))
         return out
 
     # Union PSM 6 + PSM 11 hits, dedup by value keeping highest confidence.
@@ -408,7 +406,7 @@ def ocr_title_timestamps(
     img: np.ndarray,
     plot_bbox: tuple[int, int, int, int],
     *,
-    source_name: Optional[str] = None,
+    source_name: str | None = None,
 ) -> tuple[pd.Timestamp, pd.Timestamp, str, str]:
     """Extract the (start, end) ISO timestamps from the title line below the plot.
 
@@ -516,9 +514,9 @@ def ocr_title_timestamps(
 def ocr_x_axis_ticks(
     img: np.ndarray,
     plot_bbox: tuple[int, int, int, int],
-    source_name: Optional[str],
-    x_start_utc: Optional[pd.Timestamp] = None,
-    x_end_utc: Optional[pd.Timestamp] = None,
+    source_name: str | None,
+    x_start_utc: pd.Timestamp | None = None,
+    x_end_utc: pd.Timestamp | None = None,
 ) -> list[tuple[int, pd.Timestamp]]:
     """Cross-check: OCR the x-axis tick row and parse each hit against
     the source's expected label format. Returns `[(pixel_x_center_utc,
@@ -582,7 +580,7 @@ def ocr_x_axis_ticks(
             if conf < MIN_OCR_CONFIDENCE:
                 continue
             cx_upscaled = data["left"][i] + data["width"][i] / 2.0
-            cx_original = int(round(cx_upscaled / upscale))
+            cx_original = round(cx_upscaled / upscale)
             hits.append((cx_original, t))
 
     # Deduplicate by pixel_x within ±3 px (PSM 11 + PSM 4 often double-
@@ -622,7 +620,7 @@ def ocr_x_axis_ticks(
 
 def _parse_x_tick_label(
     text: str, fmt: str, reference_utc: pd.Timestamp
-) -> Optional[pd.Timestamp]:
+) -> pd.Timestamp | None:
     """Parse an OCR'd tick label (`04/13`, `12:00`, `Jan-2025`, ...) into
     a UTC Timestamp, using `reference_utc` (UTC-naive) to fill in
     missing fields. USGS tick labels are in Pacific/Honolulu (HST, a
@@ -698,7 +696,7 @@ def _parse_x_tick_label(
 
 def _try_parse_title_at_psm(
     upscaled_strip: np.ndarray, config: str
-) -> tuple[Optional[tuple[pd.Timestamp, pd.Timestamp]], str, str]:
+) -> tuple[tuple[pd.Timestamp, pd.Timestamp] | None, str, str]:
     """Run OCR + regex + parse + recover at one PSM config.
 
     Returns `(result, raw_text, error_message)` where:
@@ -837,7 +835,7 @@ def _parse_lenient_timestamp(s: str) -> pd.Timestamp:
 
 
 def calibrate_axes(
-    img: np.ndarray, *, source_name: Optional[str] = None
+    img: np.ndarray, *, source_name: str | None = None
 ) -> AxisCalibration:
     """Run the full calibration pipeline on a freshly-decoded image.
 
@@ -908,7 +906,7 @@ def calibrate_axes(
     # Distinguish by the residual quality we already computed: clean fit
     # = trust the new slope; noisy fit = trust history and refit the
     # intercept so the pair stays mathematically consistent.
-    slope_history_median: Optional[float] = None
+    slope_history_median: float | None = None
     slope_fallback_used = False
     if source_name is not None:
         history = _load_y_slope_history(source_name)
@@ -970,12 +968,13 @@ def calibrate_axes(
                     f"{X_WINDOW_TOLERANCE_HOURS} h). "
                     f"Title OCR returned [{x_start} → {x_end}] via {psm_used}"
                 )
-        elif source_name == "dec2024_to_now":
-            if span_hours < 30 * 24 or span_hours > 5 * 365 * 24:
-                raise CalibrationError(
-                    f"dec2024_to_now x-window span out of plausible range: "
-                    f"{span_hours:.1f} h"
-                )
+        elif source_name == "dec2024_to_now" and (
+            span_hours < 30 * 24 or span_hours > 5 * 365 * 24
+        ):
+            raise CalibrationError(
+                f"dec2024_to_now x-window span out of plausible range: "
+                f"{span_hours:.1f} h"
+            )
 
         # Phase 1b extension: x_end must be close to "now". A multi-digit
         # year OCR misread (e.g. 2026 → 2008 observed 2026-04-22) produces
@@ -1011,8 +1010,8 @@ def calibrate_axes(
     # the authoritative 'Pacific/Honolulu Time (...)' interpretation intact
     # to avoid drift — user preference.
     xtick_count = 0
-    xtick_median_px: Optional[float] = None
-    xtick_max_px: Optional[float] = None
+    xtick_median_px: float | None = None
+    xtick_max_px: float | None = None
     if source_name is not None:
         try:
             ticks = ocr_x_axis_ticks(
@@ -1134,8 +1133,8 @@ class AnchorFitResult:
     a: float = 1.0                         # slope correction (identity = 1.0)
     b: float = 0.0                         # intercept correction (identity = 0.0)
     residual_std_microrad: float = 0.0     # Huber-loss-weighted residual spread
-    warning: Optional[str] = None          # human-readable reason to warn
-    note: Optional[str] = None             # reason regression was skipped
+    warning: str | None = None          # human-readable reason to warn
+    note: str | None = None             # reason regression was skipped
 
 
 def recalibrate_by_anchor_fit(

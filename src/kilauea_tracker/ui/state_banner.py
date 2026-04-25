@@ -11,10 +11,13 @@ since the banner's content changes when the model re-classifies.
 
 from __future__ import annotations
 
-from typing import Mapping
+from typing import TYPE_CHECKING
 
 from .palette import STATE_COLOR
 from .state_copy import get as get_copy
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 def render_html(state: str, info: Mapping | None = None) -> str:

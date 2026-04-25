@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import pandas as pd
-import pytest
 
 from kilauea_tracker.model import DATE_COL, TILT_COL
 from kilauea_tracker.ui.hero import build_sparkline, compose, render_html
@@ -16,8 +14,8 @@ from kilauea_tracker.ui.palette import STATE_COLOR
 @dataclass
 class _StubPrediction:
     """Minimal duck-type of ``model.Prediction`` — only the fields hero reads."""
-    next_event_date: Optional[pd.Timestamp]
-    confidence_band: Optional[tuple[pd.Timestamp, pd.Timestamp]]
+    next_event_date: pd.Timestamp | None
+    confidence_band: tuple[pd.Timestamp, pd.Timestamp] | None
 
 
 NOW = pd.Timestamp("2026-04-22 00:00:00")

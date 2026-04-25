@@ -31,8 +31,7 @@ main UI.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import requests
 
@@ -138,10 +137,10 @@ class USGSVolcanoStatus:
     observatory: str            # e.g. "Hawaiian Volcano Observatory"
     color_code: str             # GREEN/YELLOW/ORANGE/RED
     alert_level: str            # NORMAL/ADVISORY/WATCH/WARNING
-    sent_utc: Optional[datetime]
-    notice_url: Optional[str]
-    notice_type_code: Optional[str] = None
-    notice_identifier: Optional[str] = None
+    sent_utc: datetime | None
+    notice_url: str | None
+    notice_type_code: str | None = None
+    notice_identifier: str | None = None
 
 
 @dataclass
@@ -154,10 +153,10 @@ class NWSAlert:
     severity: str               # Extreme/Severe/Moderate/Minor/Unknown
     urgency: str                # Immediate/Expected/Future/Past/Unknown
     area_desc: str              # human-readable affected areas
-    sent: Optional[datetime]
-    expires: Optional[datetime]
+    sent: datetime | None
+    expires: datetime | None
     sender_name: str
-    web_url: Optional[str]      # link to the alert page on weather.gov
+    web_url: str | None      # link to the alert page on weather.gov
     affected_zones: list[str] = field(default_factory=list)
 
 
@@ -165,9 +164,9 @@ class NWSAlert:
 class SafetyAlertSummary:
     """Combined output of one fetch round."""
 
-    usgs_status: Optional[USGSVolcanoStatus] = None
+    usgs_status: USGSVolcanoStatus | None = None
     nws_alerts: list[NWSAlert] = field(default_factory=list)
-    fetched_at: Optional[datetime] = None
+    fetched_at: datetime | None = None
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -190,7 +189,7 @@ def fetch_safety_alerts(
     Best-effort: if one source fails the other still runs, and the
     failure is recorded in `summary.errors`. Never raises.
     """
-    summary = SafetyAlertSummary(fetched_at=datetime.now(tz=timezone.utc))
+    summary = SafetyAlertSummary(fetched_at=datetime.now(tz=UTC))
 
     try:
         summary.usgs_status = _fetch_usgs_volcano_status(
@@ -214,7 +213,7 @@ def fetch_safety_alerts(
 
 def _fetch_usgs_volcano_status(
     *, volcano_name: str, timeout: int
-) -> Optional[USGSVolcanoStatus]:
+) -> USGSVolcanoStatus | None:
     """Fetch the USGS HANS elevated-volcanoes feed and pick out one volcano.
 
     Returns None when the requested volcano is at NORMAL status (HANS
@@ -296,7 +295,7 @@ def _fetch_nws_volcano_relevant_alerts(*, timeout: int) -> list[NWSAlert]:
 
     # Sort newest-sent first so the most recent operationally-relevant
     # advisory is at the top of the list.
-    alerts.sort(key=lambda a: a.sent or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    alerts.sort(key=lambda a: a.sent or datetime.min.replace(tzinfo=UTC), reverse=True)
     return alerts
 
 
@@ -316,18 +315,14 @@ def _is_volcano_relevant(props: dict) -> bool:
     # actually covers a Big Island zone. Disambiguates from the town
     # named Kīlauea on Kauai, which appears in unrelated Kauai flood/
     # surf alerts.
-    if any(kw in text_blob for kw in _AMBIGUOUS_VOLCANO_KEYWORDS):
-        if on_big_island:
-            return True
+    if any(kw in text_blob for kw in _AMBIGUOUS_VOLCANO_KEYWORDS) and on_big_island:
+        return True
 
     # Tier 3: zone-only — Big Island wind/air-quality alerts even when
     # the text doesn't mention the volcano, since wind direction over
     # the summit drives downwind tephra exposure.
     event = (props.get("event") or "").strip()
-    if on_big_island and event in _BIG_ISLAND_RELEVANT_EVENTS:
-        return True
-
-    return False
+    return bool(on_big_island and event in _BIG_ISLAND_RELEVANT_EVENTS)
 
 
 def _extract_zone_codes(props: dict) -> list[str]:
@@ -366,7 +361,7 @@ def _parse_nws_record(props: dict) -> NWSAlert:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _parse_iso_utc(value) -> Optional[datetime]:
+def _parse_iso_utc(value: str | None) -> datetime | None:
     """Parse an ISO-8601 timestamp into a UTC datetime, tolerantly.
 
     Both NWS and HANS use offset-aware ISO strings (e.g.
@@ -377,7 +372,7 @@ def _parse_iso_utc(value) -> Optional[datetime]:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
     s = str(value).strip()
     if not s:
         return None
@@ -389,5 +384,5 @@ def _parse_iso_utc(value) -> Optional[datetime]:
     except ValueError:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)

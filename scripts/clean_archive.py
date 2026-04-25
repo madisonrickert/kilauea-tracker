@@ -350,7 +350,7 @@ def write_report(
             "",
             f"Scanned {len(archive)} archive rows.",
             f"  • `truth` rows were compared to the re-reconciled live-sources value at the same bucket (threshold ±{threshold:.1f} µrad).",
-            f"  • `orphan` rows have no live-source coverage; they were compared to a ±6h rolling median of the archive itself (threshold ±4.0 µrad). Catches residual phantoms whose contributing source was already cleaned upstream.",
+            "  • `orphan` rows have no live-source coverage; they were compared to a ±6h rolling median of the archive itself (threshold ±4.0 µrad). Catches residual phantoms whose contributing source was already cleaned upstream.",
             f"Flagged {len(flagged)} row(s) total.",
             "",
             "| Date (UTC) | Archive tilt | Reference | Δ | Reason |",

@@ -10,15 +10,18 @@ run reports). We just organize them under sub-sections here.
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def show(
     *,
-    ingest_status_renderer: Optional[Callable[[], None]] = None,
-    source_plots_renderer: Optional[Callable[[], None]] = None,
-    inspector_overlays_renderer: Optional[Callable[[], None]] = None,
-    run_reports_renderer: Optional[Callable[[], None]] = None,
+    ingest_status_renderer: Callable[[], None] | None = None,
+    source_plots_renderer: Callable[[], None] | None = None,
+    inspector_overlays_renderer: Callable[[], None] | None = None,
+    run_reports_renderer: Callable[[], None] | None = None,
 ) -> None:
     """Render the Pipeline tab as a sequence of sub-sections."""
     import streamlit as st
