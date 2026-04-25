@@ -512,7 +512,9 @@ html, body, [class*="css"] {{
    vs box-shadow). The bg/border/padding resets clear whatever the
    underlying Streamlit emotion classes were drawing on the <i> — that
    was the rectangular "bounding box" visible behind a non-spinning glyph
-   in the broken-state screenshot. */
+   in the broken-state screenshot. ``display: inline-block`` so the pulse
+   box-shadow renders around the icon's full box rather than its line
+   box (an inline ``<i>`` would clip the shadow at the baseline). */
 [data-testid="stSpinner"] svg,
 [data-testid="stSpinner"] i,
 [data-testid="stExpanderIconSpinner"] {{
@@ -522,9 +524,24 @@ html, body, [class*="css"] {{
     padding: 0 !important;
     border-radius: 50%;
     font-size: 2.25rem !important;
+    display: inline-block;
     filter: drop-shadow(0 0 14px rgba(255, 107, 53, 0.55));
     animation: kt-spin 1s linear infinite,
                kt-spinner-pulse 2s ease-out infinite;
+}}
+/* Streamlit's spinner row and the expander's <details>/<summary> default
+   to ``overflow: hidden`` (and the summary clips at the line box), which
+   chops the outer edge off the pulsing box-shadow. Force ``overflow:
+   visible`` all the way down so the 18px ring renders fully. The icon
+   inside the expander summary is wrapped in an extra emotion-styled
+   ``<span>`` — that's the actual clipping ancestor in the rendered DOM,
+   so ``:has()`` it explicitly. */
+[data-testid="stSpinner"],
+[data-testid="stSpinner"] > div,
+[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) > details,
+[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) > details > summary,
+[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) span:has([data-testid="stExpanderIconSpinner"]) {{
+    overflow: visible !important;
 }}
 
 /* Breakpoints — explicit, not Streamlit defaults. */
