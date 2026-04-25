@@ -43,3 +43,8 @@ packages = ["src/kilauea_tracker"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+
+[dependency-groups]
+dev = [
+    "watchdog>=6.0.0",
+]
