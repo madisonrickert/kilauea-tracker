@@ -257,7 +257,7 @@ with st.expander(
 
 
 with st.expander("🔬 Model diagnostics"):
-    diag = prediction.fit_diagnostics
+    diag = prediction.diagnostics
     if not diag:
         st.write("No diagnostics available.")
     else:
