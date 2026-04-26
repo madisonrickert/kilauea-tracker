@@ -57,6 +57,19 @@ class PeakWidgets:
 
 
 @dataclass(frozen=True)
+class ModelWidgets:
+    """Prediction-model selector — key ``adv_active_model_id`` in session_state.
+
+    Controls which registered model drives the Chart page's hero, banner,
+    state classification, and overlay curves. The Now page intentionally
+    does NOT read this; it always uses ``DEFAULT_MODEL_ID`` so non-
+    technical visitors see a stable headline.
+    """
+
+    active_id: str
+
+
+@dataclass(frozen=True)
 class OverlayLayers:
     """Pipeline-tab inspector overlay toggles — keys ``ovl_*`` in session_state."""
 
@@ -86,6 +99,7 @@ class WidgetSnapshot:
     chart: ChartWidgets
     peaks: PeakWidgets
     overlays: OverlayLayers
+    model: ModelWidgets
 
 
 @dataclass(frozen=True)

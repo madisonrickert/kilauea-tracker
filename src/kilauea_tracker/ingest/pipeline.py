@@ -60,6 +60,8 @@ from ..config import (
     source_csv_path,
 )
 from ..model import DATE_COL, TILT_COL
+from ..models import registry as model_registry
+from ..peaks import detect_peaks
 from ..reconcile import ReconcileReport, reconcile_sources
 from .calibrate import (
     AnchorFitResult,
@@ -88,10 +90,16 @@ LAST_MODIFIED_FILE = LAST_GOOD_CALIBRATION.parent / "last_modified.json"
 RUN_REPORTS_DIR = LAST_GOOD_CALIBRATION.parent / "run_reports"
 
 # How many run report files to keep on disk. Older ones are pruned by
-# `_prune_old_run_reports` on every write. 90 is roughly one quarter of
-# daily cron runs; enough to investigate a slow-burn issue but not so many
-# that the repo bloats.
-MAX_RUN_REPORTS = 90
+# `_prune_old_run_reports` on every write. One year of daily cron runs —
+# enough headroom to grade a model against a full season of episode
+# arrivals when the eventual evaluation tab gets built.
+MAX_RUN_REPORTS = 365
+
+# How many recent peaks the prediction-logging step feeds each model.
+# Matches the default ``tw_n_peaks_for_fit`` widget value so the cron's
+# logged predictions are directly comparable to what the homepage shows
+# at default settings.
+_PREDICTION_LOG_PEAK_WINDOW = 6
 
 
 @dataclass
@@ -127,6 +135,26 @@ class IngestReport:
     )
 
 
+@dataclass(frozen=True)
+class ModelPredictionRecord:
+    """Per-model prediction snapshot persisted into each run report.
+
+    One ``ModelPredictionRecord`` per registered model is written on every
+    cron run. Long-term, this lets us grade each model against the actual
+    peak that arrives later — the evidence any future ensemble decision
+    will rest on. ``None`` fields mean the model couldn't fit on the
+    just-ingested data; ``diagnostics`` carries the per-model failure
+    detail when that happens.
+    """
+
+    model_id: str
+    next_event_date_utc: str | None       # ISO timestamp string, or None on failure
+    band_lo_utc: str | None
+    band_hi_utc: str | None
+    headline_text: str | None
+    diagnostics: dict
+
+
 @dataclass
 class IngestRunResult:
     """Outcome of an `ingest_all()` call: per-source reports + reconciliation."""
@@ -143,6 +171,11 @@ class IngestRunResult:
     # is present AND at least one rolling source overlaps digital's Jan-Jun
     # 2025 window (today: dec2024_to_now only).
     anchor_fits: list[AnchorFitResult] = field(default_factory=list)
+    # Per-model prediction snapshots — one entry per registered model,
+    # appended after reconciliation by ``_compute_model_predictions``.
+    # The eventual evaluation surface joins these against actual peaks
+    # to compute per-model accuracy.
+    predictions: list[ModelPredictionRecord] = field(default_factory=list)
 
 
 def ingest(
@@ -390,9 +423,20 @@ def ingest_all(
         merged, archive_path, sources=sources_for_reconcile
     )
 
+    # 7. Per-model prediction snapshots — captured from the merged
+    #    history so each registered model leaves a record of "what I
+    #    said on this run." The eventual evaluation surface joins these
+    #    against actual peak arrivals to grade per-model accuracy.
+    #    Best-effort: a model that raises is logged with empty fields
+    #    rather than killing the run.
+    try:
+        result.predictions = _compute_model_predictions(merged)
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning("could not compute model predictions: %s", e)
+
     result.run_finished_at_utc = datetime.now(tz=UTC)
 
-    # 7. Write a structured JSON diagnostic per-run for persistent
+    # 8. Write a structured JSON diagnostic per-run for persistent
     #    prod observability. Best-effort: a write failure here must never
     #    fail the pipeline — the CSVs are what the app actually reads.
     try:
@@ -668,6 +712,55 @@ def _cli_main() -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _compute_model_predictions(
+    history: pd.DataFrame,
+) -> list[ModelPredictionRecord]:
+    """Run every registered model on the just-ingested history and
+    capture each one's prediction for the run report.
+
+    Always returns one record per registered model — even when a model
+    can't fit the data, we record an entry with ``None`` fields and
+    the model's diagnostics so the eventual evaluation tab knows the
+    model existed and was queried.
+    """
+    if len(history) == 0:
+        peaks_df = pd.DataFrame({DATE_COL: pd.to_datetime([]), TILT_COL: []})
+    else:
+        all_peaks = detect_peaks(history)
+        peaks_df = all_peaks.tail(_PREDICTION_LOG_PEAK_WINDOW).reset_index(drop=True)
+
+    records: list[ModelPredictionRecord] = []
+    for model in model_registry.list_models():
+        try:
+            out = model.predict(history, peaks_df)
+        except Exception as e:  # pragma: no cover — defensive
+            logger.warning("model %s.predict raised: %s", model.id, e)
+            records.append(
+                ModelPredictionRecord(
+                    model_id=model.id,
+                    next_event_date_utc=None,
+                    band_lo_utc=None,
+                    band_hi_utc=None,
+                    headline_text=None,
+                    diagnostics={"error": str(e)},
+                )
+            )
+            continue
+        band_lo = out.confidence_band[0] if out.confidence_band is not None else None
+        band_hi = out.confidence_band[1] if out.confidence_band is not None else None
+        records.append(
+            ModelPredictionRecord(
+                model_id=model.id,
+                next_event_date_utc=_dt_str(out.next_event_date),
+                band_lo_utc=_dt_str(band_lo),
+                band_hi_utc=_dt_str(band_hi),
+                headline_text=out.headline_text,
+                diagnostics=dict(out.diagnostics),
+            )
+        )
+    return records
+
+
 def _write_run_report(result: IngestRunResult) -> Path:
     """Serialize the full IngestRunResult to `data/run_reports/<ts>.json`.
 
@@ -715,6 +808,23 @@ def _write_run_report(result: IngestRunResult) -> Path:
                 "note": f.note,
             }
             for f in result.anchor_fits
+        ]
+
+    # Per-model prediction snapshots. Always emitted — even on runs
+    # where every model failed — so the evaluation tab can later see
+    # which runs had no usable predictions and which models were
+    # responsible.
+    if result.predictions:
+        payload["predictions"] = [
+            {
+                "model_id": p.model_id,
+                "next_event_date_utc": p.next_event_date_utc,
+                "band_lo_utc": p.band_lo_utc,
+                "band_hi_utc": p.band_hi_utc,
+                "headline_text": p.headline_text,
+                "diagnostics": p.diagnostics,
+            }
+            for p in result.predictions
         ]
 
     out_path.write_text(json.dumps(payload, indent=2, default=str))

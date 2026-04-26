@@ -17,7 +17,14 @@ default; the rest of the app reads through the typed snapshot.
 from __future__ import annotations
 
 from ..config import PEAK_DEFAULTS
-from .snapshot import ChartWidgets, OverlayLayers, PeakWidgets, WidgetSnapshot
+from ..models import registry as _model_registry
+from .snapshot import (
+    ChartWidgets,
+    ModelWidgets,
+    OverlayLayers,
+    PeakWidgets,
+    WidgetSnapshot,
+)
 
 # Default values for every widget key the app uses. The shape of this
 # dict is *the* declaration of the widget surface — adding a new
@@ -32,6 +39,11 @@ WIDGET_DEFAULTS: dict[str, object] = {
     "adv_min_prominence": PEAK_DEFAULTS.min_prominence,
     "adv_min_distance_days": PEAK_DEFAULTS.min_distance_days,
     "adv_min_height": -10.0,  # legacy floor; UI lets users override
+    # Active prediction model (Chart-page selector). Defaults to the
+    # registry's DEFAULT_MODEL_ID so the homepage and any deep-link to
+    # /chart land on the canonical model the cron also logs predictions
+    # for. Non-technical visitors on /now never see this control.
+    "adv_active_model_id": _model_registry.DEFAULT_MODEL_ID,
     # Inspector overlay layers (Pipeline tab) — twelve toggles
     "ovl_dots": True,
     "ovl_bbox": False,
@@ -86,6 +98,9 @@ def widget_snapshot() -> WidgetSnapshot:
             min_prominence=float(st.session_state["adv_min_prominence"]),
             min_distance_days=float(st.session_state["adv_min_distance_days"]),
             min_height=float(st.session_state["adv_min_height"]),
+        ),
+        model=ModelWidgets(
+            active_id=str(st.session_state["adv_active_model_id"]),
         ),
         overlays=OverlayLayers(
             dots=bool(st.session_state["ovl_dots"]),

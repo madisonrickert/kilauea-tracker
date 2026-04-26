@@ -14,7 +14,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import pytest
 
-from kilauea_tracker.model import DATE_COL, TILT_COL, predict
+from kilauea_tracker.model import DATE_COL, TILT_COL
+from kilauea_tracker.models.trendline_exp import TrendlineExpModel
 from kilauea_tracker.peaks import detect_peaks
 from kilauea_tracker.plotting import build_figure
 
@@ -30,7 +31,7 @@ def realistic_inputs():
     df = df.dropna().sort_values(DATE_COL).reset_index(drop=True)
     all_peaks = detect_peaks(df)
     fit_peaks = all_peaks.tail(6).reset_index(drop=True)
-    pred = predict(df, fit_peaks)
+    pred = TrendlineExpModel().predict(df, fit_peaks)
     return df, all_peaks, fit_peaks, pred
 
 
@@ -90,7 +91,7 @@ def test_build_figure_handles_empty_history():
             "prominence": [],
         }
     )
-    pred = predict(empty_tilt, empty_peaks)
+    pred = TrendlineExpModel().predict(empty_tilt, empty_peaks)
     fig = build_figure(empty_tilt, empty_peaks, pred)
     assert isinstance(fig, go.Figure)
     # No title — Streamlit provides its own header above the chart.
@@ -128,8 +129,7 @@ def test_build_figure_zoom_expands_to_include_all_fit_peaks(realistic_inputs):
     # Use a very wide fit window: ALL detected peaks (the legacy CSV has
     # peaks going back to 2024-12, well outside the 90-day window).
     big_fit = all_peaks.copy().reset_index(drop=True)
-    from kilauea_tracker.model import predict
-    pred = predict(df, big_fit)
+    pred = TrendlineExpModel().predict(df, big_fit)
     fig = build_figure(df, big_fit, pred, all_peaks_df=all_peaks)
     x_range = fig.layout.xaxis.range
     assert x_range is not None
@@ -366,8 +366,6 @@ def test_episode_shading_renders_alternating_bands(realistic_inputs):
 
 def test_episode_shading_noop_without_peaks():
     """No peaks → no shading rects; must not crash."""
-    from kilauea_tracker.model import predict
-
     empty_tilt = pd.DataFrame(
         {DATE_COL: pd.Series(dtype="datetime64[ns]"), TILT_COL: []}
     )
@@ -378,7 +376,7 @@ def test_episode_shading_noop_without_peaks():
             "prominence": [],
         }
     )
-    pred = predict(empty_tilt, empty_peaks)
+    pred = TrendlineExpModel().predict(empty_tilt, empty_peaks)
     fig = build_figure(empty_tilt, empty_peaks, pred, all_peaks_df=empty_peaks)
     episode_rects = [
         s for s in (fig.layout.shapes or ())

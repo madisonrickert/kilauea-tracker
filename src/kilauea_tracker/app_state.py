@@ -16,6 +16,7 @@ caching strategy lives in one place. The pure compute layers it wraps —
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -24,9 +25,13 @@ import streamlit as st
 from .cache import load_history
 from .config import HISTORY_CSV, INGEST_CACHE_TTL_SECONDS
 from .ingest.pipeline import IngestRunResult, load_latest_run_report
-from .model import DATE_COL, TILT_COL, Prediction, predict
+from .model import DATE_COL, TILT_COL
+from .models import registry as model_registry
 from .peaks import detect_peaks
 from .safety_alerts import SafetyAlertSummary, fetch_safety_alerts
+
+if TYPE_CHECKING:
+    from .models.output import ModelOutput
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tilt history
@@ -94,8 +99,22 @@ def get_recent_peaks(all_peaks: pd.DataFrame, n_peaks_for_fit: int) -> pd.DataFr
     return all_peaks.tail(n_peaks_for_fit).reset_index(drop=True)
 
 
-def get_prediction(tilt_df: pd.DataFrame, recent_peaks: pd.DataFrame) -> Prediction:
-    return predict(tilt_df, recent_peaks)
+def get_prediction(
+    tilt_df: pd.DataFrame,
+    recent_peaks: pd.DataFrame,
+    *,
+    model_id: str | None = None,
+) -> ModelOutput:
+    """Run the active prediction model and return its ``ModelOutput``.
+
+    ``model_id`` defaults to ``DEFAULT_MODEL_ID`` (the canonical model
+    the homepage and the cron pipeline use). Pages that expose a model
+    selector pass the user's choice; pages without a selector (e.g.
+    Now) pass ``None`` and inherit the default.
+    """
+    chosen_id = model_id or model_registry.DEFAULT_MODEL_ID
+    model = model_registry.get(chosen_id)
+    return model.predict(tilt_df, recent_peaks)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -172,7 +191,7 @@ def _drop_from_recent_max(df: pd.DataFrame, lookback_hours: float) -> float | No
 
 def get_eruption_state(
     tilt_df: pd.DataFrame,
-    prediction: Prediction | None,
+    prediction: ModelOutput | None,
 ) -> tuple[str, dict]:
     """Classify the current point in the eruption lifecycle.
 

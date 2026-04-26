@@ -22,6 +22,7 @@ import streamlit as st
 from kilauea_tracker import app_state
 from kilauea_tracker.config import ALL_SOURCES, TILT_SOURCE_NAME, source_csv_path
 from kilauea_tracker.model import DATE_COL, TILT_COL
+from kilauea_tracker.models import registry as model_registry
 from kilauea_tracker.plotting import build_figure
 from kilauea_tracker.state import get_state
 
@@ -70,13 +71,41 @@ all_peaks = app_state.get_peaks(
     min_height=state.widgets.peaks.min_height,
 )
 recent_peaks = app_state.get_recent_peaks(all_peaks, state.widgets.chart.n_peaks_for_fit)
-prediction = app_state.get_prediction(tilt_df, recent_peaks)
+prediction = app_state.get_prediction(
+    tilt_df, recent_peaks, model_id=state.widgets.model.active_id
+)
 eruption_state, _eruption_state_info = app_state.get_eruption_state(tilt_df, prediction)
+# Interval-median forecast — fetched independently of the active model so
+# the "sanity check" caption below the chart can always cite it (and
+# stays meaningful even when the user has switched the active model away
+# from the trendline×exp default).
+interval_baseline = app_state.get_prediction(
+    tilt_df, recent_peaks, model_id="interval_median"
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Chart options — controls that only make sense next to the chart.
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Prediction-model selector lives outside the Advanced expander because
+# it changes which model drives the chart's headline + curves — that's a
+# load-bearing choice, not a tuning knob. ``st.radio`` over ``st.selectbox``
+# because the latter is a searchable combobox; with a small fixed set of
+# models, radio is more idiomatic and avoids the misleading text-input
+# affordance. The Now page intentionally does NOT expose this; non-
+# technical visitors always see the configured default model.
+_model_options = [m.id for m in model_registry.list_models()]
+_model_labels = {m.id: m.label for m in model_registry.list_models()}
+_active_model = model_registry.get(state.widgets.model.active_id)
+st.radio(
+    "Prediction model",
+    options=_model_options,
+    format_func=lambda i: _model_labels.get(i, i),
+    key="adv_active_model_id",
+    help=_active_model.description,
+    horizontal=True,
+)
 
 _chart_opts_cols = st.columns([1.2, 1])
 with _chart_opts_cols[0]:
@@ -278,17 +307,17 @@ st.caption(
 )
 
 # ── Interval-based sanity check (secondary forecast) ───────────────────
-# Independent from the exp-fit prediction above. Uses the median gap
-# between detected peaks as a crude "when was the last one + typical
-# cycle length?" baseline. Lives here (with the chart) rather than above
-# the fold — it's a technical cross-check, not the headline answer.
+# Independent from whichever model is driving the chart above. Uses the
+# median gap between detected peaks as a crude "when was the last one +
+# typical cycle length?" baseline. Lives here (with the chart) rather
+# than above the fold — it's a technical cross-check, not the headline.
 if (
     eruption_state != "active"
-    and prediction.interval_based_next_event_date is not None
+    and interval_baseline.next_event_date is not None
 ):
-    ib_date = prediction.interval_based_next_event_date
-    ib_band = prediction.interval_based_band
-    median_days = prediction.median_peak_interval_days or 0.0
+    ib_date = interval_baseline.next_event_date
+    ib_band = interval_baseline.confidence_band
+    median_days = interval_baseline.diagnostics.get("median_peak_interval_days") or 0.0
     ib_aware = ib_date.tz_localize("UTC") if ib_date.tzinfo is None else ib_date
     delta_days = (pd.Timestamp.now(tz="UTC") - ib_aware).total_seconds() / 86400
     overdue_str = (

@@ -10,11 +10,13 @@ The Streamlit layer is responsible for embedding it via `st.plotly_chart`.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-from .model import DATE_COL, TILT_COL, Curve, CurveBand, Prediction, from_days, to_days
+from .model import DATE_COL, TILT_COL, from_days
 from .ui.palette import (
     FLAME,
     HALO,
@@ -22,6 +24,9 @@ from .ui.palette import (
     STATE_COLOR,
     STEAM,
 )
+
+if TYPE_CHECKING:
+    from .models.output import ModelOutput, NamedCurve
 
 # Volcano palette applied to the chart. Locked to the UI palette so chip,
 # banner, and chart all speak the same color language.
@@ -63,7 +68,7 @@ DEFAULT_ZOOM_PEAK_PADDING_DAYS = 7
 def build_figure(
     tilt_df: pd.DataFrame,
     fit_peaks_df: pd.DataFrame,
-    prediction: Prediction,
+    model_output: ModelOutput,
     *,
     all_peaks_df: pd.DataFrame | None = None,
     title: str = "",
@@ -77,22 +82,26 @@ def build_figure(
     Args:
         tilt_df:                    Full tilt history (`[Date, Tilt (microradians)]`).
         fit_peaks_df:               Peaks that fed the trendline fit — drawn as bright X.
-        prediction:                 A `Prediction` from `model.predict`. Any
-                                    field may be None when the underlying fit
-                                    didn't converge.
+        model_output:               A ``ModelOutput`` from any registered
+                                    prediction model. Carries the curves to
+                                    overlay, the predicted next-event date +
+                                    tilt, and the 80% confidence band. Any
+                                    field may be ``None`` when the underlying
+                                    fit didn't converge.
         all_peaks_df:               Optional. All detected peaks, a superset of
                                     `fit_peaks_df`. Peaks NOT in the fit window
                                     are drawn as dimmed X markers so the user
                                     sees what was excluded.
         title:                      Plot title. Pass empty when Streamlit
                                     provides its own.
-        show_current_episode:       When False, suppress the exponential
-                                    "current episode" curve and its confidence
-                                    band. The Streamlit layer flips this off
-                                    once an eruption is actively underway —
-                                    at that point the exp fit is modelling
-                                    the inflation phase that just ended, so
-                                    it would only mislead.
+        show_current_episode:       When False, suppress any ribbon curves
+                                    in ``model_output.curves`` whose label
+                                    suggests they're the current-episode fit.
+                                    The Streamlit layer flips this off once
+                                    an eruption is actively underway — at
+                                    that point the exp fit is modelling the
+                                    inflation phase that just ended, so it
+                                    would only mislead.
         show_next_event_prediction: When False, suppress the predicted-event
                                     star marker and its 80% confidence band
                                     rectangle. Streamlit flips this off when
@@ -210,54 +219,28 @@ def build_figure(
             )
         )
 
-    extent_end_day = _resolve_extent_end_day(tilt_df, prediction)
-
-    # ── 3a. trendline 80% CI ribbon (drawn BEHIND the trendline) ────────────
-    if prediction.trendline_band is not None:
-        _add_band(
-            fig,
-            band=prediction.trendline_band,
-            fillcolor=TRENDLINE_BAND_FILL,
-            name="Trendline 80% CI",
-        )
-
-    # ── 3b. exp curve 80% CI ribbon (drawn BEHIND the exp curve) ────────────
-    if show_current_episode and prediction.exp_band is not None:
-        _add_band(
-            fig,
-            band=prediction.exp_band,
-            fillcolor=EXP_BAND_FILL,
-            name="Exp fit 80% CI",
-        )
-
-    # ── 3c. linear trendline ────────────────────────────────────────────────
-    if prediction.trendline is not None:
-        n = prediction.n_peaks_in_fit
-        _add_curve(
-            fig,
-            curve=prediction.trendline,
-            extent_end_day=extent_end_day,
-            name=f"Trendline (last {n} peaks)",
-            color=trendline_color,
-            dash="dash",
-        )
-
-    # ── 4. exponential saturation curve ─────────────────────────────────────
-    if show_current_episode and prediction.exp_curve is not None:
-        _add_curve(
-            fig,
-            curve=prediction.exp_curve,
-            extent_end_day=extent_end_day,
-            name="Current episode (exp fit)",
-            color=EXP_COLOR,
-            dash="solid",
-            width=2.5,
-        )
+    # ── 3. model-declared overlay curves (trendline, exp, ribbons, …) ──────
+    # The model emits NamedCurves carrying style hints; the renderer maps
+    # them to Plotly traces. We pre-filter the "current episode" curves out
+    # when ``show_current_episode`` is False — once an eruption is active
+    # the exp fit is modelling an inflation phase that just ended.
+    visible_curves = list(model_output.curves)
+    if not show_current_episode:
+        visible_curves = [
+            c for c in visible_curves
+            if "exp" not in c.label.lower() and "episode" not in c.label.lower()
+        ]
+    render_named_curves(
+        fig,
+        visible_curves,
+        primary_color=trendline_color,
+        ribbon_fill=TRENDLINE_BAND_FILL,
+    )
 
     # ── 5. confidence band — drawn BEFORE the event marker so the marker
     #      sits on top of the band, not under it ─────────────────────────────
-    if show_next_event_prediction and prediction.confidence_band is not None:
-        lo, hi = prediction.confidence_band
+    if show_next_event_prediction and model_output.confidence_band is not None:
+        lo, hi = model_output.confidence_band
         fig.add_vrect(
             x0=lo,
             x1=hi,
@@ -286,31 +269,37 @@ def build_figure(
         )
 
     # ── 6. predicted event marker ───────────────────────────────────────────
+    # The model declares ``next_event_tilt`` when it can fit a tilt-vs-time
+    # curve through the prediction. Models that only forecast a date (e.g.
+    # the interval-median baseline) leave it None — fall back to "the last
+    # observed tilt + a small upward nudge" so the marker has a sensible
+    # y-position on the chart.
     if (
         show_next_event_prediction
-        and prediction.next_event_date is not None
-        and prediction.next_event_tilt is not None
+        and model_output.next_event_date is not None
     ):
-        fig.add_trace(
-            go.Scatter(
-                x=[prediction.next_event_date],
-                y=[prediction.next_event_tilt],
-                mode="markers",
-                name="Next fountain event",
-                marker={
-                    "symbol": "star",
-                    "color": NEXT_EVENT_COLOR,
-                    "size": 22,
-                    "line": {"width": 2, "color": "black"},
-                },
-                hovertemplate=(
-                    f"<b>Next fountain event</b><br>"
-                    f"{prediction.next_event_date.strftime('%Y-%m-%d %H:%M')}<br>"
-                    f"Tilt: {prediction.next_event_tilt:.2f} µrad"
-                    "<extra></extra>"
-                ),
+        marker_y = _resolve_marker_y(model_output, tilt_df)
+        if marker_y is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=[model_output.next_event_date],
+                    y=[marker_y],
+                    mode="markers",
+                    name="Next fountain event",
+                    marker={
+                        "symbol": "star",
+                        "color": NEXT_EVENT_COLOR,
+                        "size": 22,
+                        "line": {"width": 2, "color": "black"},
+                    },
+                    hovertemplate=(
+                        f"<b>Next fountain event</b><br>"
+                        f"{model_output.next_event_date.strftime('%Y-%m-%d %H:%M')}<br>"
+                        f"Tilt: {marker_y:.2f} µrad"
+                        "<extra></extra>"
+                    ),
+                )
             )
-        )
 
     # ── 7a. vertical "now" line: strong past/future split ───────────────────
     # Use a Scatter trace rather than add_vline + annotation_text, because
@@ -361,31 +350,32 @@ def build_figure(
         )
     if (
         show_next_event_prediction
-        and prediction.next_event_date is not None
-        and prediction.next_event_tilt is not None
+        and model_output.next_event_date is not None
     ):
-        fig.add_annotation(
-            x=prediction.next_event_date,
-            y=prediction.next_event_tilt,
-            text=(
-                f"predicted next · "
-                f"{pd.Timestamp(prediction.next_event_date).strftime('%b %-d')}"
-            ),
-            showarrow=True,
-            arrowhead=2,
-            arrowsize=1,
-            arrowcolor=NEXT_EVENT_COLOR,
-            ax=0,
-            ay=-36,
-            font={"color": STEAM, "size": 11},
-            bgcolor="rgba(30, 37, 55, 0.85)",
-            bordercolor=NEXT_EVENT_COLOR,
-            borderwidth=1,
-            borderpad=3,
-        )
+        annotation_y = _resolve_marker_y(model_output, tilt_df)
+        if annotation_y is not None:
+            fig.add_annotation(
+                x=model_output.next_event_date,
+                y=annotation_y,
+                text=(
+                    f"predicted next · "
+                    f"{pd.Timestamp(model_output.next_event_date).strftime('%b %-d')}"
+                ),
+                showarrow=True,
+                arrowhead=2,
+                arrowsize=1,
+                arrowcolor=NEXT_EVENT_COLOR,
+                ax=0,
+                ay=-36,
+                font={"color": STEAM, "size": 11},
+                bgcolor="rgba(30, 37, 55, 0.85)",
+                bordercolor=NEXT_EVENT_COLOR,
+                borderwidth=1,
+                borderpad=3,
+            )
 
     # ── 7c. default zoom: recent history + projection horizon ───────────────
-    x_range = _default_x_range(tilt_df, fit_peaks_df, prediction)
+    x_range = _default_x_range(tilt_df, fit_peaks_df, model_output)
 
     layout_kwargs = {
         "xaxis_title": "Date",
@@ -432,7 +422,7 @@ def build_figure(
 def _default_x_range(
     tilt_df: pd.DataFrame,
     fit_peaks_df: pd.DataFrame,
-    prediction: Prediction,
+    model_output: ModelOutput,
 ) -> list | None:
     """Pick a sensible default zoom: enough recent history to show every peak
     that's currently feeding the trendline, plus the projected event window.
@@ -457,28 +447,34 @@ def _default_x_range(
         if padded_start < start:
             start = padded_start
 
-    if prediction.next_event_date is not None:
-        end = max(end, prediction.next_event_date)
-    if prediction.confidence_band is not None:
-        end = max(end, prediction.confidence_band[1])
+    if model_output.next_event_date is not None:
+        end = max(end, model_output.next_event_date)
+    if model_output.confidence_band is not None:
+        end = max(end, model_output.confidence_band[1])
     end = end + pd.Timedelta(days=DEFAULT_ZOOM_FUTURE_DAYS)
     return [start, end]
 
 
-def _resolve_extent_end_day(
-    tilt_df: pd.DataFrame, prediction: Prediction
+def _resolve_marker_y(
+    model_output: ModelOutput, tilt_df: pd.DataFrame
 ) -> float | None:
-    """Choose how far forward in time the trendline curves should extend."""
-    candidates: list[float] = []
-    if len(tilt_df) > 0:
-        candidates.append(to_days(tilt_df[DATE_COL].max()) + 7.0)
-    if prediction.next_event_date is not None:
-        candidates.append(to_days(prediction.next_event_date) + 3.0)
-    if prediction.confidence_band is not None:
-        candidates.append(to_days(prediction.confidence_band[1]) + 3.0)
-    if prediction.exp_curve is not None:
-        candidates.append(prediction.exp_curve.domain[1])
-    return max(candidates) if candidates else None
+    """Y-position for the predicted-event marker.
+
+    When the model declares ``next_event_tilt`` (e.g. trendline×exp's
+    intersection y-value), use it directly. Otherwise — for models like
+    interval-median that only forecast a date — fall back to "the last
+    observed tilt nudged 10% upward through the recent y-span," same
+    convention the hero sparkline uses.
+    """
+    if model_output.next_event_tilt is not None:
+        return model_output.next_event_tilt
+    if len(tilt_df) == 0:
+        return None
+    last_tilt = float(tilt_df[TILT_COL].iloc[-1])
+    y_min = float(tilt_df[TILT_COL].min())
+    y_max = float(tilt_df[TILT_COL].max())
+    y_span = max(y_max - y_min, 1.0)
+    return last_tilt + 0.10 * y_span
 
 
 EPISODE_SHADE_FILL = "rgba(226, 232, 240, 0.035)"  # steam @ 3.5% — very subtle
@@ -513,61 +509,97 @@ def _add_episode_shading(
         )
 
 
-def _add_band(
+# ─────────────────────────────────────────────────────────────────────────────
+# NamedCurve renderer — the boundary that lets ``models/`` stay Plotly-free
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# Plotly dash-style strings keyed by the public ``CurveStyle`` literal.
+# Centralized so a future model author who sets ``style="dotted"`` doesn't
+# have to know what string Plotly expects.
+_DASH_STYLE_MAP: dict[str, str] = {
+    "solid": "solid",
+    "dashed": "dash",
+    "dotted": "dot",
+}
+
+# Default colors for each ``ColorRole``. The chart already ties trendline
+# color to eruption state via ``STATE_COLOR``; these are the fallbacks
+# when no state-specific color applies.
+_DEFAULT_PRIMARY_COLOR = LAVA
+_DEFAULT_SECONDARY_COLOR = "rgba(226, 232, 240, 0.55)"
+_DEFAULT_RIBBON_FILL = HALO
+
+
+def render_named_curves(
     fig: go.Figure,
+    curves: list[NamedCurve],
     *,
-    band: CurveBand,
-    fillcolor: str,
-    name: str,
+    primary_color: str | None = None,
+    secondary_color: str | None = None,
+    ribbon_fill: str | None = None,
 ) -> None:
-    """Render a CurveBand as a filled ribbon between hi and lo curves."""
-    dates = [from_days(d) for d in band.days]
-    # Plotly's "fill='toself'" needs a closed polygon: forward along hi,
-    # then back along lo reversed.
-    fig.add_trace(
-        go.Scatter(
-            x=dates + dates[::-1],
-            y=list(band.hi) + list(band.lo)[::-1],
-            fill="toself",
-            fillcolor=fillcolor,
-            line={"width": 0},
-            name=name,
-            hoverinfo="skip",
-            showlegend=True,
+    """Render each ``NamedCurve`` as a Plotly trace and add it to ``fig``.
+
+    Maps the model layer's style hints to Plotly trace properties:
+
+      - ``color_role="primary"`` line curves use ``primary_color`` (or the
+        chart-default LAVA when none is provided).
+      - ``color_role="secondary"`` line curves use the dimmer ``STEAM``
+        token so they read as supporting context.
+      - ``color_role="ribbon"`` curves expect ``band_lo`` and ``band_hi``
+        populated; render as a single filled-band trace using the same
+        ``fill="toself"`` polygon trick the legacy ``_add_band`` uses.
+      - ``style`` ∈ {"solid", "dashed", "dotted"} → Plotly dash strings.
+
+    Curves are added in input order; the chart-page caller is responsible
+    for ordering them (ribbons typically before lines so lines draw on top).
+    """
+    primary = primary_color or _DEFAULT_PRIMARY_COLOR
+    secondary = secondary_color or _DEFAULT_SECONDARY_COLOR
+    fill = ribbon_fill or _DEFAULT_RIBBON_FILL
+
+    for curve in curves:
+        if curve.color_role == "ribbon":
+            if curve.band_lo is None or curve.band_hi is None:
+                # Ribbon role without bounds is a model bug — skip rather
+                # than silently misrender as a line.
+                continue
+            dates = [from_days(d) for d in curve.days]
+            fig.add_trace(
+                go.Scatter(
+                    x=dates + dates[::-1],
+                    y=list(curve.band_hi) + list(curve.band_lo)[::-1],
+                    fill="toself",
+                    fillcolor=fill,
+                    line={"width": 0},
+                    name=curve.label,
+                    hoverinfo="skip",
+                    showlegend=True,
+                )
+            )
+            continue
+
+        color = primary if curve.color_role == "primary" else secondary
+        dates = [from_days(d) for d in curve.days]
+        fig.add_trace(
+            go.Scatter(
+                x=dates,
+                y=list(np.asarray(curve.values, dtype=float)),
+                mode="lines",
+                name=curve.label,
+                line={
+                    "color": color,
+                    "dash": _DASH_STYLE_MAP[curve.style],
+                    "width": 2.0,
+                },
+                hovertemplate=(
+                    f"<b>{curve.label}</b><br>"
+                    "%{x|%Y-%m-%d %H:%M}<br>"
+                    "%{y:.2f} µrad"
+                    "<extra></extra>"
+                ),
+            )
         )
-    )
 
 
-def _add_curve(
-    fig: go.Figure,
-    *,
-    curve: Curve,
-    extent_end_day: float | None,
-    name: str,
-    color: str,
-    dash: str,
-    width: float = 2.0,
-) -> None:
-    x_min, x_max = curve.domain
-    if extent_end_day is not None and extent_end_day > x_max:
-        x_max = extent_end_day
-
-    days = np.linspace(x_min, x_max, 200)
-    dates = [from_days(d) for d in days]
-    values = [float(curve.f(d)) for d in days]
-
-    fig.add_trace(
-        go.Scatter(
-            x=dates,
-            y=values,
-            mode="lines",
-            name=name,
-            line={"color": color, "dash": dash, "width": width},
-            hovertemplate=(
-                f"<b>{name}</b><br>"
-                "%{x|%Y-%m-%d %H:%M}<br>"
-                "%{y:.2f} µrad"
-                "<extra></extra>"
-            ),
-        )
-    )
