@@ -370,6 +370,7 @@ _topbar_fragment()
 _pages = [
     st.Page("pages/now.py", title="Now", url_path="now", default=True),
     st.Page("pages/chart.py", title="Chart", url_path="chart"),
+    st.Page("pages/backtest.py", title="Backtest", url_path="backtest"),
     st.Page("pages/cameras.py", title="Cameras", url_path="cameras"),
     st.Page("pages/pipeline.py", title="Pipeline", url_path="pipeline"),
     st.Page("pages/about.py", title="About", url_path="about"),

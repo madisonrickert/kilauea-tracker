@@ -19,7 +19,17 @@ REGISTRY: dict[str, Model] = {}
 # is requested. Changing this changes what non-technical visitors see
 # on the Now page — coordinate with the visible-curves story before
 # touching it.
-DEFAULT_MODEL_ID: str = "trendline_exp"
+#
+# `auto` (the phase-aware ensemble that delegates to `linear` early in
+# inflation and `linear_naive` late) was promoted to default in 2026-04
+# after the per-quartile backtest showed:
+#   - `auto` ties or beats every single model at every quartile
+#   - the previous default `trendline_exp` was the WORST performer at
+#     every quartile (414h–527h median |error| vs auto's 24h–90h)
+# Re-run `uv run python scripts/compare_models.py` (or open the
+# Backtest page) to see the current ranking; if a future regime shift
+# changes the winner, revisit this constant.
+DEFAULT_MODEL_ID: str = "auto"
 
 
 def register(model: Model) -> None:

@@ -196,6 +196,36 @@ PEAK_DEFAULTS = PeakDetectionDefaults()
 # plots roughly every 15 minutes, so re-fetching more often is wasted.
 INGEST_CACHE_TTL_SECONDS = 15 * 60
 
+
+# ─── Inflation-curve fit windows (Apr 2026 model expansion) ────────────────────
+#
+# A naive linear fit through the entire post-trough recovery underestimates
+# the time to next event because the inflation rate is steeper in the first
+# few hours after deflation ends. Empirical: across the last 7 episodes the
+# first-quartile slope is 1.4–2.6× the last-quartile slope (see
+# `.claude/plans/look-at-the-shape-spicy-island.md` slope-decay table).
+#
+# `linear` (the corrected within-cycle linear model) trims the fit window
+# to the late portion of the post-trough data — `min(last
+# INFLATION_LATE_FIT_FRACTION of samples, last INFLATION_LATE_FIT_MAX_DAYS
+# of wallclock)`. The 0.5 / 7-day pair lets episodes shorter than 14 days
+# fall through to the fraction cutoff and longer episodes use the absolute
+# day cap, which keeps the asymptotic-rate window well-bounded for both
+# the typical 9–15-day cycle and the occasional 25–30-day outlier.
+INFLATION_LATE_FIT_FRACTION = 0.5
+INFLATION_LATE_FIT_MAX_DAYS = 7.0
+
+# Cross-cycle parameter projection. The `_hist` and `_stitched` models fit
+# parameters across the last N complete inflation phases and use those as
+# the predictive signal instead of (or in addition to) the current episode.
+# Coefficient of variation over the last 8 episodes: linear m=0.28, power
+# p=0.31, exp k=0.84 (degenerate). HIST_FIT_N_EPISODES is the rolling
+# window size; HIST_FIT_MIN_EPISODES is the minimum the historical model
+# will run with — below it the model returns no prediction with a
+# diagnostic "insufficient history".
+HIST_FIT_N_EPISODES = 6
+HIST_FIT_MIN_EPISODES = 4
+
 # Display timezone — v1.0 labels Pacific/Honolulu Time on the x-axis (line 329).
 DISPLAY_TIMEZONE = "Pacific/Honolulu"
 

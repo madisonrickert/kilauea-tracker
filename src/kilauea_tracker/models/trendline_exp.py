@@ -18,11 +18,10 @@ Pure: no I/O, no clock reads, no module-level mutable state.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import brentq, curve_fit
+from scipy.optimize import curve_fit
 
 from ..model import (
     DATE_COL,
@@ -30,22 +29,16 @@ from ..model import (
     Curve,
     CurveBand,
     exp_saturation,
-    from_days,
     to_days,
+)
+from ._intersection import (
+    PROJECTION_WINDOW_DAYS as _PROJECTION_WINDOW_DAYS,
+)
+from ._intersection import (
+    find_intersection as _find_intersection,
 )
 from .output import ModelOutput, NamedCurve
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-# Sanity bounds on the predicted intersection's tilt value. v1.0 used
-# (-20, 15); the live data eventually exceeded those, silently dropping
-# valid predictions. Widened to (-50, 50) — brentq + the projection
-# bracket already guarantee a sensible date range, so this is just a
-# "no-NaN" guard.
-_INTERSECTION_TILT_MIN = -50.0
-_INTERSECTION_TILT_MAX = 50.0
-_PROJECTION_WINDOW_DAYS = 90.0
 _CURVE_FIT_MAXFEV = 5000
 # Cap exp-saturation amplitude so the fitter can't escape into degenerate
 # (A→∞, k→0) solutions when the recovery hasn't developed enough curvature.
@@ -234,7 +227,7 @@ def compute_trendline_exp(
 
     # ── intersection of trendline × exp ──────────────────────────────────────
     next_event_date, next_event_tilt = _find_intersection(
-        f_exp=_exp_eval,
+        f_curve=_exp_eval,
         f_lin=trendline.f,
         last_current_day=last_current_day,
         last_peak_day=float(peaks_df["_day"].max()),
@@ -282,55 +275,6 @@ def _make_linear_curve(
         return _p(np.asarray(x, dtype=float))
 
     return Curve(name=name, f=_eval, domain=domain)
-
-
-def _find_intersection(
-    f_exp: Callable[[float], float],
-    f_lin: Callable[[float], float],
-    last_current_day: float,
-    last_peak_day: float,
-) -> tuple[pd.Timestamp | None, float | None]:
-    """Solve ``f_exp(x) == f_lin(x)`` in the future projection window."""
-    projection_start = max(last_peak_day, last_current_day)
-    projection_end = projection_start + _PROJECTION_WINDOW_DAYS
-
-    def diff(x: float) -> float:
-        return float(f_exp(x) - f_lin(x))
-
-    scan = np.linspace(projection_start, projection_end, 91)
-    try:
-        diffs = np.array([diff(x) for x in scan])
-    except Exception:
-        return None, None
-
-    sign_change_idx = None
-    for i in range(len(diffs) - 1):
-        if np.isnan(diffs[i]) or np.isnan(diffs[i + 1]):
-            continue
-        if diffs[i] == 0:
-            sign_change_idx = i
-            break
-        if diffs[i] * diffs[i + 1] < 0:
-            sign_change_idx = i
-            break
-
-    if sign_change_idx is None:
-        return None, None
-
-    a, b = scan[sign_change_idx], scan[sign_change_idx + 1]
-    if diffs[sign_change_idx] == 0:
-        root = a
-    else:
-        try:
-            root = brentq(diff, a, b, xtol=1e-4, maxiter=100)
-        except Exception:
-            return None, None
-
-    tilt_at_root = float(f_lin(root))
-    if not (_INTERSECTION_TILT_MIN < tilt_at_root < _INTERSECTION_TILT_MAX):
-        return None, None
-
-    return from_days(root), tilt_at_root
 
 
 def _monte_carlo_bands(
@@ -410,7 +354,7 @@ def _monte_carlo_bands(
 
         if next_event_date is not None:
             date, _ = _find_intersection(
-                f_exp=f_exp_b,
+                f_curve=f_exp_b,
                 f_lin=f_lin_b,
                 last_current_day=last_current_day,
                 last_peak_day=last_peak_day,

@@ -69,5 +69,7 @@ def test_list_models_returns_registered_in_insertion_order():
     assert listed_ids.index("fake") < listed_ids.index("fake_b")
 
 
-def test_default_model_id_is_trendline_exp():
-    assert registry.DEFAULT_MODEL_ID == "trendline_exp"
+def test_default_model_id_is_auto():
+    """Changed in 2026-04 from trendline_exp → auto after the
+    per-quartile backtest. See registry.DEFAULT_MODEL_ID for why."""
+    assert registry.DEFAULT_MODEL_ID == "auto"

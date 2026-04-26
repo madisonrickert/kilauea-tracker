@@ -23,6 +23,7 @@ from kilauea_tracker import app_state
 from kilauea_tracker.config import ALL_SOURCES, TILT_SOURCE_NAME, source_csv_path
 from kilauea_tracker.model import DATE_COL, TILT_COL
 from kilauea_tracker.models import registry as model_registry
+from kilauea_tracker.phase import estimate_phase
 from kilauea_tracker.plotting import build_figure
 from kilauea_tracker.state import get_state
 
@@ -106,6 +107,57 @@ st.radio(
     help=_active_model.description,
     horizontal=True,
 )
+
+# Phase indicator + model recommendation. Surfaces the canonical
+# "halfway through inflation" signal the `auto` model uses internally,
+# plus a hint about which base model the backtest says is most reliable
+# at this stage. Quiet — collapses cleanly when there isn't enough
+# history to estimate phase.
+_phase = estimate_phase(tilt_df, all_peaks)
+if _phase.fraction is not None:
+    _phase_pct = _phase.fraction * 100.0
+    _elapsed_d = (_phase.elapsed_hours or 0.0) / 24.0
+    _median_d = (_phase.median_duration_hours or 1.0) / 24.0
+    _stage = "EARLY" if not _phase.is_late else "LATE"
+    _recommended = "linear" if not _phase.is_late else "linear_naive"
+    _arrow = (
+        "↑ switches to linear_naive at 50%"
+        if not _phase.is_late
+        else "↓ already past the 50% switchpoint"
+    )
+    st.caption(
+        f"📍 Inflation phase: **{_phase_pct:.0f}%** of expected "
+        f"({_elapsed_d:.1f} d elapsed / {_median_d:.1f} d median over "
+        f"{_phase.n_historical_episodes} past episodes) — **{_stage}** "
+        f"phase. Backtest's most reliable model here: "
+        f"**`{_recommended}`** ({_arrow}). The **`auto`** model "
+        f"applies this rule for you. See the Backtest tab for the "
+        f"full per-quartile breakdown."
+    )
+
+# When the active model intentionally returns no prediction (e.g.
+# ``ffm_voight`` no-ops on Kīlauea's decelerating regime, or any model
+# falling back when there isn't enough current-episode data yet),
+# surface its diagnostic right under the selector so the chart doesn't
+# look broken. Prefer the more specific ``regime_signal`` field, fall
+# back to ``warning`` / ``error``, and always offer the user a path
+# forward (try a different model, or read the interval baseline below).
+if prediction.next_event_date is None:
+    _diag = prediction.diagnostics or {}
+    _reason = (
+        _diag.get("regime_signal")
+        or _diag.get("warning")
+        or _diag.get("error")
+    )
+    _reason_str = f": {_reason}" if _reason else "."
+    st.warning(
+        f"**{_active_model.label}** has no prediction for the current "
+        f"data{_reason_str}  \n"
+        f"Try a different model from the selector above, or see the "
+        f"**interval baseline** caption below the chart for an "
+        f"independent forecast.",
+        icon="⚠️",
+    )
 
 _chart_opts_cols = st.columns([1.2, 1])
 with _chart_opts_cols[0]:
