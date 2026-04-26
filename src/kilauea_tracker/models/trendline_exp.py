@@ -479,6 +479,13 @@ class TrendlineExpModel:
                 )
             )
 
+        # Surface trendline_exp-specific scalars through diagnostics so the
+        # Pipeline page (and any other consumer of ModelOutput) can render
+        # them without reaching into the raw struct.
+        diagnostics = dict(raw.fit_diagnostics)
+        diagnostics["exp_params"] = raw.exp_params
+        diagnostics["n_peaks_in_fit"] = raw.n_peaks_in_fit
+
         return ModelOutput(
             next_event_date=raw.next_event_date,
             confidence_band=raw.confidence_band,
@@ -486,6 +493,6 @@ class TrendlineExpModel:
             if raw.next_event_date is not None
             else None,
             curves=curves,
-            diagnostics=raw.fit_diagnostics,
+            diagnostics=diagnostics,
             next_event_tilt=raw.next_event_tilt,
         )

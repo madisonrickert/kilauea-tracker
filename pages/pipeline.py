@@ -309,8 +309,9 @@ with st.expander("🔬 Model diagnostics"):
         st.markdown("&nbsp;")
 
         # ─── Exponential fit parameters ──────────────────────────────────
-        if prediction.exp_params:
-            A, k, C = prediction.exp_params
+        exp_params = diag.get("exp_params")
+        if exp_params:
+            A, k, C = exp_params
             asymptote = A + C
             tau_days = 1.0 / k if k > 0 else float("inf")
             half_life = math.log(2) / k if k > 0 else float("inf")
@@ -370,8 +371,9 @@ with st.expander("🔬 Model diagnostics"):
             st.error(f"❌ Exp fit error: {diag['exp_fit_error']}")
 
         # ─── Footer: peaks in fit ────────────────────────────────────────
+        n_peaks_in_fit = diag.get("n_peaks_in_fit", "?")
         st.markdown(
-            f"**Peaks in fit** &nbsp;·&nbsp; `{prediction.n_peaks_in_fit}` "
+            f"**Peaks in fit** &nbsp;·&nbsp; `{n_peaks_in_fit}` "
             "(controlled by the Chart tab's *Trendline window* slider)"
         )
 
