@@ -45,8 +45,9 @@ Tesseract is a system dep: `brew install tesseract` locally; `packages.txt` inst
 `streamlit_app.py` is the entrypoint and must stay at the repo root. Code lives in `src/kilauea_tracker/`. The non-obvious parts:
 
 - `config.py` — every tuning knob, with a comment justifying the chosen value.
-- `ingest/` — `fetch.py` (HTTP w/ `If-Modified-Since`), `calibrate.py` (OCR axes), `trace.py` (HSV mask + per-column extraction), `pipeline.py` (orchestration), `exceptions.py` (typed boundary errors).
-- `model.py`, `reconcile.py`, `peaks.py`, `safety_alerts.py` — **pure** compute layers (no I/O).
+- `ingest/` — `fetch.py` (HTTP w/ `If-Modified-Since`), `calibrate.py` (OCR axes), `trace.py` (HSV mask + per-column extraction), `pipeline.py` (orchestration), `_reports.py` (run-report dataclasses), `_runreport_serde.py` (JSON schema layer for `data/run_reports/*.json`, currently `schema_version=2`), `_anchor_fit.py` (Phase 1c digital-anchor cross-check), `exceptions.py` (typed boundary errors).
+- `safety_alerts/` — `_fetch.py` (USGS HANS + NWS HTTP) plus `_parse.py` (pure parsers/filters/dataclasses); `__init__.py` re-exports the public surface (`fetch_safety_alerts`, `SafetyAlertSummary`, `USGSVolcanoStatus`, `NWSAlert`).
+- `model.py`, `reconcile.py`, `peaks.py`, `safety_alerts/_parse.py` — **pure** compute layers (no I/O, no clock).
 - `cache.py`, `archive.py` — CSV I/O.
 - `state/` — unified `AppState` accessor. `snapshot.py` (frozen dataclasses), `refresh_store.py` (cross-thread `RefreshStore` singleton), `widgets.py` (typed read over `st.session_state`), `accessor.py` (`get_state()`). See "Application state" below.
 - `ui/` — Streamlit tab modules + palette/styles.
@@ -107,7 +108,7 @@ Python 3.11+ is pinned (`pyproject.toml`). Use modern syntax everywhere; this is
 
 **Purity**
 
-- Compute layers are pure: `model.py`, `reconcile.py`, `peaks.py`, `safety_alerts.py`. No I/O, no module-level mutable state, no `datetime.now()` / `time.time()` — pass time in if you need it. Same inputs → same outputs.
+- Compute layers are pure: `model.py`, `reconcile.py`, `peaks.py`, `safety_alerts/_parse.py`. No I/O, no module-level mutable state, no `datetime.now()` / `time.time()` — pass time in if you need it. Same inputs → same outputs. (HTTP and the wall clock for safety alerts live in `safety_alerts/_fetch.py`, kept separate from the parsers.)
 - I/O is isolated to `ingest/`, `cache.py`, `archive.py`, and `pipeline.py`. Don't leak it back into the compute layers.
 
 **Errors**
@@ -154,5 +155,5 @@ Python 3.11+ is pinned (`pyproject.toml`). Use modern syntax everywhere; this is
 - Don't write widgets in a Streamlit fragment to columns/containers created outside the fragment — Streamlit raises `StreamlitFragmentWidgetsNotAllowedOutsideError`. Create the layout inside the fragment.
 - Don't put module-level mutable state in compute layers — pure on purpose. State that needs to cross threads belongs in `RefreshStore` (or another `@st.cache_resource` singleton with the same locking discipline).
 - Don't add a `min_height` floor back to peak detection — the regime shifts; rely on prominence.
-- Don't add I/O to `model.py` / `reconcile.py` / `peaks.py` / `safety_alerts.py`. They are pure on purpose.
+- Don't add I/O to `model.py` / `reconcile.py` / `peaks.py` / `safety_alerts/_parse.py`. They are pure on purpose. (Network calls for safety alerts go in `safety_alerts/_fetch.py`.)
 - Don't add a fullscreen modal overlay (`position: fixed; inset: 0`) for transient UI — Streamlit's column / `stMain` wrappers can apply `contain` / `transform` that traps fixed positioning to a sub-tree, making the overlay render in the wrong place AND flicker on every delta-update. Swap the triggering element for an inline indicator in its own slot instead.

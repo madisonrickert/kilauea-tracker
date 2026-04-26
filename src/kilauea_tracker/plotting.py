@@ -125,53 +125,99 @@ def build_figure(
     fig = go.Figure()
     trendline_color = STATE_COLOR.get(state, TRENDLINE_COLOR_DEFAULT) if state else TRENDLINE_COLOR_DEFAULT
 
-    # ── 0a. episode shading: alternating subtle bands between consecutive
-    #       detected peaks, so each eruption cycle reads as a discrete
-    #       block of time. Drawn FIRST so everything else sits on top.
+    # Drawn FIRST so every other trace sits on top.
     _add_episode_shading(fig, all_peaks_df)
+    _add_per_source_overlay(fig, per_source_overlay)
+    _add_tilt_trace(fig, tilt_df)
+    _add_peak_markers(fig, fit_peaks_df, all_peaks_df)
+    _add_curve_traces(
+        fig, model_output,
+        show_current_episode=show_current_episode,
+        primary_color=trendline_color,
+    )
+    if show_next_event_prediction:
+        _add_confidence_band(fig, model_output)
+        _add_next_event_marker(fig, model_output, tilt_df)
+    _add_now_line(fig, tilt_df)
+    _add_event_annotations(
+        fig, fit_peaks_df, model_output, tilt_df,
+        show_next_event_prediction=show_next_event_prediction,
+    )
+    _apply_layout(fig, tilt_df, fit_peaks_df, model_output, title)
+    return fig
 
-    # ── 0. per-source overlay (drawn first so merged line sits on top) ──────
-    if per_source_overlay:
-        for name, src_df in per_source_overlay.items():
-            if src_df is None or len(src_df) == 0:
-                continue
-            color = SOURCE_OVERLAY_COLORS.get(name, "rgba(255, 255, 255, 0.35)")
-            fig.add_trace(
-                go.Scatter(
-                    x=src_df[DATE_COL],
-                    y=src_df[TILT_COL],
-                    mode="lines",
-                    name=f"source: {name}",
-                    line={"color": color, "width": 1.0, "dash": "dot"},
-                    visible="legendonly",  # opt-in via legend click; off by default
-                    hovertemplate=(
-                        f"<b>{name}</b><br>"
-                        "%{x|%Y-%m-%d %H:%M}<br>"
-                        "%{y:.2f} µrad"
-                        "<extra></extra>"
-                    ),
-                )
-            )
 
-    # ── 1. raw tilt ─────────────────────────────────────────────────────────
-    if len(tilt_df) > 0:
+# ─────────────────────────────────────────────────────────────────────────────
+# Internals — build_figure step helpers
+#
+# Each `_add_*` helper adds zero or more traces / shapes / annotations to
+# `fig` and returns nothing. Splitting the build into named steps keeps
+# the orchestration in `build_figure` readable and lets future per-step
+# perf optimizations (e.g., caching individual traces) target a single
+# function instead of carving up an inline block.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _add_per_source_overlay(
+    fig: go.Figure,
+    per_source_overlay: dict[str, pd.DataFrame] | None,
+) -> None:
+    """Translucent per-source traces, hidden behind the merged line.
+
+    Off by default (``visible="legendonly"``) — power users opt in via the
+    legend to see which source contributed each region.
+    """
+    if not per_source_overlay:
+        return
+    for name, src_df in per_source_overlay.items():
+        if src_df is None or len(src_df) == 0:
+            continue
+        color = SOURCE_OVERLAY_COLORS.get(name, "rgba(255, 255, 255, 0.35)")
         fig.add_trace(
             go.Scatter(
-                x=tilt_df[DATE_COL],
-                y=tilt_df[TILT_COL],
-                mode="lines+markers",
-                name="Tilt",
-                line={"color": TILT_LINE_COLOR, "width": 1.5},
-                marker={"size": 3},
+                x=src_df[DATE_COL],
+                y=src_df[TILT_COL],
+                mode="lines",
+                name=f"source: {name}",
+                line={"color": color, "width": 1.0, "dash": "dot"},
+                visible="legendonly",
                 hovertemplate=(
+                    f"<b>{name}</b><br>"
                     "%{x|%Y-%m-%d %H:%M}<br>"
-                    "<b>%{y:.2f}</b> µrad"
+                    "%{y:.2f} µrad"
                     "<extra></extra>"
                 ),
             )
         )
 
-    # ── 2. detected peaks (split into "in fit" and "not in fit") ────────────
+
+def _add_tilt_trace(fig: go.Figure, tilt_df: pd.DataFrame) -> None:
+    """Main reconciled tilt history trace."""
+    if len(tilt_df) == 0:
+        return
+    fig.add_trace(
+        go.Scatter(
+            x=tilt_df[DATE_COL],
+            y=tilt_df[TILT_COL],
+            mode="lines+markers",
+            name="Tilt",
+            line={"color": TILT_LINE_COLOR, "width": 1.5},
+            marker={"size": 3},
+            hovertemplate=(
+                "%{x|%Y-%m-%d %H:%M}<br>"
+                "<b>%{y:.2f}</b> µrad"
+                "<extra></extra>"
+            ),
+        )
+    )
+
+
+def _add_peak_markers(
+    fig: go.Figure,
+    fit_peaks_df: pd.DataFrame,
+    all_peaks_df: pd.DataFrame | None,
+) -> None:
+    """Peaks split into "in fit" (bright X) and "excluded" (dimmed X)."""
     fit_dates: set[pd.Timestamp] = (
         set(fit_peaks_df[DATE_COL]) if len(fit_peaks_df) > 0 else set()
     )
@@ -219,11 +265,22 @@ def build_figure(
             )
         )
 
-    # ── 3. model-declared overlay curves (trendline, exp, ribbons, …) ──────
-    # The model emits NamedCurves carrying style hints; the renderer maps
-    # them to Plotly traces. We pre-filter the "current episode" curves out
-    # when ``show_current_episode`` is False — once an eruption is active
-    # the exp fit is modelling an inflation phase that just ended.
+
+def _add_curve_traces(
+    fig: go.Figure,
+    model_output: ModelOutput,
+    *,
+    show_current_episode: bool,
+    primary_color: str,
+) -> None:
+    """Model-declared overlay curves (trendline, exp, ribbons, ...).
+
+    The model emits ``NamedCurve``s carrying style hints; ``render_named_curves``
+    maps them to Plotly traces. We pre-filter "current episode" curves out
+    when ``show_current_episode`` is False — once an eruption is active the
+    exp fit is modelling an inflation phase that just ended, so it would
+    only mislead.
+    """
     visible_curves = list(model_output.curves)
     if not show_current_episode:
         visible_curves = [
@@ -233,103 +290,128 @@ def build_figure(
     render_named_curves(
         fig,
         visible_curves,
-        primary_color=trendline_color,
+        primary_color=primary_color,
         ribbon_fill=TRENDLINE_BAND_FILL,
     )
 
-    # ── 5. confidence band — drawn BEFORE the event marker so the marker
-    #      sits on top of the band, not under it ─────────────────────────────
-    if show_next_event_prediction and model_output.confidence_band is not None:
-        lo, hi = model_output.confidence_band
-        fig.add_vrect(
-            x0=lo,
-            x1=hi,
-            fillcolor=CONFIDENCE_BAND_FILL,
-            line_width=0,
+
+def _add_confidence_band(fig: go.Figure, model_output: ModelOutput) -> None:
+    """80% confidence band as a vrect + dotted edges + legend phantom trace.
+
+    Drawn BEFORE the event marker so the marker sits on top of the band.
+    Caller is responsible for the ``show_next_event_prediction`` gate.
+    """
+    if model_output.confidence_band is None:
+        return
+    lo, hi = model_output.confidence_band
+    fig.add_vrect(
+        x0=lo,
+        x1=hi,
+        fillcolor=CONFIDENCE_BAND_FILL,
+        line_width=0,
+        layer="below",
+    )
+    for x_edge in (lo, hi):
+        fig.add_vline(
+            x=x_edge,
+            line={"color": CONFIDENCE_BAND_LINE, "width": 1, "dash": "dot"},
             layer="below",
         )
-        for x_edge in (lo, hi):
-            fig.add_vline(
-                x=x_edge,
-                line={"color": CONFIDENCE_BAND_LINE, "width": 1, "dash": "dot"},
-                layer="below",
-            )
-        # Phantom trace so the band shows up in the legend with a width label.
-        band_width_days = (hi - lo).total_seconds() / 86400.0
-        fig.add_trace(
-            go.Scatter(
-                x=[lo, hi],
-                y=[None, None],
-                mode="lines",
-                name=f"80% confidence ({band_width_days:.0f} days)",
-                line={"color": CONFIDENCE_BAND_LINE, "width": 8},
-                showlegend=True,
-                hoverinfo="skip",
-            )
+    band_width_days = (hi - lo).total_seconds() / 86400.0
+    fig.add_trace(
+        go.Scatter(
+            x=[lo, hi],
+            y=[None, None],
+            mode="lines",
+            name=f"80% confidence ({band_width_days:.0f} days)",
+            line={"color": CONFIDENCE_BAND_LINE, "width": 8},
+            showlegend=True,
+            hoverinfo="skip",
         )
+    )
 
-    # ── 6. predicted event marker ───────────────────────────────────────────
-    # The model declares ``next_event_tilt`` when it can fit a tilt-vs-time
-    # curve through the prediction. Models that only forecast a date (e.g.
-    # the interval-median baseline) leave it None — fall back to "the last
-    # observed tilt + a small upward nudge" so the marker has a sensible
-    # y-position on the chart.
-    if (
-        show_next_event_prediction
-        and model_output.next_event_date is not None
-    ):
-        marker_y = _resolve_marker_y(model_output, tilt_df)
-        if marker_y is not None:
-            fig.add_trace(
-                go.Scatter(
-                    x=[model_output.next_event_date],
-                    y=[marker_y],
-                    mode="markers",
-                    name="Next fountain event",
-                    marker={
-                        "symbol": "star",
-                        "color": NEXT_EVENT_COLOR,
-                        "size": 22,
-                        "line": {"width": 2, "color": "black"},
-                    },
-                    hovertemplate=(
-                        f"<b>Next fountain event</b><br>"
-                        f"{model_output.next_event_date.strftime('%Y-%m-%d %H:%M')}<br>"
-                        f"Tilt: {marker_y:.2f} µrad"
-                        "<extra></extra>"
-                    ),
-                )
-            )
 
-    # ── 7a. vertical "now" line: strong past/future split ───────────────────
-    # Use a Scatter trace rather than add_vline + annotation_text, because
-    # the latter's shapeannotation helper averages two Timestamp endpoints
-    # via sum()/len() — which fails with recent pandas (Timestamp + int).
+def _add_next_event_marker(
+    fig: go.Figure,
+    model_output: ModelOutput,
+    tilt_df: pd.DataFrame,
+) -> None:
+    """Star marker at the predicted next-event date.
+
+    Models that only forecast a date (e.g. interval-median) leave
+    ``next_event_tilt`` None — fall back via ``_resolve_marker_y`` to "the
+    last observed tilt + a small upward nudge." Caller is responsible for
+    the ``show_next_event_prediction`` gate.
+    """
+    if model_output.next_event_date is None:
+        return
+    marker_y = _resolve_marker_y(model_output, tilt_df)
+    if marker_y is None:
+        return
+    fig.add_trace(
+        go.Scatter(
+            x=[model_output.next_event_date],
+            y=[marker_y],
+            mode="markers",
+            name="Next fountain event",
+            marker={
+                "symbol": "star",
+                "color": NEXT_EVENT_COLOR,
+                "size": 22,
+                "line": {"width": 2, "color": "black"},
+            },
+            hovertemplate=(
+                f"<b>Next fountain event</b><br>"
+                f"{model_output.next_event_date.strftime('%Y-%m-%d %H:%M')}<br>"
+                f"Tilt: {marker_y:.2f} µrad"
+                "<extra></extra>"
+            ),
+        )
+    )
+
+
+def _add_now_line(fig: go.Figure, tilt_df: pd.DataFrame) -> None:
+    """Vertical "now" line that splits past from future.
+
+    Uses ``add_shape`` rather than ``add_vline`` because the latter's
+    shapeannotation helper averages two Timestamp endpoints via
+    ``sum()/len()``, which fails with recent pandas (Timestamp + int).
+    """
+    if len(tilt_df) == 0:
+        return
     now = pd.Timestamp.now(tz="UTC").tz_localize(None)
-    if len(tilt_df) > 0:
-        fig.add_shape(
-            type="line",
-            xref="x",
-            yref="paper",
-            x0=now,
-            x1=now,
-            y0=0,
-            y1=1,
-            line={"color": NOW_LINE_COLOR, "width": 1.2, "dash": "dot"},
-            layer="below",
-        )
-        fig.add_annotation(
-            x=now,
-            y=1.0,
-            xref="x",
-            yref="paper",
-            text="now",
-            showarrow=False,
-            yanchor="bottom",
-            font={"color": STEAM, "size": 10},
-        )
+    fig.add_shape(
+        type="line",
+        xref="x",
+        yref="paper",
+        x0=now,
+        x1=now,
+        y0=0,
+        y1=1,
+        line={"color": NOW_LINE_COLOR, "width": 1.2, "dash": "dot"},
+        layer="below",
+    )
+    fig.add_annotation(
+        x=now,
+        y=1.0,
+        xref="x",
+        yref="paper",
+        text="now",
+        showarrow=False,
+        yanchor="bottom",
+        font={"color": STEAM, "size": 10},
+    )
 
-    # ── 7b. annotate the most recent peak and the predicted intersection ────
+
+def _add_event_annotations(
+    fig: go.Figure,
+    fit_peaks_df: pd.DataFrame,
+    model_output: ModelOutput,
+    tilt_df: pd.DataFrame,
+    *,
+    show_next_event_prediction: bool,
+) -> None:
+    """Callout labels on the most recent peak and the predicted next event."""
     if len(fit_peaks_df) > 0:
         last = fit_peaks_df.iloc[-1]
         fig.add_annotation(
@@ -348,10 +430,7 @@ def build_figure(
             borderwidth=1,
             borderpad=3,
         )
-    if (
-        show_next_event_prediction
-        and model_output.next_event_date is not None
-    ):
+    if show_next_event_prediction and model_output.next_event_date is not None:
         annotation_y = _resolve_marker_y(model_output, tilt_df)
         if annotation_y is not None:
             fig.add_annotation(
@@ -374,7 +453,15 @@ def build_figure(
                 borderpad=3,
             )
 
-    # ── 7c. default zoom: recent history + projection horizon ───────────────
+
+def _apply_layout(
+    fig: go.Figure,
+    tilt_df: pd.DataFrame,
+    fit_peaks_df: pd.DataFrame,
+    model_output: ModelOutput,
+    title: str,
+) -> None:
+    """Final pass: axes, legend placement, default zoom range, optional title."""
     x_range = _default_x_range(tilt_df, fit_peaks_df, model_output)
 
     layout_kwargs = {
@@ -411,11 +498,10 @@ def build_figure(
     if title:
         layout_kwargs["title"] = title
     fig.update_layout(**layout_kwargs)
-    return fig
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Internals
+# Internals — shared math + style helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 

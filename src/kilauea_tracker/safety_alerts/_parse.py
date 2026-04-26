@@ -1,56 +1,21 @@
-"""Fetch and normalize public safety alerts relevant to a Kīlauea eruption.
+"""Pure parsing + filtering for safety-alert payloads.
 
-Two independent sources are queried:
+Everything here takes a `dict` (the JSON-decoded payload from one of the
+upstream APIs) or a `str` and returns a typed dataclass or a bool. No
+network, no clock, no module-level mutable state — same input always
+produces the same output. The fetch layer (`./_fetch.py`) calls into
+this module after retrieving the raw payloads.
 
-1. **USGS HANS API** — `volcanoes.usgs.gov/hans-public/api/volcano/getElevatedVolcanoes`
-   The Hazard Alert Notification System publishes the official aviation
-   color code (GREEN/YELLOW/ORANGE/RED) and ground-based alert level
-   (NORMAL/ADVISORY/WATCH/WARNING) for every volcano whose status is
-   currently elevated above NORMAL. We filter the response to Kīlauea.
-
-2. **NWS API** — `api.weather.gov/alerts/active?area=HI`
-   The National Weather Service issues "Special Weather Statements,"
-   "Ashfall Advisories," and other products that go out during a
-   fountaining episode (tephra fallout, vog drift, wind direction
-   advisories for the inhabited areas downwind of the vent). Volcano-
-   related products use the standard NWS alert schema; we filter the
-   Hawaii feed by keyword + Big Island geography.
-
-Both sources are public, free, no auth required, and update in roughly
-real time as new advisories are issued. The Streamlit layer wraps the
-top-level `fetch_safety_alerts()` in `@st.cache_data(ttl=900)` so we
-don't hammer the APIs on every rerun.
-
-Failure handling: each fetch is independently best-effort. If one source
-is unreachable, the returned `SafetyAlertSummary` records the error in
-its `errors` list and the other source's data still flows through. The
-Streamlit layer can render whatever's available without blocking the
-main UI.
+Splitting fetch from parse lets the parsers be exercised by tests
+without any HTTP mocking and keeps the purity contract honest:
+`safety_alerts/_parse.py` is what CLAUDE.md's "pure compute layers"
+list refers to once the package layout lands.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-
-import requests
-
-# NWS API requires a descriptive User-Agent per
-# https://www.weather.gov/documentation/services-web-api so they can
-# contact maintainers about misbehaving clients. Identify the project
-# and a contact URL.
-_USER_AGENT = (
-    "kilauea-tracker (https://github.com/madisonrickert/kilauea-tracker)"
-)
-
-USGS_HANS_URL = (
-    "https://volcanoes.usgs.gov/hans-public/api/volcano/getElevatedVolcanoes"
-)
-NWS_HI_ALERTS_URL = "https://api.weather.gov/alerts/active?area=HI"
-
-# Network timeouts. Conservative because the Streamlit container is
-# blocking on these and a slow alert fetch would delay the page render.
-HTTP_TIMEOUT_SECONDS = 10
 
 # Volcano-relevance keyword filter applied to NWS alert event +
 # headline + description fields. Case-insensitive substring match.
@@ -175,68 +140,8 @@ class SafetyAlertSummary:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Top-level fetch
+# Parsers + filter (pure)
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-def fetch_safety_alerts(
-    *,
-    volcano_name: str = "Kilauea",
-    timeout: int = HTTP_TIMEOUT_SECONDS,
-) -> SafetyAlertSummary:
-    """Fetch USGS volcano status + NWS alerts and return a normalized summary.
-
-    Best-effort: if one source fails the other still runs, and the
-    failure is recorded in `summary.errors`. Never raises.
-    """
-    summary = SafetyAlertSummary(fetched_at=datetime.now(tz=UTC))
-
-    try:
-        summary.usgs_status = _fetch_usgs_volcano_status(
-            volcano_name=volcano_name, timeout=timeout
-        )
-    except Exception as e:
-        summary.errors.append(f"USGS HANS fetch failed: {e}")
-
-    try:
-        summary.nws_alerts = _fetch_nws_volcano_relevant_alerts(timeout=timeout)
-    except Exception as e:
-        summary.errors.append(f"NWS alerts fetch failed: {e}")
-
-    return summary
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# USGS HANS — elevated volcano status
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _fetch_usgs_volcano_status(
-    *, volcano_name: str, timeout: int
-) -> USGSVolcanoStatus | None:
-    """Fetch the USGS HANS elevated-volcanoes feed and pick out one volcano.
-
-    Returns None when the requested volcano is at NORMAL status (HANS
-    only lists *elevated* volcanoes — absence from the list means the
-    volcano is at GREEN/NORMAL or has no current notice).
-    """
-    resp = requests.get(
-        USGS_HANS_URL,
-        headers={"User-Agent": _USER_AGENT, "Accept": "application/json"},
-        timeout=timeout,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    if not isinstance(data, list):
-        raise ValueError(f"unexpected HANS payload type: {type(data).__name__}")
-
-    target = volcano_name.lower()
-    for record in data:
-        name = (record.get("volcano_name") or "").lower()
-        if target not in name:
-            continue
-        return _parse_usgs_record(record)
-    return None
 
 
 def _parse_usgs_record(record: dict) -> USGSVolcanoStatus:
@@ -254,49 +159,20 @@ def _parse_usgs_record(record: dict) -> USGSVolcanoStatus:
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# NWS — active alerts in Hawaii filtered for volcano relevance
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _fetch_nws_volcano_relevant_alerts(*, timeout: int) -> list[NWSAlert]:
-    """Fetch active NWS alerts in Hawaii and filter for volcano relevance.
-
-    Two filter passes are OR'd together:
-      1. Keyword match against the volcano vocabulary on the alert text.
-      2. Big Island zone code + an event type that affects tephra/vog
-         exposure (wind, air quality, etc.) — even if the text doesn't
-         mention the volcano explicitly.
-
-    Returns the deduplicated, sorted (most recent first) result.
-    """
-    resp = requests.get(
-        NWS_HI_ALERTS_URL,
-        headers={
-            "User-Agent": _USER_AGENT,
-            "Accept": "application/geo+json",
-        },
-        timeout=timeout,
+def _parse_nws_record(props: dict) -> NWSAlert:
+    return NWSAlert(
+        event=str(props.get("event") or ""),
+        headline=str(props.get("headline") or ""),
+        description=str(props.get("description") or ""),
+        severity=str(props.get("severity") or "Unknown"),
+        urgency=str(props.get("urgency") or "Unknown"),
+        area_desc=str(props.get("areaDesc") or ""),
+        sent=_parse_iso_utc(props.get("sent")),
+        expires=_parse_iso_utc(props.get("expires")),
+        sender_name=str(props.get("senderName") or ""),
+        web_url=props.get("@id"),
+        affected_zones=_extract_zone_codes(props),
     )
-    resp.raise_for_status()
-    payload = resp.json()
-    features = payload.get("features", [])
-    if not isinstance(features, list):
-        return []
-
-    alerts: list[NWSAlert] = []
-    for feature in features:
-        props = feature.get("properties") or {}
-        if not isinstance(props, dict):
-            continue
-        if not _is_volcano_relevant(props):
-            continue
-        alerts.append(_parse_nws_record(props))
-
-    # Sort newest-sent first so the most recent operationally-relevant
-    # advisory is at the top of the list.
-    alerts.sort(key=lambda a: a.sent or datetime.min.replace(tzinfo=UTC), reverse=True)
-    return alerts
 
 
 def _is_volcano_relevant(props: dict) -> bool:
@@ -338,27 +214,6 @@ def _extract_zone_codes(props: dict) -> list[str]:
     if not isinstance(ugc, list):
         return []
     return [str(z) for z in ugc]
-
-
-def _parse_nws_record(props: dict) -> NWSAlert:
-    return NWSAlert(
-        event=str(props.get("event") or ""),
-        headline=str(props.get("headline") or ""),
-        description=str(props.get("description") or ""),
-        severity=str(props.get("severity") or "Unknown"),
-        urgency=str(props.get("urgency") or "Unknown"),
-        area_desc=str(props.get("areaDesc") or ""),
-        sent=_parse_iso_utc(props.get("sent")),
-        expires=_parse_iso_utc(props.get("expires")),
-        sender_name=str(props.get("senderName") or ""),
-        web_url=props.get("@id"),
-        affected_zones=_extract_zone_codes(props),
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Internals
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _parse_iso_utc(value: str | None) -> datetime | None:

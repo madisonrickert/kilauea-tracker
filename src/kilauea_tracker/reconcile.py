@@ -118,38 +118,24 @@ class SourceAlignment:
 
     name: str
     rows_in: int = 0
-    a: float = 1.0                         # always 1.0 — kept in the schema so
-                                           # downstream consumers (JSON serializer,
-                                           # Streamlit diagnostics) don't need to
-                                           # branch on model version
     b: float = 0.0                         # recovered scalar offset
     pairs_used: int = 0                    # pair constraints involving this source
     is_anchor: bool = False                # True for the pinned source (digital)
     note: str | None = None             # human-readable diagnostic
     rows_mad_rejected: int = 0             # dropped by per-bucket MAD outlier gate
     effective_resolution_microrad_per_pixel: float = 0.0
-
-    # Back-compat fields consumed by `ingest.pipeline._serialize_reconcile`
-    # and the legacy CLI print loop.
-    offset_microrad: float | None = None  # = b for back-compat display
+    offset_microrad: float | None = None  # = b, surfaced in diagnostics panel
     overlap_buckets: int = 0
-    rows_proximity_dropped: int = 0  # always 0 — proximity gate was removed
     piecewise_residuals: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
 class PairwiseFit:
     """One pairwise median-offset measurement y_i - y_j = β_ij over
-    overlapping buckets.
-
-    `alpha` is retained at 1.0 for JSON schema stability with run
-    reports produced by the earlier slope+intercept model — diagnostics
-    panels that displayed it keep working without a schema migration.
-    """
+    overlapping buckets."""
 
     source_i: str
     source_j: str
-    alpha: float                            # always 1.0 (schema stability)
     beta: float                             # median(y_i - y_j) over overlap
     overlap_buckets: int
     residual_std_microrad: float            # std(y_i - y_j - β_ij)
@@ -178,27 +164,12 @@ class ContinuityViolation:
 
 
 @dataclass
-class ReconcileConflict:
-    """Back-compat shim for `_serialize_reconcile`. The new algorithm records
-    transcription_failures instead of conflicts; this struct exists so the
-    JSON serializer keeps working."""
-
-    bucket: pd.Timestamp
-    winning_source: str
-    losing_source: str
-    winning_tilt: float
-    losing_tilt: float
-    delta: float
-
-
-@dataclass
 class ReconcileReport:
     rows_out: int = 0
     sources: list[SourceAlignment] = field(default_factory=list)
     pairs: list[PairwiseFit] = field(default_factory=list)
     transcription_failures: list[TranscriptionFailure] = field(default_factory=list)
     continuity_violations: list[ContinuityViolation] = field(default_factory=list)
-    conflicts: list[ReconcileConflict] = field(default_factory=list)  # always empty
     warnings: list[str] = field(default_factory=list)
     # Per-source count of 15-min buckets that source won at merge time.
     # Populated by `_merge_best_resolution`. Used by the Streamlit
@@ -331,7 +302,6 @@ def _compute_pairwise_fits(
             fit = PairwiseFit(
                 source_i=name_i,
                 source_j=name_j,
-                alpha=1.0,
                 beta=beta,
                 overlap_buckets=len(overlap),
                 residual_std_microrad=residual_std,
@@ -406,7 +376,6 @@ def _solve_pairwise_calibration(
     alignments[pin_name] = SourceAlignment(
         name=pin_name,
         rows_in=len(live[pin_name]),
-        a=1.0,
         b=0.0,
         pairs_used=pair_counts[pin_name],
         is_anchor=True,
@@ -477,7 +446,6 @@ def _solve_pairwise_calibration(
         record = SourceAlignment(
             name=name,
             rows_in=len(live[name]),
-            a=1.0,
             b=b,
             pairs_used=pair_counts[name],
             is_anchor=False,

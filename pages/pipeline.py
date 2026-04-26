@@ -137,12 +137,11 @@ with st.expander("🔎 Reconcile diagnostics"):
         st.info("Reconcile didn't run this session.")
     else:
         # ── Per-source alignments ──────────────────────────────────────────
-        st.markdown("**Per-source alignments** — the (a, b) applied to each source")
+        st.markdown("**Per-source alignments** — the scalar offset `b` applied to each source")
         align_rows = []
         for s in reconcile_report.sources:
             align_rows.append({
                 "source": s.name,
-                "a (slope)": round(s.a, 4),
                 "b (µrad)": round(s.b, 3),
                 "pairs used": s.pairs_used,
                 "effective resolution (µrad/px)": round(
@@ -176,14 +175,13 @@ with st.expander("🔎 Reconcile diagnostics"):
 
         # ── Pairwise fits ──────────────────────────────────────────────────
         st.markdown(
-            "**Pairwise fits** — each source pair's Huber-robust `y_i = α · y_j + β` regression"
+            "**Pairwise fits** — each source pair's median scalar offset `β = median(y_i - y_j)` over overlapping buckets"
         )
         if reconcile_report.pairs:
             pair_rows = [
                 {
                     "i": p.source_i,
                     "j": p.source_j,
-                    "α": round(p.alpha, 4),
                     "β (µrad)": round(p.beta, 3),
                     "overlap": p.overlap_buckets,
                     "σ(residual) µrad": round(p.residual_std_microrad, 3),
@@ -1112,31 +1110,6 @@ with st.expander("📡 Ingest pipeline status"):
                 st.markdown(
                     f"- `{s.name}` &nbsp;·&nbsp; `{s.rows_in}` rows &nbsp;·&nbsp; {detail}"
                 )
-
-            if reconcile_report.conflicts:
-                st.markdown(
-                    f"\n**{len(reconcile_report.conflicts)} bucket conflict(s)** — "
-                    "the higher-priority source's value won, but the disagreement "
-                    "is recorded here for audit:"
-                )
-                worst = sorted(
-                    reconcile_report.conflicts,
-                    key=lambda c: abs(c.delta),
-                    reverse=True,
-                )[:5]
-                for c in worst:
-                    bucket_str = pd.Timestamp(c.bucket).strftime("%Y-%m-%d %H:%M")
-                    st.caption(
-                        f"`{bucket_str}` — "
-                        f"`{c.winning_source}` ({c.winning_tilt:+.2f}) "
-                        f"vs `{c.losing_source}` ({c.losing_tilt:+.2f}) "
-                        f"→ Δ {c.delta:+.2f} µrad"
-                    )
-                if len(reconcile_report.conflicts) > 5:
-                    st.caption(
-                        f"…and {len(reconcile_report.conflicts) - 5} more "
-                        "(smaller deltas)"
-                    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

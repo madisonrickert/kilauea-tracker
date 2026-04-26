@@ -71,7 +71,6 @@ def test_digital_is_pinned_to_identity():
     _merged, report = reconcile_sources(sources)
     digital_record = next(s for s in report.sources if s.name == "digital")
     assert digital_record.is_anchor is True
-    assert abs(digital_record.a - 1.0) < 1e-9
     assert abs(digital_record.b) < 1e-9
 
 
@@ -91,9 +90,6 @@ def test_pairwise_fit_recovers_injected_scalar_offset():
     merged, report = reconcile_sources(sources)
 
     dec_record = next(s for s in report.sources if s.name == "dec2024_to_now")
-    assert dec_record.a == 1.0, (
-        f"fit.a = {dec_record.a:.6f}; b-only model keeps a at exactly 1.0"
-    )
     assert abs(dec_record.b - injected_b) < 1e-6, (
         f"fit.b = {dec_record.b:.6f}, expected {injected_b}"
     )
@@ -140,7 +136,6 @@ def test_pairwise_chain_propagates_through_intermediate_source():
 
     two_day_record = next(s for s in report.sources if s.name == "two_day")
     dec_record = next(s for s in report.sources if s.name == "dec2024_to_now")
-    assert dec_record.a == 1.0 and two_day_record.a == 1.0
     assert abs(dec_record.b - dec_injected_b) < 0.2, (
         f"dec.b = {dec_record.b:.4f}, expected ~{dec_injected_b}"
     )
@@ -395,30 +390,8 @@ def test_digital_hard_pin_exact():
     }
     _, report = reconcile_sources(sources)
     digital = next(s for s in report.sources if s.name == "digital")
-    assert digital.a == 1.0, f"a_digital = {digital.a}, expected exactly 1.0"
     assert digital.b == 0.0, f"b_digital = {digital.b}, expected exactly 0.0"
     assert digital.is_anchor is True
-
-
-def test_every_source_has_a_equals_one_under_b_only_model():
-    """Schema invariant under the v4 model: `a` is always exactly 1.0
-    regardless of what the input looks like. Protects against a future
-    regression that reintroduces slope fitting without auditing
-    downstream consumers (pipeline JSON serializer, Streamlit).
-    """
-    n = PAIRWISE_MIN_OVERLAP_BUCKETS * 3
-    truth = _series("2025-03-01", n=n, base=0.0, amplitude=10.0)
-    # Inject data that would produce a meaningful OLS slope if we fit
-    # for one (actual slope = 1.5). Under b-only, `a` must stay at 1.
-    sources = {
-        "digital": truth,
-        "dec2024_to_now": _apply_linear(truth, 1.5, 4.0),
-    }
-    _, report = reconcile_sources(sources)
-    for record in report.sources:
-        assert record.a == 1.0, (
-            f"{record.name}.a = {record.a}; b-only model forbids slope correction"
-        )
 
 
 def test_per_region_winner_deterministic_under_mad_pressure():
@@ -580,9 +553,9 @@ def test_median_offset_robust_to_gross_outliers():
     )
     assert len(fits) == 1
     fit = fits[0]
-    # True relationship: source = digital + 0 (+ outliers). `alpha` is
-    # always 1.0 by schema; `beta` must stay near 0.
-    assert fit.alpha == 1.0
+    # True relationship: source = digital + 0 (+ outliers). `beta` must
+    # stay near 0 despite the injected outliers because the median
+    # estimator shrugs them off.
     assert abs(fit.beta) < 1.0, (
         f"median β={fit.beta} should be near 0 despite {n_outliers} outliers"
     )
@@ -604,7 +577,6 @@ def test_disconnected_component_defaults_to_zero_offset():
                     base=-10.0, amplitude=4.0)
     _, report = reconcile_sources({"digital": digital, "month": month})
     month_rec = next(s for s in report.sources if s.name == "month")
-    assert month_rec.a == 1.0
     assert month_rec.b == 0.0
     assert month_rec.note is not None and "no path to anchor" in month_rec.note
 

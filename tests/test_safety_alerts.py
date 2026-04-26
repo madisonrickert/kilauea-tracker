@@ -28,7 +28,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from unittest.mock import patch
 
-from kilauea_tracker import safety_alerts
 from kilauea_tracker.safety_alerts import (
     SafetyAlertSummary,
     USGSVolcanoStatus,
@@ -37,6 +36,7 @@ from kilauea_tracker.safety_alerts import (
     _parse_usgs_record,
     fetch_safety_alerts,
 )
+from kilauea_tracker.safety_alerts import _fetch as _safety_alerts_fetch
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ISO timestamp parser
@@ -317,7 +317,7 @@ def _fake_get(url: str, **kwargs):
 
 
 def test_fetch_safety_alerts_end_to_end_with_mocked_http():
-    with patch.object(safety_alerts.requests, "get", side_effect=_fake_get):
+    with patch.object(_safety_alerts_fetch.requests, "get", side_effect=_fake_get):
         summary = fetch_safety_alerts()
 
     assert isinstance(summary, SafetyAlertSummary)
@@ -344,7 +344,7 @@ def test_fetch_safety_alerts_records_errors_without_raising():
     def boom(url, **kwargs):
         raise RuntimeError(f"network down: {url}")
 
-    with patch.object(safety_alerts.requests, "get", side_effect=boom):
+    with patch.object(_safety_alerts_fetch.requests, "get", side_effect=boom):
         summary = fetch_safety_alerts()
 
     assert summary.usgs_status is None
@@ -361,7 +361,7 @@ def test_fetch_safety_alerts_one_source_failure_doesnt_block_other():
             raise RuntimeError("hans down")
         return _fake_get(url, **kwargs)
 
-    with patch.object(safety_alerts.requests, "get", side_effect=half_broken):
+    with patch.object(_safety_alerts_fetch.requests, "get", side_effect=half_broken):
         summary = fetch_safety_alerts()
 
     assert summary.usgs_status is None

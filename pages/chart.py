@@ -544,7 +544,6 @@ with st.expander("📤 Export data as CSV"):
                                 {
                                     "source_i": p.source_i,
                                     "source_j": p.source_j,
-                                    "alpha": p.alpha,
                                     "beta": p.beta,
                                     "overlap_buckets": p.overlap_buckets,
                                     "residual_std_microrad": p.residual_std_microrad,
@@ -554,7 +553,6 @@ with st.expander("📤 Export data as CSV"):
                             "alignments": [
                                 {
                                     "name": s.name,
-                                    "a": s.a,
                                     "b": s.b,
                                     "pairs_used": s.pairs_used,
                                     "effective_resolution": (
