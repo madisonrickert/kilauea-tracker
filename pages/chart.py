@@ -23,9 +23,14 @@ from kilauea_tracker import app_state
 from kilauea_tracker.config import ALL_SOURCES, TILT_SOURCE_NAME, source_csv_path
 from kilauea_tracker.model import DATE_COL, TILT_COL
 from kilauea_tracker.plotting import build_figure
+from kilauea_tracker.state import get_state
 
-_timezone_choice = st.session_state.get("tw_timezone_choice", "HST (Pacific/Honolulu)")
-DISPLAY_TZ = "Pacific/Honolulu" if _timezone_choice.startswith("HST") else "UTC"
+state = get_state()
+DISPLAY_TZ = (
+    "Pacific/Honolulu"
+    if state.widgets.chart.timezone_choice.startswith("HST")
+    else "UTC"
+)
 TZ_LABEL = "HST" if DISPLAY_TZ == "Pacific/Honolulu" else "UTC"
 
 
@@ -60,11 +65,11 @@ reconcile_report = ingest_result.reconcile
 
 all_peaks = app_state.get_peaks(
     tilt_df,
-    min_prominence=st.session_state["adv_min_prominence"],
-    min_distance_days=st.session_state["adv_min_distance_days"],
-    min_height=st.session_state["adv_min_height"],
+    min_prominence=state.widgets.peaks.min_prominence,
+    min_distance_days=state.widgets.peaks.min_distance_days,
+    min_height=state.widgets.peaks.min_height,
 )
-recent_peaks = app_state.get_recent_peaks(all_peaks, st.session_state["tw_n_peaks_for_fit"])
+recent_peaks = app_state.get_recent_peaks(all_peaks, state.widgets.chart.n_peaks_for_fit)
 prediction = app_state.get_prediction(tilt_df, recent_peaks)
 eruption_state, _eruption_state_info = app_state.get_eruption_state(tilt_df, prediction)
 
@@ -97,7 +102,7 @@ with _chart_opts_cols[1]:
         ),
     )
 
-show_per_source = st.session_state["tw_show_per_source"]
+show_per_source = state.widgets.chart.show_per_source
 
 # Advanced model tuning — sliders that tune peak detection sensitivity.
 # Writes directly into ``adv_*`` session_state keys that the entrypoint

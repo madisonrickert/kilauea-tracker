@@ -22,7 +22,6 @@ from __future__ import annotations
 import logging
 import sys
 import threading
-from datetime import UTC, datetime
 from pathlib import Path
 
 # Emit pipeline warnings/errors to stderr so Streamlit Cloud's log viewer
@@ -65,15 +64,14 @@ import pandas as pd
 import streamlit as st
 
 from kilauea_tracker import app_state
-from kilauea_tracker.config import (
-    PEAK_DEFAULTS,
-)
-from kilauea_tracker.ingest.pipeline import (
-    data_age_seconds,
-    ingest_all,
-    try_acquire_refresh_slot,
-)
+from kilauea_tracker.ingest.pipeline import data_age_seconds, ingest_all
 from kilauea_tracker.model import DATE_COL
+from kilauea_tracker.state import (
+    RefreshStore,
+    get_refresh_store,
+    get_state,
+    init_widget_defaults,
+)
 from kilauea_tracker.ui.styles import build_style_block
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,164 +91,75 @@ st.markdown(build_style_block(), unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Ingest — non-blocking. Page renders from on-disk CSVs; a background thread
-# refreshes if data is stale; the manual Refresh button is the only path that
-# shows a spinner.
+# Refresh subsystem — both manual click and the page-load background path
+# go through the unified ``RefreshStore`` (see src/kilauea_tracker/state/
+# refresh_store.py). The store coordinates across threads and tabs via a
+# fcntl-locked JSON file; the topbar fragment subscribes to its snapshot
+# and renders a disabled button while a refresh is in flight.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Re-poll USGS if on-disk data is older than this. Background thread fires
+# Re-poll USGS if on-disk data is older than this. Background daemon fires
 # on page load when this threshold is crossed. 10 min matches USGS's typical
 # publish cadence for the rolling-window PNGs.
 STALE_THRESHOLD_SECONDS = 10 * 60
 
-# Don't fire the background refresh more than once per this window —
-# coordinates concurrent users via the file lock so N users → 1 fetch.
-BACKGROUND_REFRESH_COOLDOWN_SECONDS = 5 * 60
 
-# Tighter cooldown for the manual Refresh button — explicit clicks should
-# feel responsive, but spam-clicks still get gated.
-USER_REFRESH_COOLDOWN_SECONDS = 30
+def _refresh_worker(store: RefreshStore) -> None:
+    """Daemon-thread entrypoint for both manual and background refreshes.
 
-
-def _run_ingest_with_spinner() -> None:
-    """Synchronous ingest with a staged-status spinner overlay.
-
-    Used only by the manual Refresh button. The spinner walks through the
-    pipeline's natural stage boundaries via the `on_stage` callback so the
-    user sees "Fetching week…", "Reconciling sources…", "Updating archive…"
-    instead of a single static label. The placeholder is drained on
-    completion so it doesn't leave a persistent collapsed panel above the
-    rest of the page.
-
-    The returned data isn't used directly — `ingest_all()` writes fresh
-    CSVs and a new run report to disk, and the next script rerun (via
-    `st.rerun()` after this returns) picks them up via
-    `load_latest_run_report()` at module scope.
+    Single code path, regardless of who initiated. ``ingest_all``'s
+    ``on_stage`` callback feeds the store so the topbar fragment can
+    show stage progress. ``try/finally`` guarantees the store transitions
+    out of the running state even on unexpected exceptions; the
+    stale-refresh detector covers OS-level kills that bypass this.
     """
-    placeholder = st.empty()
-    with (
-        placeholder.container(),
-        st.status("Fetching latest USGS tilt data…", expanded=False) as status,
-    ):
-        ingest_all(on_stage=lambda msg: status.update(label=msg))
-        status.update(label="Up to date", state="complete")
-    placeholder.empty()
+    try:
+        ingest_all(on_stage=store.advance)
+        store.complete()
+    except Exception as e:
+        store.fail(str(e))
+        logging.getLogger(__name__).exception("refresh worker failed")
 
 
-def _maybe_kick_background_refresh() -> None:
-    """Fire a background ingest if on-disk data is stale AND no other
-    session/thread already refreshed within the cooldown window.
-
-    Silent: never blocks the page render, never raises, never touches
-    Streamlit widgets or session_state. The thread writes to disk only;
-    the chart fragment (running every 30s) picks up the new mtime and
-    re-renders automatically.
-    """
+def _kick_background_refresh_if_stale() -> None:
+    """Fire a background ingest on page load if data is older than the
+    stale threshold AND the store grants a fresh refresh slot. Silent —
+    never blocks page render."""
     if data_age_seconds() < STALE_THRESHOLD_SECONDS:
         return
-    acquired, _ = try_acquire_refresh_slot(BACKGROUND_REFRESH_COOLDOWN_SECONDS)
-    if not acquired:
-        return  # someone else is on it
-
-    def _worker() -> None:
-        try:
-            ingest_all()
-        except Exception:
-            logging.getLogger(__name__).exception("background refresh failed")
-
-    threading.Thread(target=_worker, daemon=True).start()
-
-
-
-# Initialize session state — used to remember whether ingestion has already
-# run at least once in this Streamlit session, so we can show "Last update"
-# accurately even after the cache TTL expires.
-if "last_ingest_at" not in st.session_state:
-    st.session_state.last_ingest_at = None
+    store = get_refresh_store()
+    if not store.start("background"):
+        return  # already running or in cooldown
+    threading.Thread(target=_refresh_worker, args=(store,), daemon=True).start()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Session-state defaults for every widget in the app.
+# Widget-state defaults — every session_state key the app relies on, seeded
+# with its default in one place. Streamlit's widget→key auto-binding still
+# owns the writes; views read through ``state.widgets.*`` rather than
+# poking session_state directly. See src/kilauea_tracker/state/widgets.py
+# for the canonical key list.
 # ─────────────────────────────────────────────────────────────────────────────
-# The sidebar was retired in favor of a compact top bar + per-tab controls
-# (chart-only controls live inside the Chart tab, overlay checkboxes inside
-# the Pipeline tab, etc.). Streamlit recomputes the entire script top-to-
-# bottom on every interaction, and the math that happens at module scope —
-# peak detection, prediction, figure construction — has to run BEFORE any
-# tab body renders. So we seed session_state with widget defaults here and
-# read the values back immediately; later when the user drags a slider or
-# clicks a toggle inside a tab, Streamlit writes the new value into the
-# same session_state key and reruns, and this block picks it up.
-#
-# `tw_*` — top-bar / chart-widget keys (tz, trendline window, per-source)
-# `adv_*` — advanced peak-detection sliders (Chart tab)
-# `ovl_*` — PNG inspector overlay layers (Pipeline tab)
 
-st.session_state.setdefault("tw_n_peaks_for_fit", 6)
-st.session_state.setdefault("tw_show_per_source", False)
-st.session_state.setdefault("tw_timezone_choice", "HST (Pacific/Honolulu)")
-n_peaks_for_fit = st.session_state["tw_n_peaks_for_fit"]
-show_per_source = st.session_state["tw_show_per_source"]
-timezone_choice = st.session_state["tw_timezone_choice"]
-DISPLAY_TZ = (
-    "Pacific/Honolulu" if timezone_choice.startswith("HST") else "UTC"
-)
-TZ_LABEL = "HST" if DISPLAY_TZ == "Pacific/Honolulu" else "UTC"
-
-st.session_state.setdefault("adv_min_prominence", PEAK_DEFAULTS.min_prominence)
-st.session_state.setdefault("adv_min_distance_days", PEAK_DEFAULTS.min_distance_days)
-st.session_state.setdefault("adv_min_height", -10.0)
-min_prominence = st.session_state["adv_min_prominence"]
-min_distance_days = st.session_state["adv_min_distance_days"]
-min_height = st.session_state["adv_min_height"]
-
-for _ovl_key, _default in (
-    ("ovl_dots", True),
-    ("ovl_bbox", False),
-    ("ovl_yticks", False),
-    ("ovl_ygrid", False),
-    ("ovl_corners", False),
-    ("ovl_blue", False),
-    ("ovl_legend", False),
-    ("ovl_dropcols", False),
-    ("ovl_outliers", False),
-    ("ovl_now", False),
-    ("ovl_green", False),
-    ("ovl_csv", False),
-):
-    st.session_state.setdefault(_ovl_key, _default)
-layer_dots = st.session_state["ovl_dots"]
-layer_bbox = st.session_state["ovl_bbox"]
-layer_yticks = st.session_state["ovl_yticks"]
-layer_ygrid = st.session_state["ovl_ygrid"]
-layer_corners = st.session_state["ovl_corners"]
-layer_blue = st.session_state["ovl_blue"]
-layer_legend = st.session_state["ovl_legend"]
-layer_dropcols = st.session_state["ovl_dropcols"]
-layer_outliers = st.session_state["ovl_outliers"]
-layer_now = st.session_state["ovl_now"]
-layer_green = st.session_state["ovl_green"]
-layer_csv = st.session_state["ovl_csv"]
+init_widget_defaults()
+state = get_state()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Always-fresh data: page renders from on-disk CSVs immediately. A background
-# thread refreshes if the data is stale (gated by the file-lock cooldown so
-# concurrent users don't multiply USGS calls). The chart fragment polls
-# every 30s for new file mtimes so users see fresh data without clicking.
+# daemon refreshes if the data is stale (gated by the RefreshStore so
+# concurrent users don't multiply USGS calls). The topbar fragment polls
+# the store + the history-CSV mtime so users see fresh data automatically.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_maybe_kick_background_refresh()
+_kick_background_refresh_if_stale()
 
 ingest_result = app_state.load_run_report()
 reports = ingest_result.per_source
 reconcile_report = ingest_result.reconcile
-if st.session_state.last_ingest_at is None:
-    st.session_state.last_ingest_at = (
-        ingest_result.run_finished_at_utc
-        if ingest_result.run_finished_at_utc is not None
-        else datetime.now(tz=UTC)
-    )
+# "Last poll" timestamp for the topbar caption: prefer the just-finished
+# refresh, fall back to whatever the persisted run report knew about.
+_last_poll_ts = state.refresh.finished_utc or ingest_result.run_finished_at_utc
 
 # Surface ingest errors and warnings in a single collapsed "ingest pipeline
 # status" panel. Per-source ingest failures are NOT fatal — the reconcile
@@ -279,32 +188,6 @@ if reconcile_report is not None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@st.fragment(run_every="30s")
-def _watch_for_fresh_data() -> None:
-    """Polling fragment: every 30s, check whether the tilt history CSV has
-    been refreshed by the background ingest thread. If yes, trigger a full
-    app rerun so the chart and "last update" caption reflect the fresh data
-    without any user click.
-
-    Renders no visible output — fragments are normally tied to a UI region,
-    but here we use it purely for its `run_every` ticker. The mtime
-    comparison + early-return ensures we only call `st.rerun(scope="app")`
-    when the file actually changed, so we're not thrashing the whole page
-    on every 30s tick.
-    """
-    current = app_state.history_mtime()
-    last_seen = st.session_state.get("_last_data_mtime")
-    if last_seen is None:
-        st.session_state["_last_data_mtime"] = current
-        return
-    if current > last_seen:
-        st.session_state["_last_data_mtime"] = current
-        st.rerun(scope="app")
-
-
-_watch_for_fresh_data()
-
-
 tilt_df = app_state.load_tilt_df()
 
 if len(tilt_df) == 0:
@@ -321,11 +204,11 @@ if len(tilt_df) == 0:
 
 all_peaks = app_state.get_peaks(
     tilt_df,
-    min_prominence=min_prominence,
-    min_distance_days=min_distance_days,
-    min_height=min_height,
+    min_prominence=state.widgets.peaks.min_prominence,
+    min_distance_days=state.widgets.peaks.min_distance_days,
+    min_height=state.widgets.peaks.min_height,
 )
-recent_peaks = app_state.get_recent_peaks(all_peaks, n_peaks_for_fit)
+recent_peaks = app_state.get_recent_peaks(all_peaks, state.widgets.chart.n_peaks_for_fit)
 prediction = app_state.get_prediction(tilt_df, recent_peaks)
 
 
@@ -348,87 +231,134 @@ st.caption(
 )
 
 
-def _to_display_tz(ts: pd.Timestamp | None) -> pd.Timestamp | None:
-    """Convert a naive (assumed-UTC) timestamp into the user's chosen tz."""
-    if ts is None:
-        return None
-    aware = ts.tz_localize("UTC") if ts.tzinfo is None else ts
-    return aware.tz_convert(DISPLAY_TZ)
+# ── Compact top bar — entire bar is rendered inside one fragment.
+# Streamlit forbids fragments writing widgets into containers (columns)
+# created outside themselves, so the columns *and* their content all
+# live in ``_topbar_fragment``. Polling cadence flips between 1s (a
+# refresh is in flight) and 30s (idle, watching for cron-driven mtime
+# changes); the cadence is fixed at fragment registration and
+# transitions trigger a full ``st.rerun(scope="app")``.
+_REFRESH_RUN_EVERY = "1s" if state.refresh.running else "30s"
 
 
-def _fmt_date(ts: pd.Timestamp | None) -> str:
-    """Pretty long-form date for the big metric tiles."""
-    converted = _to_display_tz(ts)
-    if converted is None:
-        return "—"
-    # e.g. "Sat, Apr 18 · 3:23 PM HST"
-    return f"{converted.strftime('%a, %b %-d · %-I:%M %p')} {TZ_LABEL}"
+@st.fragment(run_every=_REFRESH_RUN_EVERY)
+def _topbar_fragment() -> None:
+    """Render the full topbar (refresh + tz + freshness caption).
 
+    Re-reads ``get_state()`` on every tick so the indicator and caption
+    reflect the freshest snapshot. Trigger ``st.rerun(scope="app")``
+    on running→idle transitions and on history-CSV mtime changes so
+    the rest of the page picks up new data without user action.
+    """
+    snap = get_state()
+    last_running = st.session_state.get("_kt_last_running")
+    last_mtime = st.session_state.get("_kt_last_mtime")
+    st.session_state["_kt_last_running"] = snap.refresh.running
+    st.session_state["_kt_last_mtime"] = snap.history_mtime
 
-# ── Compact top bar — replaces the old sidebar. ──────────────────────────
-# Refresh button + tz selector + freshness caption, in a single row just
-# above the primary navigation. The refresh button clears both ingest and
-# safety-alert caches and calls st.rerun() so the next pass starts with an
-# empty cache and the user sees the fresh data without a second click.
-_tb_refresh, _tb_tz, _tb_meta = st.columns([1, 1.3, 2.5])
-with _tb_refresh:
-    if st.button(
-        "🔄 Refresh",
-        width="stretch",
-        help="Re-fetch and re-trace all USGS tilt PNGs + safety alerts.",
-    ):
-        _acquired, _retry_in = try_acquire_refresh_slot(USER_REFRESH_COOLDOWN_SECONDS)
-        if _acquired:
-            _run_ingest_with_spinner()
-            app_state.clear_safety_alerts_cache()
-            st.session_state.last_ingest_at = None
-            st.rerun()
-        else:
-            st.toast(f"Just refreshed — try again in {int(_retry_in)}s")
-with _tb_tz:
-    st.selectbox(
-        "Time zone",
-        options=["HST (Pacific/Honolulu)", "UTC"],
-        key="tw_timezone_choice",
-        label_visibility="collapsed",
-        help="All displayed dates use this time zone. HST is local at Kīlauea.",
+    # Local tz derivation — keeps the meta caption correct on the tick
+    # where the user just changed the tz selectbox below. Pages pull
+    # tz off ``state.widgets.chart.timezone_choice`` via their own
+    # ``get_state()`` call on next rerun.
+    local_display_tz = (
+        "Pacific/Honolulu"
+        if snap.widgets.chart.timezone_choice.startswith("HST")
+        else "UTC"
     )
-with _tb_meta:
-    _last_data = tilt_df[DATE_COL].max()
-    if _last_data is not None and pd.notna(_last_data):
-        _last_aware = (
-            _last_data.tz_localize("UTC") if _last_data.tzinfo is None else _last_data
-        )
-        _age_seconds = int((pd.Timestamp.now(tz="UTC") - _last_aware).total_seconds())
-        if _age_seconds < 3600:
-            _age = f"{_age_seconds // 60}m ago"
-        elif _age_seconds < 86400:
-            _age = f"{_age_seconds // 3600}h ago"
+    local_tz_label = "HST" if local_display_tz == "Pacific/Honolulu" else "UTC"
+
+    def _local_fmt(ts: pd.Timestamp | None) -> str:
+        if ts is None or pd.isna(ts):
+            return "—"
+        aware = ts.tz_localize("UTC") if ts.tzinfo is None else ts
+        converted = aware.tz_convert(local_display_tz)
+        return f"{converted.strftime('%a, %b %-d · %-I:%M %p')} {local_tz_label}"
+
+    tb_refresh, tb_tz, tb_meta = st.columns([1, 1.3, 2.5])
+
+    with tb_refresh:
+        if snap.refresh.running:
+            label = snap.refresh.current_stage or "Refreshing…"
+            st.button(
+                f"⏳ {label}",
+                disabled=True,
+                width="stretch",
+                # Unique key per stage label so Streamlit treats each
+                # render as a fresh widget. ``started_utc`` keeps state
+                # from leaking across separate refresh runs.
+                key=f"kt_refresh_running_{snap.refresh.started_utc}_{label}",
+            )
         else:
-            _age = f"{_age_seconds // 86400}d ago"
-        _sample_meta = f"latest sample {_fmt_date(_last_data)} ({_age})"
-    else:
-        _sample_meta = "latest sample —"
+            if st.button(
+                "🔄 Refresh",
+                width="stretch",
+                help="Re-fetch and re-trace all USGS tilt PNGs + safety alerts.",
+                key="kt_refresh_idle",
+            ):
+                store = get_refresh_store()
+                if store.start("manual"):
+                    threading.Thread(
+                        target=_refresh_worker, args=(store,), daemon=True
+                    ).start()
+                    app_state.clear_safety_alerts_cache()
+                    st.rerun(scope="app")
+                else:
+                    st.toast("Refresh already in progress or cooling down")
 
-    if st.session_state.last_ingest_at is not None:
-        _successful = sum(1 for r in reports if r.error is None)
-        _total = len(reports)
-        _indicator = "🟢" if _successful == _total else ("🟡" if _successful else "🔴")
-        _poll_ts = pd.Timestamp(st.session_state.last_ingest_at)
-        _poll_meta = (
-            f"{_indicator} {_successful}/{_total} sources · "
-            f"last poll {_fmt_date(_poll_ts)}"
+    with tb_tz:
+        st.selectbox(
+            "Time zone",
+            options=["HST (Pacific/Honolulu)", "UTC"],
+            key="tw_timezone_choice",
+            label_visibility="collapsed",
+            help="All displayed dates use this time zone. HST is local at Kīlauea.",
         )
-    else:
-        _poll_meta = "no polls yet this session"
 
-    st.markdown(
-        f'<div class="kt-topbar__meta">'
-        f'<div>{_sample_meta}</div>'
-        f'<div>{_poll_meta}</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+    with tb_meta:
+        _last_data = tilt_df[DATE_COL].max()
+        if _last_data is not None and pd.notna(_last_data):
+            _last_aware = (
+                _last_data.tz_localize("UTC") if _last_data.tzinfo is None else _last_data
+            )
+            _age_seconds = int((pd.Timestamp.now(tz="UTC") - _last_aware).total_seconds())
+            if _age_seconds < 3600:
+                _age = f"{_age_seconds // 60}m ago"
+            elif _age_seconds < 86400:
+                _age = f"{_age_seconds // 3600}h ago"
+            else:
+                _age = f"{_age_seconds // 86400}d ago"
+            _sample_meta = f"latest sample {_local_fmt(_last_data)} ({_age})"
+        else:
+            _sample_meta = "latest sample —"
+
+        if _last_poll_ts is not None:
+            _successful = sum(1 for r in reports if r.error is None)
+            _total = len(reports)
+            _indicator = "🟢" if _successful == _total else ("🟡" if _successful else "🔴")
+            _poll_meta = (
+                f"{_indicator} {_successful}/{_total} sources · "
+                f"last poll {_local_fmt(pd.Timestamp(_last_poll_ts))}"
+            )
+        else:
+            _poll_meta = "no polls yet"
+
+        st.markdown(
+            f'<div class="kt-topbar__meta">'
+            f'<div>{_sample_meta}</div>'
+            f'<div>{_poll_meta}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    # Transition detector — flip back to slow cadence + repaint shell
+    # when the running flag clears, and when on-disk data changes.
+    if last_running is True and snap.refresh.running is False:
+        st.rerun(scope="app")
+    if last_mtime is not None and snap.history_mtime > last_mtime:
+        st.rerun(scope="app")
+
+
+_topbar_fragment()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

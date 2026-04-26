@@ -45,8 +45,14 @@ from kilauea_tracker.ui.diagnostics import (
 if TYPE_CHECKING:
     from kilauea_tracker.ingest.pipeline import IngestReport
 
-_timezone_choice = st.session_state.get("tw_timezone_choice", "HST (Pacific/Honolulu)")
-DISPLAY_TZ = "Pacific/Honolulu" if _timezone_choice.startswith("HST") else "UTC"
+from kilauea_tracker.state import get_state
+
+state = get_state()
+DISPLAY_TZ = (
+    "Pacific/Honolulu"
+    if state.widgets.chart.timezone_choice.startswith("HST")
+    else "UTC"
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -90,28 +96,30 @@ reconcile_report = ingest_result.reconcile
 
 all_peaks = app_state.get_peaks(
     tilt_df,
-    min_prominence=st.session_state["adv_min_prominence"],
-    min_distance_days=st.session_state["adv_min_distance_days"],
-    min_height=st.session_state["adv_min_height"],
+    min_prominence=state.widgets.peaks.min_prominence,
+    min_distance_days=state.widgets.peaks.min_distance_days,
+    min_height=state.widgets.peaks.min_height,
 )
-recent_peaks = app_state.get_recent_peaks(all_peaks, st.session_state["tw_n_peaks_for_fit"])
+recent_peaks = app_state.get_recent_peaks(all_peaks, state.widgets.chart.n_peaks_for_fit)
 prediction = app_state.get_prediction(tilt_df, recent_peaks)
 
 
-# Read overlay-layer toggles from session_state. The entrypoint seeds the
-# defaults so these keys always exist.
-layer_dots = st.session_state["ovl_dots"]
-layer_bbox = st.session_state["ovl_bbox"]
-layer_yticks = st.session_state["ovl_yticks"]
-layer_ygrid = st.session_state["ovl_ygrid"]
-layer_corners = st.session_state["ovl_corners"]
-layer_blue = st.session_state["ovl_blue"]
-layer_legend = st.session_state["ovl_legend"]
-layer_dropcols = st.session_state["ovl_dropcols"]
-layer_outliers = st.session_state["ovl_outliers"]
-layer_now = st.session_state["ovl_now"]
-layer_green = st.session_state["ovl_green"]
-layer_csv = st.session_state["ovl_csv"]
+# Overlay-layer toggles — typed read off the snapshot. Streamlit's
+# widget→key auto-binding (in the inspector expander further down) still
+# does the writes; we just read here.
+_ovl = state.widgets.overlays
+layer_dots = _ovl.dots
+layer_bbox = _ovl.bbox
+layer_yticks = _ovl.yticks
+layer_ygrid = _ovl.ygrid
+layer_corners = _ovl.corners
+layer_blue = _ovl.blue
+layer_legend = _ovl.legend
+layer_dropcols = _ovl.dropcols
+layer_outliers = _ovl.outliers
+layer_now = _ovl.now
+layer_green = _ovl.green
+layer_csv = _ovl.csv
 
 
 # ─────────────────────────────────────────────────────────────────────────────

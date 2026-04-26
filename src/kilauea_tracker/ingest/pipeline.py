@@ -32,11 +32,9 @@ Usage from the Streamlit app:
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import logging
 import math
-import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -922,43 +920,12 @@ def data_age_seconds() -> float:
     return (datetime.now(tz=UTC) - newest).total_seconds()
 
 
-REFRESH_TIMESTAMP_FILE = LAST_GOOD_CALIBRATION.parent / "last_refresh.json"
-
-
-def try_acquire_refresh_slot(cooldown_seconds: int) -> tuple[bool, float]:
-    """File-coordinated cooldown for ingest runs.
-
-    Returns `(acquired, seconds_until_next_allowed)`. If `acquired` is True,
-    the caller may proceed with a real ingest and the timestamp file has
-    been updated to reflect this run. If False, a recent refresh already
-    covered the window — the caller should skip the fetch and reuse the
-    on-disk data.
-
-    Coordinates across all sessions in one Streamlit Cloud container via an
-    `fcntl.flock` exclusive lock on `data/last_refresh.json`. Linux/macOS
-    only — Streamlit Cloud is Linux. Windows portability would require a
-    swap to `portalocker`.
-    """
-    REFRESH_TIMESTAMP_FILE.parent.mkdir(parents=True, exist_ok=True)
-    REFRESH_TIMESTAMP_FILE.touch(exist_ok=True)
-    with REFRESH_TIMESTAMP_FILE.open("r+") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        try:
-            raw = fh.read().strip()
-            try:
-                last_at = float(json.loads(raw).get("last_refresh_utc", 0)) if raw else 0.0
-            except (json.JSONDecodeError, ValueError, TypeError):
-                last_at = 0.0
-            now = time.time()
-            elapsed = now - last_at
-            if elapsed < cooldown_seconds:
-                return False, cooldown_seconds - elapsed
-            fh.seek(0)
-            fh.truncate()
-            json.dump({"last_refresh_utc": now}, fh)
-            return True, 0.0
-        finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+# Refresh-cooldown gating moved to ``kilauea_tracker.state.RefreshStore``
+# (see ``src/kilauea_tracker/state/refresh_store.py``). The store owns
+# both the cooldown lock and the richer ``running / current_stage /
+# finished_utc`` schema the topbar fragment subscribes to. The legacy
+# ``data/last_refresh.json`` file is obsolete; the store reads/writes
+# ``data/refresh_status.json`` instead.
 
 
 def _deserialize_run_report(payload: dict) -> IngestRunResult:

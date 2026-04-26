@@ -33,7 +33,14 @@ from .safety_alerts import SafetyAlertSummary, fetch_safety_alerts
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@st.cache_data(show_spinner="Loading tilt history…")
+# show_spinner=False on purpose. The cache invalidates whenever
+# `data/tilt_history.csv` is rewritten (cron pull or manual refresh), and
+# until 2026-04 the default spinner here flashed a SECOND fullscreen
+# overlay on top of the inline Refresh-button indicator — one visible
+# overlay per Refresh click is enough. The CSV read itself is fast
+# (~tens of ms); a cold-start delay lands inside Streamlit's own page-
+# render skeleton and doesn't need a separate label.
+@st.cache_data(show_spinner=False)
 def _read_tilt_history_cached(path_str: str, mtime: float) -> pd.DataFrame:
     """Streamlit-cache shim. Mtime is the invalidation key."""
     return load_history(Path(path_str))
@@ -47,12 +54,6 @@ def load_tilt_df() -> pd.DataFrame:
     """Read ``data/tilt_history.csv``. Cached on file mtime so a cron-driven
     cache update on disk forces a re-read on the next rerun."""
     return _read_tilt_history_cached(str(HISTORY_CSV), _history_mtime())
-
-
-def history_mtime() -> float:
-    """Public accessor for the history CSV mtime — pages use it to detect
-    fresh data and trigger reruns."""
-    return _history_mtime()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

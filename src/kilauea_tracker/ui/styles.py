@@ -426,122 +426,21 @@ html, body, [class*="css"] {{
     margin-bottom: var(--space-xs);
 }}
 
-/* Loading spinner / status overlay — viewport-centered, volcano-tinted.
-   Two cache-miss surfaces fire here: ``st.cache_data(show_spinner="…")``
-   for the fast tilt-history CSV read, and an ``st.status`` widget for the
-   slow ``cached_ingest`` path that walks five USGS sources and reconciles.
-   Both render at module scope before any content is on screen. Streamlit's
-   default placement honors the wide-layout column (which makes the inline
-   placeholder land middle-LEFT, not viewport-center), so we promote the
-   element to a fixed full-viewport overlay with a dim+blur backdrop. The
-   icon keeps its lava drop-shadow and gets a slow pulsing ring for a touch
-   of life without crossing into ``cute``. */
-/* The running st.status widget is rendered as an expander whose summary
-   contains an ``<i data-testid="stExpanderIconSpinner">`` Material Symbols
-   icon. That icon only exists while the status is in the "running" state —
-   Streamlit swaps it for a check / cross when the state flips to complete
-   or error. The ``:has()`` guard means our overlay only covers the viewport
-   while ingest is actually working, and stops matching the moment work
-   finishes — regular expanders elsewhere in the app are left untouched.
-   The toolbar running indicator (``stStatusWidget``) is a different element
-   and we deliberately do NOT target it here. */
-[data-testid="stSpinner"],
-[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) {{
-    position: fixed;
-    inset: 0;
-    z-index: 9999;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: var(--space-lg);
-    padding: var(--space-xl) var(--space-lg);
-    text-align: center;
-    background: rgba(15, 20, 25, 0.92);
-    -webkit-backdrop-filter: blur(6px);
-    backdrop-filter: blur(6px);
+/* Refresh-in-progress: while ingest runs, the click handler swaps the
+   live Refresh button for a disabled ``st.button`` whose key starts
+   with ``kt_refresh_running_`` (an incrementing suffix avoids
+   Streamlit's same-run duplicate-key error). Streamlit wraps keyed
+   widgets in ``.st-key-<key>`` — match the prefix so styling applies
+   regardless of stage number. */
+[class*="st-key-kt_refresh_running_"] [data-testid="stBaseButton-secondary"] {{
+    cursor: progress;
 }}
-/* Inner <details> stretches to full width by default; force it to shrink
-   to its content so the summary lands in the true horizontal center. */
-[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) > details {{
-    width: auto;
-    max-width: 90vw;
-    border: none;
-    background: transparent;
-    box-shadow: none;
-}}
-/* The visible row: spinner icon + status label. Render as an inline flex
-   so the icon and label sit side-by-side and the whole thing is sized to
-   content (centerable by the parent overlay's flex layout). */
-[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) > details > summary {{
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: var(--space-md);
-    padding: var(--space-sm) var(--space-md);
-    background: transparent;
-    border: none;
-    list-style: none;
-    cursor: default;
-}}
-[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) > details > summary::-webkit-details-marker {{ display: none; }}
-[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) > details > summary::marker {{ content: ""; }}
-/* Hide the collapsed body region — when expanded=False there's nothing
-   useful in it and we don't want it adding stray whitespace below the
-   centered summary. */
-[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) [data-testid="stExpanderDetails"] {{
-    display: none !important;
-}}
-[data-testid="stSpinner"] > div,
-[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) [data-testid="stMarkdownContainer"] p {{
-    font-size: 1.5rem;
-    font-weight: 600;
-    color: var(--steam);
-    letter-spacing: 0.01em;
-    margin: 0;
-}}
-@keyframes kt-spin {{
-    from {{ transform: rotate(0deg); }}
-    to   {{ transform: rotate(360deg); }}
-}}
-@keyframes kt-spinner-pulse {{
-    0%, 100% {{ box-shadow: 0 0 0 0 rgba(255, 107, 53, 0.55); }}
-    50%      {{ box-shadow: 0 0 0 18px rgba(255, 107, 53, 0); }}
-}}
-/* Spin + pulse compose because they target separate properties (transform
-   vs box-shadow). The bg/border/padding resets clear whatever the
-   underlying Streamlit emotion classes were drawing on the <i> — that
-   was the rectangular "bounding box" visible behind a non-spinning glyph
-   in the broken-state screenshot. ``display: inline-block`` so the pulse
-   box-shadow renders around the icon's full box rather than its line
-   box (an inline ``<i>`` would clip the shadow at the baseline). */
-[data-testid="stSpinner"] svg,
-[data-testid="stSpinner"] i,
-[data-testid="stExpanderIconSpinner"] {{
-    color: var(--lava) !important;
-    background: transparent !important;
-    border: none !important;
-    padding: 0 !important;
-    border-radius: 50%;
-    font-size: 2.25rem !important;
-    display: inline-block;
-    filter: drop-shadow(0 0 14px rgba(255, 107, 53, 0.55));
-    animation: kt-spin 1s linear infinite,
-               kt-spinner-pulse 2s ease-out infinite;
-}}
-/* Streamlit's spinner row and the expander's <details>/<summary> default
-   to ``overflow: hidden`` (and the summary clips at the line box), which
-   chops the outer edge off the pulsing box-shadow. Force ``overflow:
-   visible`` all the way down so the 18px ring renders fully. The icon
-   inside the expander summary is wrapped in an extra emotion-styled
-   ``<span>`` — that's the actual clipping ancestor in the rendered DOM,
-   so ``:has()`` it explicitly. */
-[data-testid="stSpinner"],
-[data-testid="stSpinner"] > div,
-[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) > details,
-[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) > details > summary,
-[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) span:has([data-testid="stExpanderIconSpinner"]) {{
-    overflow: visible !important;
+/* Pin the topbar's first-column height to the live-button height so the
+   live-button → disabled-button swap during refresh doesn't reflow the
+   row. Targets only horizontal blocks whose first column contains a
+   stButton — narrow enough to skip unrelated horizontal blocks. */
+.stHorizontalBlock:has(> .stColumn:first-child [data-testid="stButton"]) > .stColumn {{
+    min-height: 42px;
 }}
 
 /* Breakpoints — explicit, not Streamlit defaults. */
@@ -554,7 +453,5 @@ html, body, [class*="css"] {{
     .kt-hero {{ padding: var(--space-md); }}
     .kt-hero__headline {{ font-size: 3rem; }}
     .kt-topbar {{ flex-direction: column; align-items: stretch; }}
-    [data-testid="stSpinner"] > div,
-    [data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]) [data-testid="stMarkdownContainer"] p {{ font-size: 1.25rem; }}
 }}
 </style>"""

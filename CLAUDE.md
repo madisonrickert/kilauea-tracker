@@ -48,6 +48,7 @@ Tesseract is a system dep: `brew install tesseract` locally; `packages.txt` inst
 - `ingest/` — `fetch.py` (HTTP w/ `If-Modified-Since`), `calibrate.py` (OCR axes), `trace.py` (HSV mask + per-column extraction), `pipeline.py` (orchestration), `exceptions.py` (typed boundary errors).
 - `model.py`, `reconcile.py`, `peaks.py`, `safety_alerts.py` — **pure** compute layers (no I/O).
 - `cache.py`, `archive.py` — CSV I/O.
+- `state/` — unified `AppState` accessor. `snapshot.py` (frozen dataclasses), `refresh_store.py` (cross-thread `RefreshStore` singleton), `widgets.py` (typed read over `st.session_state`), `accessor.py` (`get_state()`). See "Application state" below.
 - `ui/` — Streamlit tab modules + palette/styles.
 - `tests/fixtures/` — committed dated PNGs; intentional regression alarm for OCR drift.
 - `.github/workflows/refresh-cache.yml` — daily cron (12:07 UTC) commits cache updates back to `main`.
@@ -76,12 +77,23 @@ All under `data/`, **always committed** (the daily cron's `git add data/` sweeps
 - `run_reports/*.json` — per-run diagnostics, bounded by `_prune_old_run_reports` to `MAX_RUN_REPORTS = 90`.
 - `uwd_digital_az300.csv`, `y_slope_history.json` — processed digital reference and Phase-1a slope history.
 
-**Gitignored** (regenerate; never commit): `data/raw/uwd_digital/UWD_*.csv` (regenerate via `scripts/import_digital_data.py`), `data/last_refresh.json` (per-container fcntl lock state), `NOTES.md`.
+**Gitignored** (regenerate; never commit): `data/raw/uwd_digital/UWD_*.csv` (regenerate via `scripts/import_digital_data.py`), `data/refresh_status.json` (per-deployment refresh-state singleton — see `RefreshStore`), `NOTES.md`.
 
 ## Refresh model
 
 - **Daily cron** runs the ingest pipeline and commits cache updates back to `main`. The push triggers a Streamlit Cloud redeploy. Viewers see at-most-24-hour-stale data even with no live traffic.
-- **In-app refresh** is non-blocking: the page renders immediately from the committed cache, then a background thread refreshes and the app reruns when new data lands. Cooldown via `try_acquire_refresh_slot` against `data/last_refresh.json` (fcntl flock). Don't reintroduce a blocking refresh — page load must show fresh data.
+- **In-app refresh** is non-blocking and unified across both manual + background paths. Both go through `state.RefreshStore` (`@st.cache_resource` singleton, fcntl-locked persistence to `data/refresh_status.json`): `store.start("manual" | "background")` → spawn daemon thread → `store.advance(stage)` callback feeds the topbar fragment → `store.complete()` (or `fail()`). The topbar fragment polls the store at 1s while running, 30s while idle, and triggers `st.rerun(scope="app")` on transitions. **Don't reintroduce a synchronous refresh path** — both manual and background must be async daemon-thread driven so the topbar indicator can update independently of the script's main rerun cycle.
+
+## Application state
+
+`state.get_state()` (`src/kilauea_tracker/state/accessor.py`) returns a frozen `AppState` view that pages and the shell read from. Hybrid storage by design:
+
+- **Refresh state** (`RefreshSnapshot`) — cross-thread, cross-tab, cross-restart. Lives in `RefreshStore` (`@st.cache_resource` singleton + JSON file). Only the store mutates it; views read snapshots. Stale-refresh detector treats `started_utc > 5min` ago without `finished_utc` as not-running (covers daemon crashes).
+- **Widget state** (`WidgetSnapshot`) — per-tab. Streamlit's widget→key auto-binding still owns the writes (sliders/selectboxes keep their `key="adv_..."` strings); the snapshot is a typed *read* over `st.session_state`. `widget_snapshot()` self-seeds defaults idempotently so pages work standalone — required because v1 multipage auto-discovery (any `pages/` dir) runs each page as an independent script and the shell's `init_widget_defaults()` doesn't fire on deep links to `/now`, `/chart`, etc.
+
+**Don't** poke `st.session_state["adv_min_prominence"]` directly from page bodies — go through `state = get_state(); state.widgets.peaks.min_prominence`. Adding a new widget means: (1) extend `WIDGET_DEFAULTS` in `state/widgets.py`, (2) add the field to the right sub-dataclass in `state/snapshot.py`, (3) read via the typed accessor.
+
+**Streamlit fragment gotcha:** fragments cannot write widgets to containers (columns, expanders, etc.) created *outside* the fragment. If you wrap the topbar refresh button in a fragment, the columns must be created *inside* the same fragment — see `_topbar_fragment` in `streamlit_app.py`. Conditional `run_every` (`"1s" if running else "30s"`) is fixed at registration; transitions trigger `st.rerun(scope="app")` so the fragment re-registers with the new cadence.
 
 ## Coding conventions
 
@@ -129,7 +141,7 @@ Python 3.11+ is pinned (`pyproject.toml`). Use modern syntax everywhere; this is
 **Tooling**
 
 - `uv run ruff check .` before committing structural changes.
-- Tests mirror module names (`test_<module>.py`). Pytest config in `pyproject.toml`: `addopts = "-q --strict-markers"`. Currently 63+ tests across model, peaks, cache, plotting, calibration, trace, ingest, reconcile, archive, safety alerts, and UI structure.
+- Tests mirror module names (`test_<module>.py`). Pytest config in `pyproject.toml`: `addopts = "-q --strict-markers"`. Currently 280+ tests across model, peaks, cache, plotting, calibration, trace, ingest, reconcile, archive, safety alerts, refresh-store, app-state-snapshot, and UI structure.
 - The dated PNG fixtures in `tests/fixtures/` are an *intentional* OCR-drift alarm: when `test_calibrate.py` fails, the question is "did USGS change their plot rendering?" — not "should we update the fixture?".
 
 ## Things to avoid
@@ -137,5 +149,10 @@ Python 3.11+ is pinned (`pyproject.toml`). Use modern syntax everywhere; this is
 - Never `source .venv/bin/activate && python …` — always `uv run python …`.
 - Never `git add -A` or `git add .` from the repo root — `NOTES.md` and other personal scratch can sneak in. Stage files explicitly.
 - Don't reintroduce user-initiated "Refresh" buttons as the primary path. Page load must always show the freshest available data; refresh is background.
+- Don't reintroduce a synchronous manual refresh — both manual and background ingest must be async daemon-thread driven via `RefreshStore`. The polling fragment is the only viable indicator surface (see "Refresh model").
+- Don't read `st.session_state["..."]` directly from page bodies — use `get_state()` and the typed `state.widgets.X.Y` accessors. The string-key sprawl is a regression.
+- Don't write widgets in a Streamlit fragment to columns/containers created outside the fragment — Streamlit raises `StreamlitFragmentWidgetsNotAllowedOutsideError`. Create the layout inside the fragment.
+- Don't put module-level mutable state in compute layers — pure on purpose. State that needs to cross threads belongs in `RefreshStore` (or another `@st.cache_resource` singleton with the same locking discipline).
 - Don't add a `min_height` floor back to peak detection — the regime shifts; rely on prominence.
 - Don't add I/O to `model.py` / `reconcile.py` / `peaks.py` / `safety_alerts.py`. They are pure on purpose.
+- Don't add a fullscreen modal overlay (`position: fixed; inset: 0`) for transient UI — Streamlit's column / `stMain` wrappers can apply `contain` / `transform` that traps fixed positioning to a sub-tree, making the overlay render in the wrong place AND flicker on every delta-update. Swap the triggering element for an inline indicator in its own slot instead.

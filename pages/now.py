@@ -17,15 +17,19 @@ import pandas as pd
 import streamlit as st
 
 from kilauea_tracker import app_state
+from kilauea_tracker.state import get_state
 from kilauea_tracker.ui import cameras, hero, state_banner
 
 if TYPE_CHECKING:
     from kilauea_tracker.safety_alerts import NWSAlert, USGSVolcanoStatus
 
-# Display-tz derivation matches the entrypoint's selectbox-bound widget.
-# Each page recomputes its own copy; the cost is a single dict lookup.
-_timezone_choice = st.session_state.get("tw_timezone_choice", "HST (Pacific/Honolulu)")
-DISPLAY_TZ = "Pacific/Honolulu" if _timezone_choice.startswith("HST") else "UTC"
+# One snapshot read per rerun — every widget value the page needs.
+state = get_state()
+DISPLAY_TZ = (
+    "Pacific/Honolulu"
+    if state.widgets.chart.timezone_choice.startswith("HST")
+    else "UTC"
+)
 TZ_LABEL = "HST" if DISPLAY_TZ == "Pacific/Honolulu" else "UTC"
 
 
@@ -103,11 +107,11 @@ def _render_nws_alert(alert: NWSAlert) -> None:
 tilt_df = app_state.load_tilt_df()
 all_peaks = app_state.get_peaks(
     tilt_df,
-    min_prominence=st.session_state["adv_min_prominence"],
-    min_distance_days=st.session_state["adv_min_distance_days"],
-    min_height=st.session_state["adv_min_height"],
+    min_prominence=state.widgets.peaks.min_prominence,
+    min_distance_days=state.widgets.peaks.min_distance_days,
+    min_height=state.widgets.peaks.min_height,
 )
-recent_peaks = app_state.get_recent_peaks(all_peaks, st.session_state["tw_n_peaks_for_fit"])
+recent_peaks = app_state.get_recent_peaks(all_peaks, state.widgets.chart.n_peaks_for_fit)
 prediction = app_state.get_prediction(tilt_df, recent_peaks)
 eruption_state, eruption_state_info = app_state.get_eruption_state(tilt_df, prediction)
 safety = app_state.get_safety_alerts()

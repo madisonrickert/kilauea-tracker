@@ -24,11 +24,12 @@ htmlcov/
 # pipeline). Run scripts/import_digital_data.py to regenerate.
 data/raw/uwd_digital/UWD_*.csv
 
-# Refresh-cooldown lock — written on every ingest (background or manual)
-# to coordinate concurrent users via fcntl.flock. Only needs to coordinate
-# within one Streamlit Cloud container's lifetime; cross-deploy persistence
-# isn't required, so we don't ship it in git.
-data/last_refresh.json
+# Refresh-state singleton — written by RefreshStore on every transition
+# (start / advance / complete / fail) under fcntl.flock. Carries the
+# in-flight refresh's started_utc / current_stage / finished_utc / source
+# / last_error. Cross-thread + cross-tab + cross-container-restart, but
+# scoped to one deployment; never shipped in git.
+data/refresh_status.json
 
 # Personal scratch / backlog — see CLAUDE.md (eventually) for content.
 NOTES.md
